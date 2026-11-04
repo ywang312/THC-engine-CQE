@@ -1,9 +1,12 @@
 # Conventions
 
-Every statement on this page is enforced by `tests/test_conventions.py`, which
-checks it against an independent Jordan–Wigner Fock-space implementation
-(`thc_engine_cqe.testing.fock`). If your in-house code uses different
-conventions, convert at the boundary using the maps below.
+The operator and RDM conventions on this page are checked by
+`tests/test_conventions.py` against an independent Jordan–Wigner Fock-space
+implementation (`thc_engine_cqe.testing.fock`); the factorization, optimizer and
+qubit sections are checked by the tests of those modules (`test_factor_*.py`,
+`test_generator_factor.py`, `test_optimizers.py`, `test_pauli.py`). If your
+in-house code uses different conventions, convert at the boundary using the maps
+below.
 
 ## Orbitals and integrals
 
@@ -76,11 +79,23 @@ the unconjugated sum is generally not a descent direction. The driver
 slope −Re Σ g·A and flips it if needed.
 
 Because the generators are spin-free, the exact CQE preserves S² (singlets stay
-singlets). M1 uses **steepest descent with an exact line search**. This
-converges slowly in the tail (it zig-zags), so it serves as a reference
-trajectory, not as a production optimizer. With `run_cqe(..., eps_candidates=...)`
-each step instead takes the lowest energy among a few fixed step sizes, as a
-hardware run would; such steps can raise the energy.
+singlets). The default is **steepest descent with an exact line search**, the M1
+reference trajectory; it converges slowly in the tail (it zig-zags).
+`run_cqe(..., optimizer="cg" | "lbfgs")` uses nonlinear conjugate-gradient
+(Polak–Ribière+ by default) or L-BFGS directions d instead of g, with
+Ψ ← exp(ε D)Ψ, D = Σ d·e. Both work in the local coordinates of the current
+iterate, with gradient −conj(A) and the real inner product Re Σ conj(u) v
+(`thc_engine_cqe.optimizers`; this is the "locally parameterized" quasi-Newton
+CQE of Smart, Boyn & Mazziotti, JCTC 18, 5286 (2022)). With
+`run_cqe(..., eps_candidates=...)` each step instead takes the lowest energy among
+a few fixed step sizes, as a hardware run would; such steps can raise the energy.
+
+`residual_estimator` and `energy_estimator` replace the exact residual and the
+energies in every decision of the driver (direction, slope checks, line-search
+bracket, candidate choice, stopping tests) by estimates, for example from a
+finite-shot model. The exact quantities are still recorded next to the estimates.
+An estimated residual must have the structure of A (pair symmetry and
+A[q,p,s,r] = −conj(A[p,q,r,s]); `optimizers.symmetrize_residual` projects onto it).
 
 ## Reduced Hamiltonian and variance
 
@@ -139,6 +154,29 @@ F_n = −i Σ_{k<n} c_k Q_k². It is the orthogonal projection g_n of g, so its 
 is −‖g_n‖² and every truncation is a descent direction. Odd truncations of real
 generators split a conjugate pair and are complex; `run_cqe` propagates them
 exactly, and the state becomes complex.
+
+## Qubit conventions (`measure.pauli`)
+
+The module docstring of `thc_engine_cqe.measure.pauli` is the full reference;
+the essentials:
+
+- **Qubit orders.** `QubitMapping(N, "blocked")` (default) puts (p, α) on qubit p
+  and (p, β) on qubit N + p, the mode order of the Fock oracle below.
+  `"interleaved"` uses 2p + σ, OpenFermion's order.
+- **Basis states.** Bit k of the index b is the occupation of qubit k, and
+  |b⟩ = (a†₀)^{b₀}(a†₁)^{b₁}⋯|vac⟩ in ascending qubit order. Dense vectors are
+  indexed by b (qubit 0 least significant); OpenFermion's sparse matrices use the
+  bit-reversed index.
+- **Pauli strings.** P(x, z) = i^{|x∧z|} X^x Z^z for bitmasks x, z, so
+  P(1,1) = Y on one qubit and every P is Hermitian.
+- **Jordan–Wigner.** a_k = Z_{<k}(X_k + iY_k)/2. Majoranas γ_{2k} = Z_{<k}X_k and
+  γ_{2k+1} = Z_{<k}Y_k.
+- **CI vectors.** `QubitState.from_ci` maps the PySCF determinant (α string,
+  β string) to (Π_{p∈α↑} a†_{pα})(Π_{q∈β↑} a†_{qβ})|vac⟩. In blocked order that is
+  b = α_bits | (β_bits << N) with sign +1; other orders include the reordering
+  sign. `pyscf_sign=True` adds PySCF's global sign (−1)^{nα(nα−1)/2 + nβ(nβ−1)/2}.
+- **Expectations** are the bare ⟨ψ|P|ψ⟩ by default; pass `normalize=True` for
+  ⟨ψ|P|ψ⟩/⟨ψ|ψ⟩.
 
 ## Spin-orbital conventions (Fock-space oracle only)
 
