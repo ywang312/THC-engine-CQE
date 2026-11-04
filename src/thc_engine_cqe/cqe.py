@@ -80,7 +80,7 @@ def generator_norm_estimate(space: FCISpace, g: np.ndarray, psi: np.ndarray, ite
         x = y / est
     return est
 
-
+# to do: this line_search should also provide a numerical option to select the lowest energy from a few fixed eps to mimic resource-friendly hardware execution
 def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid: int = 64) -> tuple[float, float]:
     """Minimize E(eps) on [0, eps_max]: coarse grid, then bounded Brent refinement."""
     grid = np.linspace(0.0, eps_max, n_grid + 1)
