@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "thc-engine-cqe"
+version = "0.1.0.dev0"
+description = "Tensor hypercontraction and double-factorization tools for the contracted quantum eigensolver (CQE)"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "pyscf>=2.4",
+    "h5py>=3.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+ft = ["openfermion>=1.6"]  # optional cross-checks and fault-tolerant costing
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: longer-running numerical checks (deselect with -m 'not slow')",
+]

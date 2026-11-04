@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Environments
+.venv/
+venv/
+
+# Benchmark outputs (regenerate with the scripts in benchmarks/)
+results/
+*.h5
+*.chk
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
