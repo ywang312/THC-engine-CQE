@@ -89,6 +89,9 @@ iterate, with gradient −conj(A) and the real inner product Re Σ conj(u) v
 CQE of Smart, Boyn & Mazziotti, JCTC 18, 5286 (2022)). With
 `run_cqe(..., eps_candidates=...)` each step instead takes the lowest energy among
 a few fixed step sizes, as a hardware run would; such steps can raise the energy.
+Candidates may be zero (stay) or negative (step against d, useful when a noisy
+direction is uphill for the true energy); the exact line search is one-sided,
+on [0, ε_max], because the driver only searches along descent directions.
 
 `residual_estimator` and `energy_estimator` replace the exact residual and the
 energies in every decision of the driver (direction, slope checks, line-search

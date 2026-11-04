@@ -145,10 +145,17 @@ def generator_norm_estimate(space: FCISpace, g: np.ndarray, psi: np.ndarray, ite
 
 
 def _candidate_steps(candidates: Sequence[float]) -> np.ndarray:
+    """Fixed step sizes: a non-empty sequence of finite reals.
+
+    Zero (stay at the current state) and negative values (a step against the
+    direction) are allowed. A negative step pays off when the direction is
+    uphill for the true energy, which happens with noisy residual estimates;
+    with the exact residual every direction the driver uses is a descent
+    direction, so the exact line search stays on eps >= 0.
+    """
     cand = np.asarray(candidates, dtype=float).ravel()
-    if cand.size == 0 or not np.all(cand > 0):
-        # i think negative values are allowed, so did the brent search, a small negative value is possible
-        raise ValueError("candidates must be a non-empty sequence of positive step sizes")
+    if cand.size == 0 or not np.all(np.isfinite(cand)):
+        raise ValueError("candidates must be a non-empty sequence of finite step sizes")
     return cand
 
 
@@ -156,11 +163,17 @@ def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid:
                 candidates: Sequence[float] | None = None) -> tuple[float, float]:
     """Minimize E(eps) on [0, eps_max]: coarse grid, then bounded Brent refinement.
 
+    The search is one-sided: the grid starts at 0 and the Brent refinement is
+    bounded by the neighbouring grid points, so the result is never negative.
+    The driver only searches along descent directions (dE/deps < 0 at 0), whose
+    minimum lies at eps > 0.
+
     With ``candidates``, E is evaluated only at those fixed step sizes and the
-    lowest is returned; ``eps_max`` and ``n_grid`` are then ignored. This mimics
-    a resource-friendly hardware CQE, where each energy costs a set of
-    measurements: one energy per candidate and no refinement. The lowest
-    candidate is taken even if it raises the energy, as such a run would.
+    lowest is returned (the first on ties); ``eps_max`` and ``n_grid`` are then
+    ignored. This mimics a resource-friendly hardware CQE, where each energy
+    costs a set of measurements: one energy per candidate and no refinement.
+    The lowest candidate is taken even if it raises the energy, as such a run
+    would. Candidates may be zero or negative (:func:`_candidate_steps`).
     """
     if candidates is not None:
         cand = _candidate_steps(candidates)
@@ -207,36 +220,56 @@ def _estimate_residual(residual_estimator: ResidualEstimator, rd: ResidualData, 
 
 
 def _choose_candidate(energy: Callable[[float], float], prop: KrylovPropagator,
-                      candidates: Sequence[float], energy_estimator: EnergyEstimator):
-    """Fixed-candidate step chosen by estimated energies: (eps, E, psi, E_est), E exact."""
+                      candidates: Sequence[float], energy_estimator: EnergyEstimator,
+                      psi: np.ndarray, e_current: float, e_current_est: float):
+    """Fixed-candidate step chosen by estimated energies: (eps, E, psi, E_est), E exact.
+
+    A zero candidate is the current state: it reuses the current energy and its
+    estimate, without a new estimator call.
+    """
     cand = _candidate_steps(candidates)
-    exact = np.array([energy(e) for e in cand])
-    states = [normalize(prop.state(float(e))) for e in cand]
-    est = np.array([_estimate_energy(energy_estimator, float(x), s, "candidate")
-                    for x, s in zip(exact, states)])
+    exact, states, est = [], [], []
+    for e in cand:
+        if e == 0.0:
+            exact.append(e_current)
+            states.append(psi)
+            est.append(e_current_est)
+            continue
+        x = energy(float(e))
+        st = normalize(prop.state(float(e)))
+        exact.append(x)
+        states.append(st)
+        est.append(_estimate_energy(energy_estimator, float(x), st, "candidate"))
     i = int(np.argmin(est))
     return float(cand[i]), float(exact[i]), states[i], float(est[i])
 
 
 def _krylov_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: float,
                  tol: float, candidates: Sequence[float] | None = None,
-                 energy_estimator: EnergyEstimator | None = None):
+                 energy_estimator: EnergyEstimator | None = None,
+                 e_current: float | None = None, e_current_est: float | None = None):
     """Line search along exp(eps G) psi: (eps, E, psi_new, n_evals, E_est or None).
 
     With ``energy_estimator`` (which requires ``candidates``) the candidate
-    with the lowest estimated energy is taken; E is its exact energy.
+    with the lowest estimated energy is taken; E is its exact energy. A zero
+    candidate is the current state ``psi`` with energy ``e_current`` (and
+    estimate ``e_current_est``); it is not counted as an evaluation.
     """
     space = ham.space
 
     def matvec(v):
         return two_body(space, g, v)
 
+    check_eps = None
     if candidates is not None:
-        # One Krylov space, accurate up to the largest candidate, serves all of them.
-        eps_max = float(np.max(candidates))
+        # One Krylov space, accurate up to the largest |candidate|, serves all of them.
+        cand = _candidate_steps(candidates)
+        eps_max = float(np.max(np.abs(cand)))
+        if cand.min() < 0:
+            check_eps = (eps_max, -eps_max)
     n_evals = 0
     for _ in range(6):
-        prop = KrylovPropagator(matvec, psi, eps_max=eps_max, tol=tol)
+        prop = KrylovPropagator(matvec, psi, eps_max=eps_max, tol=tol, check_eps=check_eps)
         V = prop.basis()
         HV = np.column_stack([ham.apply(V[:, j].reshape(space.shape)).ravel() for j in range(V.shape[1])])
         hproj = V.conj().T @ HV
@@ -248,10 +281,18 @@ def _krylov_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: floa
             return float((np.vdot(y, hproj @ y) / np.vdot(y, y)).real) + ham.ecore
 
         if energy_estimator is not None:
-            eps, e, psi_new, e_est = _choose_candidate(energy, prop, candidates, energy_estimator)
+            eps, e, psi_new, e_est = _choose_candidate(energy, prop, candidates, energy_estimator,
+                                                       psi, e_current, e_current_est)
             return eps, e, psi_new, n_evals, e_est
-        eps, e = line_search(energy, eps_max, candidates=candidates)
-        if candidates is not None or eps < 0.98 * eps_max:
+        if candidates is not None:
+            def cand_energy(eps):
+                return e_current if (eps == 0.0 and e_current is not None) else energy(eps)
+
+            eps, e = line_search(cand_energy, eps_max, candidates=candidates)
+            psi_new = psi if (eps == 0.0 and e_current is not None) else normalize(prop.state(eps))
+            return eps, e, psi_new, n_evals, None
+        eps, e = line_search(energy, eps_max)
+        if eps < 0.98 * eps_max:
             return eps, e, normalize(prop.state(eps)), n_evals, None
         eps_max *= 2.0  # the minimum is on the edge of the bracket: enlarge it
     return eps, e, normalize(prop.state(eps)), n_evals, None
@@ -293,6 +334,13 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             step 6 on and ends 0.74 Ha above FCI after 60 steps; adding 0.0125
             keeps it monotone. The benchmark's default 0.00625 * 2^k,
             k = 0..10, served all three optimizers on those systems.
+            Candidates may be zero or negative. Zero keeps the current state; its
+            energy (and estimate) is the current one, not evaluated again and not
+            counted in n_energy_evals. A negative eps steps against d, which can
+            lower the energy when a noisy estimated direction is uphill for the
+            true energy. A zero step never counts as e_tol convergence; without
+            estimators, a second consecutive zero step along the same direction
+            stops the run unconverged, since every later step would repeat it.
         optimizer: the search direction (:mod:`thc_engine_cqe.optimizers`):
             "sd" (steepest descent d = g = conj(A), the default), "cg" (nonlinear
             conjugate gradient, Polak-Ribiere+ by default) or "lbfgs" (L-BFGS in
@@ -352,6 +400,7 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
     psi = space.hf() if ci0 is None else normalize(np.asarray(ci0).reshape(space.shape))
     result = CQEResult(active=active, e_exact=e_exact, optimizer=opt.name)
     with_res_est = residual_estimator is not None
+    zero_step_dir = None
     for it in range(max_iter):
         rd = compute_residual(active, psi, ham)
         A = rd.A
@@ -394,7 +443,8 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
         # and _krylov_step doubles it if the minimum lands on the edge.
         eps_max = 1.5 / max(gnorm, 1e-12)
         eps, e_new, psi_new, n_evals, e_new_est = _krylov_step(ham, g, psi, eps_max, krylov_tol,
-                                                               eps_candidates, energy_estimator)
+                                                               eps_candidates, energy_estimator,
+                                                               rd.energy, e_cur_est)
         opt.step_taken(eps)
         step = CQEStep(it, rd.energy, rd.variance, rd.residual_norm, slope, full_slope, eps,
                        e_new, g if keep_generators else None, A if keep_residuals else None,
@@ -414,9 +464,22 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
                 converged_e = False
         else:
             converged_e = abs(e_cur_est - e_new_est) < e_tol
+        stalled = False
+        if eps_candidates is not None and eps == 0.0:
+            # A zero candidate was chosen: the state is unchanged, which says nothing
+            # about convergence. Without estimators the run is deterministic, so a second
+            # zero step along the same direction would repeat forever: stop (unconverged).
+            converged_e = False
+            if not (with_res_est or energy_estimator is not None):
+                stalled = zero_step_dir is not None and np.array_equal(zero_step_dir, g)
+                zero_step_dir = g.copy()
+        else:
+            zero_step_dir = None
         psi = psi_new
         if converged_e:
             result.converged = True
+            break
+        if stalled:
             break
     result.ci = psi
     return result

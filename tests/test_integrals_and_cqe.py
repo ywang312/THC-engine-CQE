@@ -131,12 +131,84 @@ def test_fixed_eps_candidates_can_overshoot(h4):
     assert step.eps == 1.0 and step.energy_after > step.energy + 1.0
 
 
-def test_line_search_rejects_bad_candidates():
+def test_line_search_candidates_validation():
+    """Candidates must be a non-empty sequence of finite reals; zero and negative
+    step sizes are allowed (the first of tied minima wins)."""
     from thc_engine_cqe.cqe import line_search
 
-    with pytest.raises(ValueError):
-        line_search(lambda e: e, 1.0, candidates=())
-    with pytest.raises(ValueError):
-        line_search(lambda e: e, 1.0, candidates=(0.1, -0.2))
+    for bad in [(), (0.1, np.nan), (np.inf,), (0.1, -np.inf)]:
+        with pytest.raises(ValueError):
+            line_search(lambda e: e, 1.0, candidates=bad)
     eps, e = line_search(lambda x: (x - 0.3) ** 2, 1.0, candidates=(0.1, 0.25, 0.5))
     assert eps == 0.25 and np.isclose(e, 0.05**2)
+    eps, e = line_search(lambda x: (x + 0.2) ** 2, 1.0, candidates=(0.1, -0.2, 0.0))
+    assert eps == -0.2 and e == 0.0
+    eps, _ = line_search(lambda x: x**2, 1.0, candidates=(0.5, 0.0, -0.5))
+    assert eps == 0.0
+    eps, _ = line_search(lambda x: abs(x), 1.0, candidates=(-0.1, 0.1))
+    assert eps == -0.1                              # tie: the first candidate
+
+
+def _energy_along(h4, g, psi, eps):
+    from thc_engine_cqe.fci_ops import expm_apply, normalize, two_body
+
+    space = FCISpace.of(h4)
+    return Hamiltonian(h4).energy(normalize(expm_apply(lambda v: two_body(space, g, v), psi, eps)))
+
+
+def test_negative_candidate_recovers_from_an_uphill_direction(h4):
+    """With an uphill estimated direction (A_est = -A), only the negative candidates
+    lower the energy; the step takes the best of them and propagates it exactly."""
+    cands = (-0.2, -0.1, -0.05, 0.05, 0.1)
+    res = run_cqe(h4, max_iter=1, eps_candidates=cands, keep_generators=True,
+                  residual_estimator=lambda rd, ci, it: -rd.A)
+    (step,) = res.steps
+    psi = FCISpace.of(h4).hf()
+    es = [_energy_along(h4, step.generator, psi, e) for e in cands]
+    assert step.slope > 0                           # uphill for the exact energy
+    assert step.eps == cands[int(np.argmin(es))] and step.eps < 0
+    assert step.energy_after < step.energy - 1e-3
+    assert np.isclose(step.energy_after, min(es), atol=1e-10)
+    assert np.isclose(Hamiltonian(h4).energy(res.ci), step.energy_after, atol=1e-10)
+
+
+def test_negative_candidates_match_the_mirrored_positive_ones(h4):
+    """Stepping by -eps along d is stepping by +eps along -d: same states and energies,
+    which also checks the Krylov accuracy at negative eps."""
+    cands = (0.025, 0.05, 0.1, 0.2)
+    ref = run_cqe(h4, max_iter=4, eps_candidates=cands)
+    mir = run_cqe(h4, max_iter=4, eps_candidates=tuple(-c for c in cands),
+                  residual_estimator=lambda rd, ci, it: -rd.A)
+    assert [s.eps for s in mir.steps] == [-s.eps for s in ref.steps]
+    assert np.allclose(mir.energies, ref.energies, atol=1e-10)
+    assert abs(abs(np.vdot(mir.ci.ravel(), ref.ci.ravel())) - 1) < 1e-10
+
+
+def test_zero_candidate_keeps_the_state_and_is_not_convergence(h4):
+    """A zero candidate is the current state: its energy is the current energy (not
+    re-evaluated, not counted), and choosing it is not e_tol convergence. Without
+    estimators a repeated zero step stops the run, unconverged."""
+    # 5.0 overshoots along the first H4 generator, so 0 wins
+    res = run_cqe(h4, max_iter=10, eps_candidates=(0.0, 5.0))
+    assert len(res.steps) == 2 and not res.converged
+    for s in res.steps:
+        assert s.eps == 0.0 and s.energy_after == s.energy and s.n_energy_evals == 1
+    assert np.array_equal(res.ci, FCISpace.of(h4).hf())
+    for opt in ("cg", "lbfgs"):
+        r = run_cqe(h4, max_iter=10, eps_candidates=(0.0, 5.0), optimizer=opt)
+        assert len(r.steps) == 2 and not r.converged and all(s.eps == 0.0 for s in r.steps)
+    # with an energy_estimator the zero candidate reuses the "current" estimate
+    log = []
+
+    def est(e, ci, ctx):
+        log.append(ctx)
+        return e
+
+    r = run_cqe(h4, max_iter=3, eps_candidates=(0.0, 5.0), energy_estimator=est)
+    assert log == ["current", "candidate"] * 3       # no call for the zero candidate
+    assert len(r.steps) == 3 and not r.converged
+    assert all(s.eps == 0.0 and s.energy_after_est == s.energy_est for s in r.steps)
+    # a usable candidate set with 0 included still converges normally
+    ok = run_cqe(h4, max_iter=40, eps_candidates=(0.0, 0.025, 0.05, 0.1, 0.2), r_tol=0.0, e_tol=1e-10)
+    e_fci, _ = h4.fci()
+    assert ok.energies[-1] - e_fci < 1e-4 and all(s.eps > 0 for s in ok.steps[:5])

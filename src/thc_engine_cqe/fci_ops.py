@@ -21,7 +21,7 @@ Note: PySCF's ``direct_nosym.contract_2e(m)`` computes sum m[p,q,r,s] E_rs E_pq
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 import scipy.linalg
@@ -251,10 +251,14 @@ class KrylovPropagator:
     The basis is promoted to complex as soon as ``matvec`` returns a complex
     vector, so a complex operator acting on a real ``psi`` is propagated exactly
     (the state becomes complex).
+
+    ``check_eps`` replaces the single accuracy check at ``eps_max`` by checks at
+    every listed eps (e.g. ``(eps_max, -eps_max)`` for steps of either sign).
     """
 
     def __init__(self, matvec: Callable[[np.ndarray], np.ndarray], psi: np.ndarray,
-                 eps_max: float, tol: float = 1e-11, m_init: int = 12, m_max: int = 120):
+                 eps_max: float, tol: float = 1e-11, m_init: int = 12, m_max: int = 120,
+                 check_eps: Sequence[float] | None = None):
         self.shape = np.asarray(psi).shape
         self.beta = float(np.linalg.norm(psi))
         dtype = np.result_type(psi, float)
@@ -293,7 +297,10 @@ class KrylovPropagator:
             self._V = np.array(vs[:m]).T
             self._Hm = hm
             self._h_next = h_next
-            err = self.error_estimate(self.eps_max)
+            if check_eps is None:
+                err = self.error_estimate(self.eps_max)
+            else:
+                err = max(self.error_estimate(float(e)) for e in check_eps)
             if err <= tol or h_next < 1e-14 or m >= m_max:
                 self.converged = err <= tol or h_next < 1e-14
                 break
