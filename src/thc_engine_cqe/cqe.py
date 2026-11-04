@@ -95,6 +95,7 @@ def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid:
     if candidates is not None:
         cand = np.asarray(candidates, dtype=float).ravel()
         if cand.size == 0 or not np.all(cand > 0):
+            # i think negative values are allowed, so did the brent search, a small negative value is possible
             raise ValueError("candidates must be a non-empty sequence of positive step sizes")
         vals = np.array([energy_of_eps(e) for e in cand])
         i = int(np.argmin(vals))
