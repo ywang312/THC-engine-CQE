@@ -233,8 +233,9 @@ def test_spin_free_tensor_round_trip_and_symmetries(h6, rng):
 @pytest.mark.parametrize("norb", [2, 3])
 def test_spin_orbital_tensor_and_contract_spin_vs_brute_force(norb, rng):
     """spin_orbital_tensor equals the fill by the brute-force orbits (signs from the BFS), and
-    contract_spin equals the explicit loop A[p,q,r,s] = sum_{sigma tau} 2A^{(p sigma)(r tau)}_{(q sigma)(s tau)}
-    over the full tensor; contract_spin needs every independent element."""
+    contract_spin equals the explicit loop
+    A[p,q,r,s] = sum_{sigma tau} 2A^{(p sigma)(r tau)}_{(q sigma)(s tau)} over the full tensor;
+    contract_spin needs every independent element."""
     el = tg.spin_orbital_elements(norb)
     v = rng.standard_normal(len(el))
     nm = 2 * norb
@@ -521,3 +522,51 @@ def test_aux_estimates_and_input_validation():
         tg.spin_orbital_tensor(np.ones(len(so) + 1), so, 2)
     assert tg.aux_targets(np.zeros((0, 4, 2), dtype=int), m) == []
     assert isinstance(tg.energy_target(random_active_space(2, (1, 1))), PauliSum)
+
+
+def test_forced_zero_elements_are_rejected():
+    """Every forced-zero rule is enforced by the tensor helpers and element_multiplicities: spin-orbital
+    i = j, k = l and {i,j} = {k,l}; spin-free T-fixed (p = q, r = s) and PT-fixed (p = s, q = r) orbits."""
+    so_rows = ([[0, 0], [0, 0], [1, 0], [2, 0]],     # i = j
+               [[0, 0], [1, 0], [2, 1], [2, 1]],     # k = l
+               [[0, 0], [1, 1], [1, 1], [0, 0]])     # {i,j} = {k,l}
+    for row in so_rows:
+        with pytest.raises(ValueError, match="forced to zero"):
+            tg.spin_orbital_tensor(np.ones(1), np.array([row]), 3)
+        with pytest.raises(ValueError, match="forced to zero"):
+            tg.element_multiplicities(np.array([row]), "spin_orbital", 3)
+    for row in ([0, 0, 1, 1], [0, 1, 1, 0], [1, 2, 2, 1]):  # T-fixed, PT-fixed, PT-fixed
+        with pytest.raises(ValueError, match="forced to zero"):
+            tg.spin_free_tensor(np.ones(1), np.array([row]), 3)
+        with pytest.raises(ValueError, match="forced to zero"):
+            tg.element_multiplicities(np.array([row]), "spin_free", 3)
+
+
+def test_direct_targets_with_a_prebuilt_hamiltonian(h4):
+    """``hamiltonian=`` needs the mapping it was built with: without ``mapping`` it raises, a Hamiltonian
+    of the other qubit order is rejected by the S_z check (it would give wrong X_e), the matching
+    Hamiltonian reproduces the default build exactly, and a model Hamiltonian gives the model's
+    residual (compute_residual of the model, 1e-10)."""
+    act, ci, rd = h4
+    n = act.norb
+    el = tg.spin_free_elements(n)[:12]
+    blocked, interleaved = QubitMapping(n), QubitMapping(n, "interleaved")
+    h_blocked, h_interleaved = jw_hamiltonian(act, blocked), jw_hamiltonian(act, interleaved)
+    with pytest.raises(ValueError, match="mapping"):
+        tg.direct_targets(el, act, None, "spin_free", hamiltonian=h_blocked)
+    for m, wrong in ((blocked, h_interleaved), (interleaved, h_blocked)):
+        with pytest.raises(ValueError, match="S_z"):
+            tg.direct_targets(el, act, m, "spin_free", hamiltonian=wrong)
+    with pytest.raises(ValueError, match="norb"):
+        tg.direct_targets(el, act, QubitMapping(n + 1), "spin_free", hamiltonian=jw_hamiltonian(
+            random_active_space(n + 1, (2, 2)), QubitMapping(n + 1)))
+    for m, h in ((blocked, h_blocked), (interleaved, h_interleaved)):
+        prebuilt = tg.direct_targets(el, act, m, "spin_free", hamiltonian=h)
+        default = tg.direct_targets(el, act, m, "spin_free")
+        assert all(x.allclose(y, atol=0) for x, y in zip(prebuilt, default))
+    model = act.with_eri(0.5 * act.eri)
+    x = tg.direct_targets(el, act, blocked, "spin_free", hamiltonian=jw_hamiltonian(model, blocked))
+    vals = expectations(x, QubitState.from_ci(n, act.nelec, ci, blocked))
+    a_model = residual.compute_residual(model, ci).A
+    assert np.abs(vals.real - np.real(a_model)[tuple(el.T)]).max() <= 1e-10
+    assert np.abs(np.real(a_model) - np.real(rd.A))[tuple(el.T)].max() > 1e-3

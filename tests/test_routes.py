@@ -67,7 +67,8 @@ def h4_fock(h4):
             else:
                 mats.append(fs.e2(*e).toarray())
         gam[kind] = mats
-    return {"fs": fs, "v": fs.from_ci(ci, act.nelec), "H": fs.hamiltonian(act.h1, act.eri, act.ecore).toarray(),
+    return {"fs": fs, "v": fs.from_ci(ci, act.nelec),
+            "H": fs.hamiltonian(act.h1, act.eri, act.ecore).toarray(),
             "frags": frags, "gamma": gam, "h_prime": h_prime, "leaves": leaves}
 
 
@@ -117,11 +118,60 @@ def test_df_fragments_reproduce_the_hamiltonian(h4, h4_fock):
     assert np.abs(sum(h4_fock["frags"]) + act.ecore * np.eye(h4_fock["fs"].dim) - h4_fock["H"]).max() <= 1e-12
 
 
+def test_truncated_factorization_is_passed_through(h4, h4_fock):
+    """A truncated factorization passed as ``df`` (5 of the 10 leaves of H4) defines the route: the
+    fragments rebuilt here from its leaves, with h' from its ERIs, sum to the Fock-space H[eri_DF]
+    (1e-12); aux_states and aux_residual ("df-trotter", "df-fragments", both element sets) equal the
+    dense references built from them (1e-13 and 1e-12); as delta -> 0 the estimate tends to the
+    residual of the model H[eri_DF] (relative 1e-4 at delta = 1e-3; observed 3e-6), so it differs
+    from the untruncated route by the truncation bias (observed 0.6 ||A||). "exact" ignores df.
+    """
+    act, ci = h4
+    fs, v, gam = h4_fock["fs"], h4_fock["v"], h4_fock["gamma"]
+    df5 = double_factorize(act.eri, n_leaves=5)
+    leaves = df5.leaves()
+    eri_df = np.einsum("lpq,lrs->pqrs", leaves, leaves)
+    hp_ref = act.h1 - 0.5 * np.einsum("prrq->pq", eri_df)
+    h_prime, got = rt.df_fragments(act, df5)
+    assert got.shape == (5, act.norb, act.norb) and np.array_equal(got, leaves)
+    assert np.abs(h_prime - hp_ref).max() <= 1e-14
+    frags = [fs.one_body(hp_ref).toarray()]
+    for leaf in leaves:
+        f = fs.one_body(leaf).toarray()
+        frags.append(0.5 * f @ f)
+    h_model = fs.hamiltonian(act.h1, eri_df, act.ecore).toarray()
+    assert np.abs(sum(frags) + act.ecore * np.eye(fs.dim) - h_model).max() <= 1e-12
+    model = act.with_eri(eri_df)
+    for d in (0.3, 1e-3):
+        u = [scipy.linalg.expm(-1j * d * m) for m in frags]
+        w = v.astype(complex)
+        for ul in u[::-1]:
+            w = ul @ w
+        for method, ref in (("df-trotter", [w]), ("df-fragments", [ul @ v for ul in u])):
+            states = rt.aux_states(act, ci, d, method, df=df5)
+            assert len(states) == len(ref)
+            for st, r in zip(states, ref):
+                assert np.abs(fs.from_ci(st, act.nelec) - r).max() <= 1e-13
+            for kind in tg.KINDS:
+                el = tg.element_set(act.norb, kind)
+                est_ref = -sum(np.array([np.vdot(r, g @ r).imag for g in gam[kind]]) for r in ref) / d
+                est = rt.aux_residual(act, ci, d, method, el, kind, df=df5)
+                assert np.abs(est - est_ref).max() <= 1e-12, (method, kind, d)
+                if d == 1e-3:
+                    a_model = rt.exact_residual(model, ci, el, kind)
+                    assert np.linalg.norm(est - a_model) <= 1e-4 * np.linalg.norm(a_model)
+                    default = rt.aux_residual(act, ci, d, method, el, kind)
+                    assert np.linalg.norm(est - default) > 0.3 * np.linalg.norm(rt.exact_residual(act, ci, el, kind))
+    exact_states = rt.aux_states(act, ci, 0.3, "exact", df=df5)
+    assert np.array_equal(exact_states[0], rt.aux_states(act, ci, 0.3, "exact")[0])
+
+
 @pytest.mark.parametrize("method", rt.METHODS)
 @pytest.mark.parametrize("delta", [0.3, -0.17])
 def test_aux_states_match_dense_exponentials(h4, h4_fock, method, delta):
-    """aux_states equals scipy.linalg.expm of the dense Fock-space operators (1e-12): exp(-i delta (H - ecore)),
-    the product U_0 U_1 ... U_L (U_L applied first) and the separate U_l Psi, U_l = exp(-i delta H_l)."""
+    """aux_states equals scipy.linalg.expm of the dense Fock-space operators (1e-13; observed
+    <= 1.5e-15): exp(-i delta (H - ecore)), the product U_0 U_1 ... U_L (U_L applied first) and the
+    separate U_l Psi, U_l = exp(-i delta H_l)."""
     act, ci = h4
     fs, v, frags = h4_fock["fs"], h4_fock["v"], h4_fock["frags"]
     u = [scipy.linalg.expm(-1j * delta * m) @ np.eye(fs.dim) for m in frags]
@@ -138,21 +188,36 @@ def test_aux_states_match_dense_exponentials(h4, h4_fock, method, delta):
     assert len(states) == len(ref) == (1 if method != "df-fragments" else 1 + len(h4_fock["leaves"]))
     for st, r in zip(states, ref):
         assert st.dtype == np.complex128 and st.shape == FCISpace(act.norb, act.nelec).shape
-        assert np.abs(fs.from_ci(st, act.nelec) - r).max() <= 1e-12
+        assert np.abs(fs.from_ci(st, act.nelec) - r).max() <= 1e-13
         assert abs(np.linalg.norm(st) - 1) <= 1e-13
 
 
 @pytest.mark.parametrize("method", rt.METHODS)
 def test_aux_states_obey_the_parity_relation(h4, method):
-    """conj Lambda(delta) = Lambda(-delta) for real Psi and real factors (1e-13), so A_hat(-delta) = A_hat(delta)."""
+    """conj Lambda(delta) = Lambda(-delta) for real Psi and real factors (1e-13), so
+    A_hat(-delta) = A_hat(delta)."""
     act, ci = h4
     plus = rt.aux_states(act, ci, 0.4, method)
     minus = rt.aux_states(act, ci, -0.4, method)
     for a, b in zip(plus, minus):
         assert np.abs(np.conj(a) - b).max() <= 1e-13
     for kind in tg.KINDS:
-        assert np.allclose(rt.aux_residual(act, ci, 0.4, method, kind=kind, states=plus),
-                           rt.aux_residual(act, ci, -0.4, method, kind=kind, states=minus), atol=1e-13, rtol=0)
+        a_plus = rt.aux_residual(act, ci, 0.4, method, kind=kind, states=plus)
+        a_minus = rt.aux_residual(act, ci, -0.4, method, kind=kind, states=minus)
+        assert np.allclose(a_plus, a_minus, atol=1e-13, rtol=0)
+
+
+@pytest.mark.parametrize("method", rt.METHODS)
+def test_aux_states_propagate_the_normalized_state(h4, method):
+    """aux_states propagates Psi = ci / ||ci||: 3 ci gives the same states (1e-14), and a global phase
+    of ci multiplies every state by it (the propagators are linear)."""
+    act, ci = h4
+    ref = rt.aux_states(act, ci, 0.3, method)
+    for st, r in zip(rt.aux_states(act, 3.0 * ci, 0.3, method), ref):
+        assert np.abs(st - r).max() <= 1e-14
+    phase = np.exp(0.7j)
+    for st, r in zip(rt.aux_states(act, phase * ci, 0.3, method), ref):
+        assert np.abs(st - phase * r).max() <= 1e-14
 
 
 # ================================================================= bias
@@ -233,6 +298,46 @@ def test_fragment_estimates_sum_to_the_first_order_term(h4, h4_fock, kind):
     assert 1e-4 < rel[2] < 3e-4 and 1e-2 < rel[-1] < 3e-2
 
 
+# ============================================================== shot cost
+@pytest.mark.parametrize("kind", tg.KINDS)
+def test_every_auxiliary_state_carries_the_variance_of_psi(h4, h4_fock, kind):
+    """"Shot cost" in the module docstring, for every Q_e measured alone in its eigenbasis:
+    V(Lambda) = sum_e Var_Lambda(Q_e) / delta^2 equals V(Psi) up to O(delta^2) on the "exact",
+    "df-trotter" and every "df-fragments" state, so the optimal allocation over the L + 1 fragment
+    states costs (sum_l sqrt V_l)^2 = (L + 1)^2 V_exact up to O(delta^2) (H4: L = 10), including for
+    the last leaf, whose first-order term is negligible. Dense Fock matrices and scipy.linalg.expm;
+    delta = 0.1 and 0.6.
+
+    Observed (spin-orbital / spin-free): max_l |V_l / V_Psi - 1| / delta^2 = 0.10 / 0.17;
+    |(sum_l sqrt V_l)^2 / ((L + 1)^2 V_exact) - 1| / delta^2 <= 0.014 / 0.037; the last leaf has
+    ||<[Gamma_e, H_L]>|| = 2e-6 ||A|| (tested <= 1e-4 ||A||), and V_L = V_Psi to 1e-6 (tested).
+    """
+    act, ci = h4
+    v, frags, gam = h4_fock["v"], h4_fock["frags"], h4_fock["gamma"][kind]
+    h_el = h4_fock["H"] - act.ecore * np.eye(h4_fock["fs"].dim)
+    first = np.array([[fock_expect_comm(v, g, m) for g in gam] for m in frags]).real
+    norm_a = np.linalg.norm(first.sum(axis=0))
+    for d in (0.1, 0.6):
+        u = [scipy.linalg.expm(-1j * d * m) for m in frags]
+        w = v.astype(complex)
+        for ul in u[::-1]:
+            w = ul @ w
+        lams = np.stack([v.astype(complex), scipy.linalg.expm(-1j * d * h_el) @ v, w] + [ul @ v for ul in u],
+                        axis=1)
+        var = np.zeros(lams.shape[1])
+        for g in gam:                                   # Q = (Gamma - Gamma^T) / 2i, Gamma real
+            ql = (g @ lams - g.T @ lams) / 2j
+            var += np.einsum("as,as->s", ql.conj(), ql).real - np.einsum("as,as->s", lams.conj(), ql).real ** 2
+        var /= d ** 2
+        v_psi, v_exact, v_trotter, v_frag = var[0], var[1], var[2], var[3:]
+        assert abs(v_exact / v_psi - 1) <= 0.05 * d ** 2
+        assert abs(v_trotter / v_psi - 1) <= 0.2 * d ** 2
+        assert np.all(np.abs(v_frag / v_psi - 1) <= 0.3 * d ** 2)
+        total = np.sum(np.sqrt(v_frag)) ** 2
+        assert abs(total / (len(frags) ** 2 * v_exact) - 1) <= 0.1 * d ** 2
+        assert np.linalg.norm(first[-1]) <= 1e-4 * norm_a and abs(v_frag[-1] / v_psi - 1) <= 1e-6
+
+
 # ===================================================== element-set consistency
 @pytest.mark.parametrize("method", rt.METHODS)
 def test_spin_free_estimate_is_the_spin_contraction_of_the_spin_orbital_one(h6, method):
@@ -243,7 +348,8 @@ def test_spin_free_estimate_is_the_spin_contraction_of_the_spin_orbital_one(h6, 
     n = act.norb
     so, sf = tg.spin_orbital_elements(n), tg.spin_free_elements(n)
     a_ref = residual.compute_residual(act, ci).A
-    assert np.abs(tg.contract_spin(rt.exact_residual(act, ci, so, "spin_orbital"), so, n) - a_ref).max() <= 1e-12
+    a_so = rt.exact_residual(act, ci, so, "spin_orbital")
+    assert np.abs(tg.contract_spin(a_so, so, n) - a_ref).max() <= 1e-12
     for d in (0.1, 0.6):
         states = rt.aux_states(act, ci, d, method)
         a_so = rt.aux_residual(act, ci, d, elements=so, kind="spin_orbital", states=states)
@@ -277,7 +383,8 @@ def test_aux_residual_does_not_depend_on_the_qubit_order(h4, method):
     states = rt.aux_states(act, ci, 0.3, method)
     for kind in tg.KINDS:
         ref = rt.aux_residual(act, ci, 0.3, method, kind=kind)
-        other = rt.aux_residual(act, ci, 0.3, method, kind=kind, mapping=QubitMapping(act.norb, "interleaved"))
+        interleaved = QubitMapping(act.norb, "interleaved")
+        other = rt.aux_residual(act, ci, 0.3, method, kind=kind, mapping=interleaved)
         assert np.abs(ref - other).max() <= 1e-13
         assert np.array_equal(rt.aux_residual(act, ci, 0.3, kind=kind, states=states), ref)
         per = rt.aux_residual(act, ci, 0.3, kind=kind, states=states, per_state=True)
@@ -297,9 +404,12 @@ def test_h6_bias_preview(h6):
     """
     act, ci = h6
     observed = {
-        "exact": ((3.667e-5, 3.300e-4, 3.659e-3, 3.232e-2, 0.1216), (4.299e-5, 3.869e-4, 4.289e-3, 3.786e-2, 0.1420)),
-        "df-trotter": ((2.778e-4, 2.500e-3, 2.766e-2, 0.2398, 0.8482), (2.799e-4, 2.518e-3, 2.786e-2, 0.2413, 0.8502)),
-        "df-fragments": ((3.345e-4, 3.010e-3, 3.338e-2, 0.2950, 1.111), (3.530e-4, 3.176e-3, 3.522e-2, 0.3114, 1.174)),
+        "exact": ((3.667e-5, 3.300e-4, 3.659e-3, 3.232e-2, 0.1216),
+                  (4.299e-5, 3.869e-4, 4.289e-3, 3.786e-2, 0.1420)),
+        "df-trotter": ((2.778e-4, 2.500e-3, 2.766e-2, 0.2398, 0.8482),
+                       (2.799e-4, 2.518e-3, 2.786e-2, 0.2413, 0.8502)),
+        "df-fragments": ((3.345e-4, 3.010e-3, 3.338e-2, 0.2950, 1.111),
+                         (3.530e-4, 3.176e-3, 3.522e-2, 0.3114, 1.174)),
     }
     norms = {"spin_orbital": 0.13259, "spin_free": 0.25568}
     exact = {kind: rt.exact_residual(act, ci, kind=kind) for kind in tg.KINDS}
@@ -342,13 +452,79 @@ def test_shots_for_relative_error():
         rt.shots_for_relative_error(-v, a, 0.3)
 
 
+def test_shots_weighted_bias_threshold_and_validation(rng):
+    """The weights apply to the bias too (closed form, 1e-13); a bias with ||b|| = rel ||A|| to
+    round-off is unreachable (inf, not a huge finite S), just below it S is finite; per-element inputs
+    of different shapes, 2-D or non-finite inputs, complex variances and negative weights raise."""
+    a = rng.standard_normal(50)
+    v = rng.random(50) * 3
+    b = 0.05 * rng.standard_normal(50)
+    w = rng.integers(1, 9, 50).astype(float)
+    s = rt.shots_for_relative_error(v, a, 0.3, bias=b, weights=w)
+    assert np.isclose(s, np.sum(w * v) / (0.09 * np.sum(w * a ** 2) - np.sum(w * b ** 2)), rtol=1e-13, atol=0)
+    at = b / np.linalg.norm(b) * 0.3 * np.linalg.norm(a)
+    assert rt.shots_for_relative_error(v, a, 0.3, bias=at) == np.inf
+    assert rt.shots_for_relative_error(v, a, 0.3, bias=1.0001 * at) == np.inf
+    below = rt.shots_for_relative_error(v, a, 0.3, bias=0.9999 * at)
+    assert np.isclose(below, v.sum() / (0.09 * np.sum(a ** 2) - np.sum((0.9999 * at) ** 2)), rtol=1e-9, atol=0)
+    bad = [((v[:3], a), {}), ((v, a), {"bias": b[:3]}), ((v.sum(), a), {"bias": b[:3]}),
+           ((v, a), {"weights": w[:3]}), ((np.ones((2, 3)), np.ones((2, 3))), {}),
+           ((np.r_[np.nan, v[1:]], a), {}), ((v, np.r_[np.inf, a[1:]]), {}),
+           ((v, a), {"bias": np.r_[np.nan, b[1:]]}), ((v, a), {"weights": np.r_[np.nan, w[1:]]}),
+           ((v, a), {"weights": -w}), ((v + 0j, a), {}), ((v, a, np.inf), {}), ((v, a, np.nan), {})]
+    for args, kw in bad:
+        args = args if len(args) == 3 else args + (0.3,)
+        with pytest.raises(ValueError):
+            rt.shots_for_relative_error(*args, **kw)
+
+
 # ============================================================== validation
-def test_route_input_validation(h4):
+def test_a_global_phase_of_a_real_state_is_accepted(h4, rng):
+    """aux_residual and exact_residual remove a global phase of a real CI vector (every route quantity
+    is quadratic in Psi): ci e^{0.3i} and -2i ci give the real-ci results (1e-13). Imaginary noise of
+    1e-14 relative is accepted, 1e-12 and a genuinely complex state are rejected."""
     act, ci = h4
+    for kind in tg.KINDS:
+        ref = rt.exact_residual(act, ci, kind=kind)
+        for scaled in (np.exp(0.3j) * ci, -2j * ci):
+            assert np.abs(rt.exact_residual(act, scaled, kind=kind) - ref).max() <= 1e-13
+        for method in rt.METHODS:
+            ref = rt.aux_residual(act, ci, 0.1, method, kind=kind)
+            assert np.abs(rt.aux_residual(act, np.exp(0.3j) * ci, 0.1, method, kind=kind) - ref).max() <= 1e-13
+    noise = rng.standard_normal(ci.shape)
+    assert np.abs(rt.exact_residual(act, ci + 1e-14j * noise) - rt.exact_residual(act, ci)).max() <= 1e-13
+    for bad in (ci + 1e-12j * noise, ci + 0.1j * noise):
+        with pytest.raises(ValueError, match="real"):
+            rt.exact_residual(act, bad)
+        with pytest.raises(ValueError, match="real"):
+            rt.aux_residual(act, np.exp(0.3j) * bad, 0.1)
+
+
+def test_reused_states_are_checked(h4):
+    """aux_residual(states=...) checks the CI-space size and the unit norm (1e-10) of every state."""
+    act, ci = h4
+    states = rt.aux_states(act, ci, 0.1, "df-fragments")
+    assert np.array_equal(rt.aux_residual(act, ci, 0.1, states=[s.ravel() for s in states]),
+                          rt.aux_residual(act, ci, 0.1, states=states))
+    with pytest.raises(ValueError, match="norm"):
+        rt.aux_residual(act, ci, 0.1, states=[states[0], 2.0 * states[1]])
+    with pytest.raises(ValueError, match="norm"):
+        rt.aux_residual(act, ci, 0.1, states=[states[0] * (1 + 1e-9)])
+    with pytest.raises(ValueError, match="entries"):
+        rt.aux_residual(act, ci, 0.1, states=[states[0].ravel()[:-1]])
+    with pytest.raises(ValueError, match="empty"):
+        rt.aux_residual(act, ci, 0.1, states=[])
+    assert np.allclose(rt.aux_residual(act, ci, 0.1, states=[states[0] * (1 + 1e-12)]),
+                       rt.aux_residual(act, ci, 0.1, states=states[:1]), atol=1e-11, rtol=0)
+
+
+def test_route_input_validation(h4, rng):
+    act, ci = h4
+    cplx = ci + 0.1j * rng.standard_normal(ci.shape)
     with pytest.raises(ValueError, match="real"):
-        rt.aux_residual(act, ci * (1 + 0.5j), 0.1)
+        rt.aux_residual(act, cplx, 0.1)
     with pytest.raises(ValueError, match="real"):
-        rt.exact_residual(act, ci * 1j)
+        rt.exact_residual(act, cplx)
     assert np.allclose(rt.aux_residual(act, ci.astype(complex), 0.1), rt.aux_residual(act, ci, 0.1))
     with pytest.raises(ValueError, match="method"):
         rt.aux_states(act, ci, 0.1, "trotter")

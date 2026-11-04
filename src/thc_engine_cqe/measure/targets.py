@@ -60,9 +60,9 @@ Targets and post-processing
 
       A_hat_e = -<Q_e>_Lambda / delta = A_e + (delta^2/6) <[H,[H,[H,Gamma_e]]]> + O(delta^4)
 
-  (the leading coefficient is tested in tests/test_routes.py). Post-processing (:func:`aux_estimates`): A_hat_e = -<Q_e>_Lambda / delta for one
-  auxiliary state, sum_l -<Q_e>_{Lambda_l} / delta for DF fragments
-  (``routes.aux_states``).
+  (the leading coefficient is tested in tests/test_routes.py). Post-processing
+  (:func:`aux_estimates`): A_hat_e = -<Q_e>_Lambda / delta for one auxiliary
+  state, sum_l -<Q_e>_{Lambda_l} / delta for DF fragments (``routes.aux_states``).
 * Direct route (:func:`direct_targets`): X_e = [Gamma_e - Gamma_e^dagger, H]/2
   = i [Q_e, H], Hermitian with <X_e>_Psi = Re A_e, which is A_e for real Psi
   (identity post-processing). X_e has up to three-body terms.
@@ -95,8 +95,6 @@ same 36,474 Pauli strings. See tests/test_targets.py.
 """
 
 from __future__ import annotations
-
-from typing import Sequence
 
 import numpy as np
 
@@ -403,18 +401,61 @@ def aux_targets(elements, mapping: QubitMapping, kind: str = "spin_orbital") -> 
     return [g.antihermitian_part() * (-1j) for g in gamma_operators(elements, mapping, kind)]
 
 
+def _sz_violation(h: PauliSum, mapping: QubitMapping) -> float:
+    """max |coefficient| of [H, 2 S_z] relative to the largest non-identity coefficient of H.
+
+    2 S_z = N_alpha - N_beta = -1/2 sum_p (Z_{q(p, alpha)} - Z_{q(p, beta)}) with the qubits of ``mapping``.
+    """
+    n = mapping.norb
+    one = np.uint64(1)
+    za = [one << np.uint64(mapping.qubit(p, 0)) for p in range(n)]
+    zb = [one << np.uint64(mapping.qubit(p, 1)) for p in range(n)]
+    sz2 = PauliSum(mapping.n_qubits, np.zeros(2 * n, dtype=np.uint64), np.array(za + zb, dtype=np.uint64),
+                   np.r_[np.full(n, -0.5), np.full(n, 0.5)])
+    comm = h.commutator(sz2)
+    off = (h.xs != 0) | (h.zs != 0)
+    scale = float(np.max(np.abs(h.coeffs[off]))) if np.any(off) else 0.0
+    if comm.n_terms == 0:
+        return 0.0
+    return float(np.max(np.abs(comm.coeffs))) / scale
+
+
 def direct_targets(elements, active, mapping: QubitMapping | None = None, kind: str = "spin_orbital", *,
                    hamiltonian: PauliSum | None = None) -> list[PauliSum]:
     """X_e = [Gamma_e - Gamma_e^dagger, H]/2 = i [Q_e, H]: Hermitian, <X_e>_Psi = A_e for real Psi.
 
-    Built as the commutator of the short Q_e with H (``hamiltonian`` defaults to
-    ``jw_hamiltonian(active, mapping)``; its identity term does not contribute).
-    The coefficients are exactly real.
+    Built as the commutator of the short Q_e with H; the identity term of H does
+    not contribute. The coefficients are exactly real. H is
+    ``jw_hamiltonian(active, mapping)`` (``mapping`` defaults to the blocked order).
+
+    ``hamiltonian`` replaces it by a prebuilt or model qubit Hamiltonian, which must
+    be built with ``mapping``; ``mapping`` is then required, because a PauliSum does
+    not record its qubit order and a Hamiltonian of the other order gives wrong X_e
+    without any other sign. As a consistency check, ``hamiltonian`` must conserve
+    the S_z of ``mapping`` (||[H, 2 S_z]|| <= 1e-10 max |c_H|, coefficient-wise):
+    this rejects a molecular Hamiltonian of the other qubit order, unless it has no
+    term that changes that S_z (e.g. a diagonal H). A model Hamiltonian (e.g.
+    ``jw_hamiltonian(active.with_eri(eri_model), mapping)``) gives the residual of
+    the model.
     """
-    mapping = QubitMapping(np.asarray(active.h1).shape[0]) if mapping is None else mapping
-    h = jw_hamiltonian(active, mapping) if hamiltonian is None else hamiltonian
-    if h.n_qubits != mapping.n_qubits:
-        raise ValueError(f"hamiltonian has {h.n_qubits} qubits, mapping {mapping.n_qubits}")
+    if hamiltonian is not None and mapping is None:
+        raise ValueError("pass the mapping the hamiltonian was built with (a PauliSum does not "
+                         "record its qubit order)")
+    norb = np.asarray(active.h1).shape[0]
+    mapping = QubitMapping(norb) if mapping is None else mapping
+    if hamiltonian is None:
+        h = jw_hamiltonian(active, mapping)
+    else:
+        h = hamiltonian
+        if mapping.norb != norb:
+            raise ValueError(f"mapping has norb={mapping.norb}, active space {norb}")
+        if h.n_qubits != mapping.n_qubits:
+            raise ValueError(f"hamiltonian has {h.n_qubits} qubits, mapping {mapping.n_qubits}")
+        viol = _sz_violation(h, mapping)
+        if viol > 1e-10:
+            raise ValueError(f"hamiltonian does not conserve the S_z of the {mapping.order!r} mapping "
+                             f"(max |[H, 2 S_z]| / max |c_H| = {viol:.2g}); was it built with another "
+                             f"qubit order?")
     out = []
     for q in aux_targets(elements, mapping, kind):
         x = q.commutator(h) * 1j

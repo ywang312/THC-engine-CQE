@@ -7,32 +7,39 @@ per-shot variances into shot counts. The per-shot variances of the routes under
 the measurement schemes (``aux_residual_variance``, ``direct_residual_variance``)
 are wired to ``measure/schemes.py`` separately; see the stubs at the end.
 
-States are real CI vectors (exact CQE iterates with real orbitals);
-:func:`aux_residual` and :func:`exact_residual` reject complex input (the
-complex-state extension is described in :mod:`.targets`).
+States are real CI vectors (exact CQE iterates with real orbitals).
+:func:`aux_residual` and :func:`exact_residual` accept a real vector times a global
+phase (the phase is removed; every quantity here is quadratic in Psi) and reject
+genuinely complex input (the complex-state extension is described in :mod:`.targets`).
 
 Auxiliary states (:func:`aux_states`)
 -------------------------------------
 With real double-factorized ERIs (pq|rs) = sum_l L_l[p,q] L_l[r,s]
-(``factor.double_factorize``, untruncated by default),
+(``factor.double_factorize``; untruncated by default, a truncated factorization is
+passed as ``df``),
 
     H - ecore = H_0 + sum_{l=1}^{L} H_l,   H_0 = sum_pq h'_pq E_pq,   h' = h - 1/2 sum_r (pr|rq),
     H_l = 1/2 F_l^2,   F_l = sum_pq L_l[p,q] E_pq,
 
-an operator identity (h' uses the factorized ERIs, so the sum is the factorized
-Hamiltonian, which equals H for the untruncated default; observed
-max |eri - eri_DF| = 3.5e-12 for H6 at 1.0 A). Fragment 0 is the one-body part,
-fragments 1..L are the leaves in the order of the factorization (decreasing
-Frobenius norm). The methods are:
+an operator identity for the factorized Hamiltonian H[eri_DF]: h' uses the
+factorized ERIs (as ``schemes.df_variance`` does), so the fragments sum to
+H[eri_DF] - ecore, which is H - ecore for the untruncated default (observed
+max |eri - eri_DF| = 3.5e-12 for H6 at 1.0 A; the sum is tested against H on the
+whole Fock space for H4, and against H[eri_DF] for a truncated factorization).
+Fragment 0 is the one-body part, fragments 1..L are the leaves in the order of the
+factorization (decreasing Frobenius norm). The methods are:
 
-* ``"exact"``: Lambda = exp(-i delta H) Psi (one state);
+* ``"exact"``: Lambda = exp(-i delta H) Psi (one state; ``df`` is not used);
 * ``"df-trotter"``: Lambda = U_0 U_1 ... U_L Psi with U_l = exp(-i delta H_l), the
   first-order product of the exact fragment propagators (U_L acts first; one state);
 * ``"df-fragments"``: Lambda_l = U_l Psi for l = 0..L (L + 1 states).
 
-Every exponential is applied exactly (``fci_ops.expm_apply``, Taylor series with
-substeps, to 1e-15 of the norm by default). The global phase exp(-i delta ecore)
-is omitted; it does not change any expectation value.
+Every exponential is applied with ``fci_ops.expm_apply``: a Taylor series in
+substeps h with |h| ||H_l|| <= 1/2 (power-iteration norm estimate), each summed
+until the next term is below ``tol`` ||v|| (``tol = 1e-15`` by default). Agreement
+with ``scipy.linalg.expm`` is tested to 1e-13 on H4 (all methods); observed
+<= 3e-15 for H6 at 1.0 A (all methods, delta up to 0.6). The global phase
+exp(-i delta ecore) is omitted; it does not change any expectation value.
 
 Bias (:func:`aux_residual`)
 ---------------------------
@@ -51,15 +58,49 @@ and the first-order terms add up to A_e. These statements are tested in
 tests/test_routes.py (log-log slopes, leading coefficients and dense
 exponentials on H4).
 
+Shot cost of the routes
+-----------------------
+Every auxiliary state carries the full per-shot variance of the target -Q_e/delta.
+For each scheme of ``measure/schemes.py`` (QWC, Pauli and matchgate shadows) the
+per-shot variance on a state Lambda is sum_jk w_jk <P_j P_k>_Lambda minus a
+quadratic form in the means <P_j>_Lambda, with real weights w_jk and only
+commuting pairs (P_j, P_k) of Pauli strings of the Q_e. Q_e = -i (Gamma_e -
+Gamma_e^T)/2 is an imaginary matrix with real Pauli coefficients, so its strings
+are imaginary and every such P_j P_k is real symmetric. By conj Lambda(delta) =
+Lambda(-delta) (parity argument above), <P_j P_k>_Lambda is even in delta and
+<P_j>_Lambda is odd: the per-shot variance on Lambda equals that on Psi up to
+O(delta^2), however small the fragment that turns Psi into Lambda. Hence:
+
+* ``"exact"`` and ``"df-trotter"`` cost about the variance V(Psi) of one state.
+* ``"df-fragments"`` measures L + 1 states, each with about V(Psi); with the
+  optimal allocation over the states, total = (sum_l sqrt V_l)^2 ~ (L + 1)^2 V(Psi).
+  A leaf's first-order term <[Gamma_e, H_l]> shrinks with the leaf, its share of
+  the variance does not. Observed for H6 at 1.0 A (CQE iterate 2, L = 20, each Q_e
+  measured alone in its eigenbasis): (sum_l sqrt V_l)^2 / V_exact = 441.0 at
+  delta = 0.01 and 438-441 up to delta = 0.6, against (L + 1)^2 = 441, for both
+  element sets. The first-order terms of single fragments are larger than A
+  (observed ||a_1|| = 14 ||A||) and cancel in the sum. The relation is tested on
+  H4 (L = 10).
+* Truncating the factorization removes leaves that add variance and almost no
+  signal. Observed with ``df=double_factorize(active.eri, tol=1e-6)``: H6 keeps
+  L = 15 of 20 leaves (1.0 A and 1.8 bohr), so (L + 1)^2 drops from 441 to 256,
+  with a first-order truncation bias of 4e-6 to 5e-6 ||A|| (spin-orbital set,
+  iterate 2) and a route bias that changes by 0.3% or less at delta >= 0.01;
+  H4 keeps 9 of 10 leaves; LiH (21 leaves) and N2 CAS(6,6) (20) keep all.
+  ``aux_residual(..., df=df) - exact_residual(...)`` includes the truncation
+  bias, because :func:`exact_residual` uses the exact ERIs.
+
 Shots (:func:`shots_for_relative_error`)
 ----------------------------------------
 For an unbiased estimator with per-shot variances v_e, S shots give the mean
 squared error sum_e v_e / S, so the RMS criterion sqrt(sum_e v_e / S) = rel ||A||
 over the element set gives S = sum_e v_e / (rel^2 ||A||^2). With a bias b
 (aux route), ||b||^2 + sum_e v_e / S = rel^2 ||A||^2 gives
-S = sum_e v_e / (rel^2 ||A||^2 - ||b||^2), unreachable (inf) when ||b|| >= rel ||A||.
-Norms are over the element set; per-element ``weights`` (e.g.
-``targets.element_multiplicities``) switch to the Frobenius norm of the full tensor.
+S = sum_e v_e / (rel^2 ||A||^2 - ||b||^2), which diverges as ||b|| -> rel ||A||. The
+target is unreachable (inf) when ||b|| >= rel ||A||, and also when the difference
+is within round-off of zero (at most 1e-12 rel^2 ||A||^2). Norms are over the
+element set; per-element ``weights`` (e.g. ``targets.element_multiplicities``)
+switch to the Frobenius norm of the full tensor.
 """
 
 from __future__ import annotations
@@ -101,15 +142,25 @@ def _check_delta(delta) -> float:
 
 
 def _real_ci(ci, space: FCISpace) -> np.ndarray:
-    """Normalized real CI array; a ValueError for complex states (the routes assume real Psi)."""
+    """Normalized real CI array of a real state, possibly given times a global phase.
+
+    Complex input is divided by the phase of its largest-modulus amplitude and must
+    then be real to 1e-13 relative (max |Im| <= 1e-13 max |c|); every route quantity
+    is quadratic in Psi, so the phase does not matter. A ValueError for genuinely
+    complex states (the routes assume real Psi) and for the zero vector.
+    """
     c = np.asarray(ci)
     if c.size != space.size:
         raise ValueError(f"CI vector has {c.size} entries, expected {space.size}")
     c = c.reshape(space.shape)
     if np.iscomplexobj(c):
+        big = c.flat[int(np.argmax(np.abs(c)))]
+        if big == 0:
+            raise ValueError("zero CI vector")
+        c = c * (np.conj(big) / abs(big))
         if np.max(np.abs(c.imag)) > 1e-13 * np.max(np.abs(c)):
-            raise ValueError("the residual routes assume a real CI vector; for complex states "
-                             "see the complex-state extension in measure.targets")
+            raise ValueError("the residual routes assume a real CI vector (up to a global phase); for "
+                             "complex states see the complex-state extension in measure.targets")
         c = c.real
     c = np.asarray(c, dtype=float)
     nrm = float(np.linalg.norm(c))
@@ -118,11 +169,29 @@ def _real_ci(ci, space: FCISpace) -> np.ndarray:
     return c / nrm
 
 
+def _check_states(states, space: FCISpace) -> list[np.ndarray]:
+    """CI arrays of reused auxiliary states: CI-space size and unit norm (1e-10) are checked."""
+    out = []
+    for l, lam in enumerate(states):
+        lam = np.asarray(lam)
+        if lam.size != space.size:
+            raise ValueError(f"state {l} has {lam.size} entries, expected {space.size} (the CI space of active)")
+        nrm = float(np.linalg.norm(lam))
+        if not abs(nrm - 1.0) <= 1e-10:
+            raise ValueError(f"state {l} has norm {nrm!r}; pass the normalized output of aux_states")
+        out.append(lam.reshape(space.shape))
+    if not out:
+        raise ValueError("states is empty")
+    return out
+
+
 def df_fragments(active, df=None) -> tuple[np.ndarray, np.ndarray]:
-    """(h', leaves) of H - ecore = sum h'_pq E_pq + 1/2 sum_l (sum_pq L_l[p,q] E_pq)^2.
+    """(h', leaves) of H[eri_DF] - ecore = sum h'_pq E_pq + 1/2 sum_l (sum_pq L_l[p,q] E_pq)^2.
 
     ``df`` is a ``factor.DoubleFactorization`` (default: ``double_factorize(active.eri)``,
-    untruncated). ``leaves`` has shape (L, N, N) (``df.leaves()``) and
+    untruncated; pass e.g. ``double_factorize(active.eri, tol=1e-6)`` or ``n_leaves=...``
+    to drop small leaves, see "Shot cost" in the module docstring). ``leaves`` has shape
+    (L, N, N) (``df.leaves()``), so "df-fragments" has L + 1 states, and
     h' = h1 - 1/2 einsum('prrq->pq', eri_DF) uses the factorized ERIs.
     """
     from ..factor import double_factorize
@@ -141,9 +210,9 @@ def aux_states(active, ci, delta: float, method: str = "exact", *, df=None,
 
     Returns [exp(-i delta H) Psi] (``"exact"``), [U_0 U_1 ... U_L Psi]
     (``"df-trotter"``) or [U_0 Psi, U_1 Psi, ..., U_L Psi] (``"df-fragments"``),
-    U_l = exp(-i delta H_l), for the normalized ``ci`` (any CI array; real states
-    are assumed only by the estimators). ``df`` as in :func:`df_fragments`;
-    ``tol`` is the Taylor-series tolerance of ``fci_ops.expm_apply``.
+    U_l = exp(-i delta H_l), for Psi = ci / ||ci|| (any CI array; real states are
+    assumed only by the estimators). ``df`` as in :func:`df_fragments` (not used by
+    ``"exact"``); ``tol`` is the Taylor-series tolerance of ``fci_ops.expm_apply``.
     """
     _check_method(method)
     delta = _check_delta(delta)
@@ -162,7 +231,9 @@ def aux_states(active, ci, delta: float, method: str = "exact", *, df=None,
         return expm_apply(lambda u: -1j * one_body(space, h_prime, u), v, delta, tol=tol)
 
     def u_leaf(leaf, v):
-        return expm_apply(lambda u: -0.5j * one_body(space, leaf, one_body(space, leaf, u)), v, delta, tol=tol)
+        def matvec(u):
+            return -0.5j * one_body(space, leaf, one_body(space, leaf, u))
+        return expm_apply(matvec, v, delta, tol=tol)
 
     if method == "df-trotter":
         v = psi
@@ -181,9 +252,15 @@ def aux_residual(active, ci, delta: float, method: str = "exact", elements=None,
     real entry per element, in the same order (shape (K,)). The <Q_e> are exact
     expectation values of the qubit operators ``targets.aux_targets`` on
     ``QubitState.from_ci`` of the auxiliary states, so ``aux_residual(...) -
-    exact_residual(...)`` is the bias of the route. ``states`` reuses the output of
-    :func:`aux_states` (then ``method`` and ``df`` are not used); ``per_state=True``
-    returns the per-state contributions -<Q_e>_{Lambda_l} / delta, shape (n_states, K).
+    exact_residual(...)`` is the bias of the route (including the truncation bias of a
+    truncated ``df``). ``per_state=True`` returns the per-state contributions
+    -<Q_e>_{Lambda_l} / delta, shape (n_states, K).
+
+    ``states`` reuses the output of ``aux_states(active, ci, delta, method, df=df)``
+    for the same active space, state (up to normalization and global phase), delta,
+    method and df; then ``method`` and ``df`` are not used. Only the CI-space size and
+    the unit norm (to 1e-10) of each state are checked: states of another ci or delta
+    are not detected.
     """
     space = FCISpace(active.norb, active.nelec)
     ci = _real_ci(ci, space)
@@ -197,6 +274,8 @@ def aux_residual(active, ci, delta: float, method: str = "exact", elements=None,
         raise ValueError(f"mapping has norb={mapping.norb}, active space {norb}")
     if states is None:
         states = aux_states(active, ci, delta, method, df=df)
+    else:
+        states = _check_states(states, space)
     ops = aux_targets(el, mapping, kind)
     q = np.zeros((len(states), len(ops)))
     if ops and any(o.n_terms for o in ops):
@@ -210,7 +289,10 @@ def aux_residual(active, ci, delta: float, method: str = "exact", elements=None,
 
 
 def _mazziotti_elements(blocks: np.ndarray, el: np.ndarray) -> np.ndarray:
-    """<a+_i a+_j a_l a_k> from the spin blocks b[sigma, tau][p,q,r,s] = <a+_{p sigma} a+_{r tau} a_{s tau} a_{q sigma}>."""
+    """<a+_i a+_j a_l a_k> from the spin blocks.
+
+    blocks[sigma, tau][p,q,r,s] = <a+_{p sigma} a+_{r tau} a_{s tau} a_{q sigma}> (PySCF's trans_rdm12s).
+    """
     (pi, si), (pj, sj), (pk, sk), (pl, sl) = (el[:, c].T for c in range(4))
     direct = (si == sk) & (sj == sl)
     cross = ~direct & (si == sl) & (sj == sk)            # a_l a_k = -a_k a_l
@@ -254,40 +336,60 @@ def shots_for_relative_error(total_variance, A, rel: float, bias=None, *, weight
     v_e; ``A`` the exact values on the element set (or the scalar ||A||); ``bias``
     None, the per-element bias, or the scalar ||bias||. Returns
     S = sum v / (rel^2 ||A||^2 - ||bias||^2), which is sum v / (rel^2 ||A||^2)
-    without bias, and inf ("unreachable") when ||bias|| >= rel ||A||. ``weights``
-    (per-element, e.g. ``targets.element_multiplicities``) weight every sum, which
-    gives the criterion for the full tensor; they need per-element arrays.
-    S is a real number (not rounded up).
+    without bias; S is a real number (not rounded up). ``weights`` (per-element,
+    e.g. ``targets.element_multiplicities``) weight every sum, which gives the
+    criterion for the full tensor; then every other input must be per-element too.
+
+    The target is unreachable (inf) when the budget rel^2 ||A||^2 - ||bias||^2 is
+    at most 1e-12 rel^2 ||A||^2: when ||bias|| >= rel ||A||, and when the two agree
+    to round-off (S diverges as ||bias|| -> rel ||A|| from below). The per-element
+    inputs (and ``weights``) must be 1-D with one common shape, every input finite,
+    the variances real and non-negative, the weights non-negative and ``rel``
+    positive and finite (ValueError otherwise).
     """
     rel = float(rel)
-    if not rel > 0:
-        raise ValueError("rel must be positive")
-
-    def wsum2(x, name):
+    if not (np.isfinite(rel) and rel > 0):
+        raise ValueError(f"rel must be positive and finite, got {rel!r}")
+    named = {"total_variance": total_variance, "A": A}
+    if bias is not None:
+        named["bias"] = bias
+    if weights is not None:
+        named["weights"] = weights
+    arrays = {}
+    for name, x in named.items():
         x = np.asarray(x)
-        if x.ndim == 0:
-            if weights is not None:
-                raise ValueError(f"weights need per-element {name}")
-            return float(abs(x)) ** 2
-        w = np.ones(x.shape) if weights is None else np.asarray(weights, dtype=float)
-        if w.shape != x.shape:
-            raise ValueError(f"weights and {name} have different shapes {w.shape}, {x.shape}")
-        return float(np.sum(w * np.abs(x) ** 2))
-
-    v = np.asarray(total_variance, dtype=float)
-    if np.any(v < 0):
-        raise ValueError("variances must be non-negative")
-    if v.ndim == 0:
-        if weights is not None:
-            raise ValueError("weights need per-element variances")
-        v_tot = float(v)
+        if x.dtype.kind not in "biufc":
+            raise TypeError(f"{name} must be numeric, got dtype {x.dtype}")
+        if x.ndim > 1:
+            raise ValueError(f"{name} must be a scalar or a per-element 1-D array, got shape {x.shape}")
+        if not np.all(np.isfinite(x)):
+            raise ValueError(f"{name} must be finite")
+        arrays[name] = x
+    for name in ("total_variance", "weights"):
+        if name in arrays:
+            x = arrays[name]
+            if np.iscomplexobj(x) or np.any(x < 0):
+                raise ValueError(f"{name} must be real and non-negative")
+    shapes = {name: x.shape for name, x in arrays.items() if x.ndim == 1}
+    if len(set(shapes.values())) > 1:
+        raise ValueError(f"per-element inputs have different shapes: {shapes}")
+    if weights is not None:
+        scalars = [name for name, x in arrays.items() if x.ndim == 0]
+        if scalars:
+            raise ValueError(f"weights need per-element {', '.join(scalars)}")
+        w = arrays["weights"].astype(float)
     else:
-        w = np.ones(v.shape) if weights is None else np.asarray(weights, dtype=float)
-        if w.shape != v.shape:
-            raise ValueError(f"weights and variances have different shapes {w.shape}, {v.shape}")
-        v_tot = float(np.sum(w * v))
-    budget = rel * rel * wsum2(A, "A") - (0.0 if bias is None else wsum2(bias, "bias"))
-    if budget <= 0:
+        w = None
+
+    def wsum(x):                                # weighted sum (x per-element) or the scalar itself
+        if x.ndim == 0:
+            return float(x)
+        return float(np.sum(x if w is None else w * x))
+
+    v_tot = wsum(arrays["total_variance"].astype(float))
+    target = rel * rel * wsum(np.abs(arrays["A"]) ** 2)
+    budget = target - (wsum(np.abs(arrays["bias"]) ** 2) if bias is not None else 0.0)
+    if budget <= 1e-12 * target:
         return float("inf")
     return v_tot / budget
 
@@ -305,7 +407,10 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
     on the auxiliary state ``QubitState.from_ci(norb, nelec, aux_states(...)[0],
     mapping)``. For ``"df-fragments"``: the same target on every fragment state,
     with the per-fragment totals V_l combined by the optimal shot allocation
-    across fragments, total = (sum_l sqrt(V_l))^2. Real Psi only (``_real_ci``).
+    across fragments, total = (sum_l sqrt(V_l))^2, about (L + 1)^2 times the
+    single-state total ("Shot cost" in the module docstring; report L, e.g.
+    ``df.n_leaves``, with every df-fragments number). ``df`` (``opts``) is passed
+    to :func:`aux_states`. Real Psi only (``_real_ci``).
     """
     raise NotImplementedError("aux_residual_variance is added by the benchmark agent "
                               "(spec_B.md B3); it wires routes.py to measure/schemes.py")

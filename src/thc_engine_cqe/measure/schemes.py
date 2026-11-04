@@ -65,6 +65,15 @@ with ``fci_ops.one_body`` on the CI vector. The L + 1 settings are independent:
 ``total`` = (sum_{l=0}^{L} sqrt(Var_l))^2 (optimal allocation) and
 ``uniform_total`` = (L + 1) sum_l Var_l.
 
+The split of H into fragments is not unique, and the variance depends on it:
+any orthogonal mixing of the leaves keeps sum_l L_l (x) L_l, so the first-stage
+factorization matters (pivoted Cholesky, the default, or the eigendecomposition
+of the supermatrix, ``first="eigh"``), and so does a shift of the leaves,
+1/2 F_l^2 = 1/2 (F_l - c_l)^2 + c_l F_l - c_l^2/2 (``shift=True`` takes c_l = tr L_l, i.e.
+E~_pq = E_pq - delta_pq, and moves c_l F_l into fragment 0, which becomes T').
+For H6 at 1.0 A (FCI): 5.02 Ha^2 (Cholesky), 3.06 (eigh); with the shift 1.23
+and 1.19 (tested).
+
 Pauli shadows (:func:`pauli_shadow_variance`)
 --------------------------------------------
 A snapshot measures every qubit in a uniformly random basis B_i in {X, Y, Z}
@@ -107,17 +116,22 @@ The module evaluates this in Majorana form: P_j = phi_j gamma_{S_j}
 a_ej = W_ej phi_j, gamma_S^dagger = (-1)^{|S|/2} gamma_S, gamma_S gamma_S' =
 sgn gamma_{S ^ S'} (:func:`~.pauli.majorana_product`) and gamma_T = phi_T P(x_T, z_T)
 (:func:`~.pauli.majorana_to_pauli`), so
-Var(x_e) = sum_{S,S'} conj(a_eS) a_eS' E[conj(x_S) x_S'] / ... - |<O_e - c_e0>|^2.
+
+    <gamma_S^dagger gamma_S'> = (-1)^{|S|/2} sgn phi_T <P(x_T, z_T)>,   T = S ^ S',
+    Var(x_e) = sum_{S,S'} conj(a_eS) a_eS' E[conj(x_S) x_S'] - |<O_e - c_e0>|^2.
+
 P_both is nonzero iff |S n S'| is even, i.e. iff the monomials commute. A single
-monomial gives lambda_k^{-1} - |<gamma_S>|^2 (tested). The ensemble is invariant
-under permutations of the Majoranas, so the variance does not depend on the
-qubit order (tested: blocked vs interleaved).
+monomial gives lambda_k^{-1} - |<gamma_S>|^2 (tested). Odd monomials (fermion
+parity changing strings) are never covered, so targets containing them are
+rejected. The ensemble is invariant under permutations of the Majoranas, so the
+variance does not depend on the qubit order (tested: blocked vs interleaved).
 
 Rao-Blackwellized estimates for large targets (``method="rb"``)
 ------------------------------------------------------------
-The exact pair sums cost sum_e (terms of O_e)^2 pair evaluations (about 3e9 for
-the 840 direct-route X_e of H6, estimate). Sampling only the setting (a matching
-pi, or local bases B) and averaging over outcomes exactly gives
+The exact pair sums cost sum_e m_e (m_e + 1)/2 pair evaluations for targets of
+m_e terms (1.68e9 for the 840 direct-route X_e of H6, observed). Sampling only
+the setting (a matching pi, or local bases B) and averaging over outcomes
+exactly gives
 
     Var(x_e) = E_setting[ <O_{e,setting}^2> ] - <O_e>^2,
     O_{e,pi} = sum_{S covered by pi} a_eS lambda_S^{-1} gamma_S,   O_{e,B} = sum_{P covered by B} W_eP 3^{|P|} P,
@@ -133,6 +147,19 @@ leaves S unchanged (:func:`matchgate_covered`, vectorized bit operations); the
 RB loop instead enumerates the unions of at most k_max pairs and looks them up,
 when that is cheaper (tested to agree).
 
+The matchgate weights are bounded, 1/lambda_k <= 1/lambda_3 = 611.8 for the
+degree-6 monomials of X_e at n = 12, and every setting covers many strings, so
+the matchgate RB estimate converges quickly (observed for the 840 H6 X_e:
+relative standard error 0.16% on the total and at most 3.9% per element after
+2e4 settings, 14 s). For Pauli shadows a weight-w string enters O_B with 3^w
+and is covered with probability 3^-w, so rare settings dominate: the estimate
+is heavy-tailed and its standard error unreliable (observed for the same
+targets at CQE iteration 2: 2000 settings gave a total of 3.2e5 +- 0.7e5
+against the exact 5.1e5, with per-element standard errors up to 99%). Hence
+``method="auto"`` uses the exact sums for Pauli shadows at any size (89 s for the
+H6 X_e, observed; 5.3e7 compatible pairs) and RB for matchgate shadows only
+above 2e7 pairs.
+
 Monte Carlo validators (``method="mc"``, :func:`df_variance_mc`)
 -----------------------------------------------------------------
 These simulate actual measurements on the dense state (small n): QWC rotates
@@ -144,8 +171,12 @@ post-measurement state as <phi|P_j|phi> (= +-1), independently of the phase
 bookkeeping of the exact formula; DF rotates the CI vector into each fragment's
 orbital basis (``pyscf.fci.addons.transform_ci``), samples determinants and
 evaluates the diagonal fragment operator. Per-target variances are sample
-variances with standard errors from the fourth moment; the reported ``total``
-and its ``stderr`` combine them as described in each function.
+variances; their standard errors use Var(s^2) = (mu_4 - sigma^4)/S +
+2 sigma^4/(S(S-1)) (the second term matters for two-point distributions such as
+a single string with <P> near 0). The reported ``total`` and its ``stderr``
+combine them as described in each function. The standard errors are calibrated
+(observed over 12 seeds per scheme on H4: z-scores with mean within 0.35 of 0
+and standard deviation 0.65-1.2).
 
 Expectation values
 ------------------
@@ -153,7 +184,13 @@ All exact formulas need <P> for many strings P. For states with
 (#x patterns of the support) * 2^n <= 2^23 (H6: 1024 * 4096, observed) a dense
 table of <P(x, z)> for all z is built once per state by Walsh-Hadamard
 transforms; otherwise :meth:`~.pauli.QubitState.expectations` is called on the
-unique strings. Timings are listed in tests/test_schemes.py ("observed", one thread).
+unique strings (H8: about 5e5 strings, observed).
+
+Timings (observed, one thread): H8 energy at FCI (1.8 bohr, 2913 terms) QWC
+0.2-0.9 s, Pauli shadows 2.4-3.2 s, matchgate shadows 4.3-4.7 s, DF 0.03 s; the
+840 H6 aux-route Q_e on a complex auxiliary state 0.3-0.7 s per scheme; the 840
+H6 direct-route X_e (1.6e6 terms) matchgate RB with 2e4 settings 13-14 s, exact
+Pauli shadows 89 s (blocked) and 99 s (interleaved order).
 """
 
 from __future__ import annotations
@@ -277,13 +314,14 @@ class _Targets:
         return self.xs.size
 
     def without_identity(self) -> sp.csr_matrix:
+        """W with the identity column's entries removed (same shape)."""
         if self.id_col < 0:
             return self.W
-        w = self.W.tocsc(copy=True)
-        w[:, self.id_col] = 0.0
-        w = w.tocsr()
-        w.eliminate_zeros()
-        return w
+        w = self.W
+        keep = w.indices != self.id_col
+        rows = np.repeat(np.arange(w.shape[0]), np.diff(w.indptr))[keep]
+        indptr = np.concatenate([[0], np.cumsum(np.bincount(rows, minlength=w.shape[0]))])
+        return sp.csr_matrix((w.data[keep], w.indices[keep], indptr), shape=w.shape)
 
 
 def _prepare(targets) -> _Targets:
@@ -349,7 +387,8 @@ def _fwht_last_axis(a: np.ndarray) -> np.ndarray:
 class _Expectations:
     """Real <psi|P(x, z)|psi> for many strings (dense table when small, else ``expectations``)."""
 
-    def __init__(self, state: QubitState, max_entries: int = _TABLE_MAX):
+    def __init__(self, state: QubitState, max_entries: int | None = None):
+        max_entries = _TABLE_MAX if max_entries is None else int(max_entries)
         self.state = state
         self.n = n = state.n_qubits
         self.table = None
@@ -451,8 +490,9 @@ class _Accumulator:
         return self.out
 
 
-def _row_pairs(indptr: np.ndarray, chunk: int = _PAIR_CHUNK):
+def _row_pairs(indptr: np.ndarray, chunk: int | None = None):
     """Yield (slot, pu, pv): all pairs u <= v of CSR positions within each row, in blocks."""
+    chunk = _PAIR_CHUNK if chunk is None else int(chunk)
     indptr = np.asarray(indptr, dtype=np.int64)
     m = np.diff(indptr)
     npairs = m * (m + 1) // 2
@@ -589,7 +629,7 @@ def qwc_variance(targets, state: QubitState, *, grouping: QWCGrouping | None = N
                  method: str = "exact", n_shots: int = 10000, seed=None) -> VarianceResult:
     """Per-shot variance of QWC-grouped measurement (sorted insertion; module docstring).
 
-    ``method="exact"``: V_{G,e} from the covariances; ``total`` and ``per_target``
+    ``method="exact"`` (or "auto"): V_{G,e} from the covariances; ``total`` and ``per_target``
     under the optimal allocation f_G = sqrt(V_G) / sum sqrt(V_H), ``uniform_total``
     and ``per_target_uniform`` under f_G = 1/n_G, ``setting_variances`` = V_G,
     ``allocation`` = f_G, ``n_settings`` = number of groups. ``info`` holds the
@@ -616,8 +656,8 @@ def qwc_variance(targets, state: QubitState, *, grouping: QWCGrouping | None = N
     info = {"grouping": grouping, "group_sizes": grouping.sizes(), "n_terms": int(tg.B - (tg.id_col >= 0))}
     if method == "mc":
         return _qwc_mc(tg, state, grouping, mu, int(n_shots), _rng(seed), info)
-    if method != "exact":
-        raise ValueError(f"method must be 'exact' or 'mc' for QWC, got {method!r}")
+    if method not in ("exact", "auto"):
+        raise ValueError(f"method must be 'exact' (or 'auto') or 'mc' for QWC, got {method!r}")
     indptr, cols, vals, brow, bgrp = _qwc_blocks(tg, grouping)
     nb = brow.size
     acc = _Accumulator(nb, oracle)
@@ -630,7 +670,7 @@ def qwc_variance(targets, state: QubitState, *, grouping: QWCGrouping | None = N
     return _allocate_groups("qwc", "exact", tg, mu, vb, brow, bgrp, ng, info)
 
 
-def _allocate_groups(scheme, method, tg, mu, vb, brow, bgrp, ng, info, extra=None) -> VarianceResult:
+def _allocate_groups(scheme, method, tg, mu, vb, brow, bgrp, ng, info) -> VarianceResult:
     """Optimal and uniform allocations from block variances V_{G,e} (block = (e, G))."""
     vg = np.bincount(bgrp, weights=vb, minlength=ng)
     sq = np.sqrt(np.clip(vg, 0.0, None))
@@ -641,11 +681,10 @@ def _allocate_groups(scheme, method, tg, mu, vb, brow, bgrp, ng, info, extra=Non
     per_u = ng * np.bincount(brow, weights=vb, minlength=tg.K)
     info = dict(info)
     info["group_target_variances"] = (brow, bgrp, vb)
-    kw = dict(extra or {})
     return VarianceResult(scheme=scheme, method=method, total=tot_sq ** 2, per_target=per,
                           expectation=mu, n_settings=ng, allocation=f,
                           uniform_total=float(ng * vg.sum()), per_target_uniform=per_u,
-                          setting_variances=vg, info=info, **kw)
+                          setting_variances=vg, info=info)
 
 
 # ======================================================= dense basis rotations
@@ -712,6 +751,19 @@ def _parity(a: np.ndarray) -> np.ndarray:
     return (np.bitwise_count(a) & 1).astype(np.int8)
 
 
+def _sample_variance_stderr(m4_minus_m2sq, var, s: int):
+    """Standard error of an unbiased sample variance from s samples.
+
+    Var(s^2) = (mu_4 - sigma^4)/s + 2 sigma^4/(s(s-1)) exactly. The second term
+    dominates for nearly symmetric two-point distributions (a single string with
+    <P> near 0), where mu_4 = sigma^4. For sums of the variances of several
+    correlated targets, pass the summed quantities: 2 (sum_e sigma_e^2)^2 bounds
+    the second-order term 2 sum_{e,e'} Cov_ee'^2 from above.
+    """
+    first = np.clip(m4_minus_m2sq, 0.0, None) / s
+    return np.sqrt(first + 2.0 * np.asarray(var) ** 2 / (s * (s - 1)))
+
+
 def _qwc_mc(tg: _Targets, state: QubitState, grouping: QWCGrouping, mu: np.ndarray, n_shots: int,
             rng: np.random.Generator, info: dict) -> VarianceResult:
     if tg.n > 20:
@@ -739,11 +791,11 @@ def _qwc_mc(tg: _Targets, state: QubitState, grouping: QWCGrouping, mu: np.ndarr
         x = sign @ sub[rows].toarray().T                                    # (S, rows)
         d = x - x.mean(axis=0)
         v = (d ** 2).sum(axis=0) / (n_shots - 1)
-        m4 = (d ** 4).mean(axis=0)
-        se = np.sqrt(np.clip(m4 - v ** 2, 0.0, None) / n_shots)
+        m2 = (d ** 2).mean(axis=0)
+        se = _sample_variance_stderr((d ** 4).mean(axis=0) - m2 ** 2, v, n_shots)
         tot = (d ** 2).sum(axis=1)
         vg_hat[g] = tot.sum() / (n_shots - 1)
-        vg_se[g] = tot.std() / np.sqrt(n_shots)
+        vg_se[g] = float(_sample_variance_stderr(tot.var(), vg_hat[g], n_shots))
         vb_rows.append(rows)
         vb_grps.append(np.full(rows.size, g))
         vb_vals.append(v)
@@ -908,6 +960,22 @@ def pauli_bases(n: int, size: int | None = None, rng=None) -> tuple[np.ndarray, 
     return bx, bz
 
 
+def _even_majorana_masks(tg: _Targets) -> tuple[np.ndarray, np.ndarray]:
+    """(masks, phases) with P_j = phase_j gamma_{S_j}; a ValueError for odd monomials.
+
+    A union of pairs has even size, so matchgate shadows never cover an odd
+    monomial (a fermion-parity-changing string) and cannot estimate it.
+    """
+    if 2 * tg.n > 64:
+        raise ValueError("matchgate shadows need n <= 32 qubits (uint64 Majorana masks)")
+    masks, phi = pauli_to_majorana(tg.xs, tg.zs)
+    masks, phi = np.atleast_1d(masks), np.atleast_1d(phi)
+    if np.any(np.bitwise_count(masks) & 1):
+        raise ValueError("matchgate shadows estimate only even (fermion-parity-preserving) Majorana "
+                         "monomials; the target has odd terms")
+    return masks, phi
+
+
 # =============================================== exact shadow pair sums
 def _pauli_shadow_exact(tg: _Targets, oracle: _Expectations, p: np.ndarray) -> tuple[np.ndarray, int]:
     wn = tg.without_identity()
@@ -930,12 +998,8 @@ def _pauli_shadow_exact(tg: _Targets, oracle: _Expectations, p: np.ndarray) -> t
 
 def _matchgate_exact(tg: _Targets, oracle: _Expectations, p: np.ndarray) -> tuple[np.ndarray, int]:
     n = tg.n
-    if 2 * n > 64:
-        raise ValueError("matchgate shadows need n <= 32 qubits (uint64 Majorana masks)")
     wn = tg.without_identity()
-    masks, phi = pauli_to_majorana(tg.xs, tg.zs)      # P_j = phi_j gamma_{S_j}
-    masks = np.atleast_1d(masks)
-    phi = np.atleast_1d(phi)
+    masks, phi = _even_majorana_masks(tg)              # P_j = phi_j gamma_{S_j}
     half = (np.bitwise_count(masks) // 2).astype(np.int64)
     lam = _lambda_table(n)
     pb = _p_both_table(n)
@@ -998,10 +1062,7 @@ class _RBSetup:
         n = tg.n
         self.non_id = np.flatnonzero(~((tg.xs == 0) & (tg.zs == 0)))
         if scheme == "matchgate_shadow":
-            if 2 * n > 64:
-                raise ValueError("matchgate shadows need n <= 32 qubits")
-            masks, _ = pauli_to_majorana(tg.xs, tg.zs)
-            masks = np.atleast_1d(masks)
+            masks, _ = _even_majorana_masks(tg)
             half = (np.bitwise_count(masks) // 2).astype(np.int64)
             scale = 1.0 / _lambda_table(n)[half]
             nm = masks[self.non_id]
@@ -1072,6 +1133,17 @@ def _shadow_rb(tg: _Targets, state: QubitState, scheme: str, *, n_settings: int,
     if settings is not None:
         block = []
         for s in settings:
+            if scheme == "matchgate_shadow":
+                s = np.asarray(s, dtype=np.int64)
+                if s.shape != (n, 2) or not np.array_equal(np.sort(s.ravel()), np.arange(2 * n)):
+                    raise ValueError(f"a matchgate setting must be a perfect matching of the {2 * n} "
+                                     f"Majoranas, shape ({n}, 2)")
+                s = np.sort(s, axis=1)
+            else:
+                bx, bz = (int(v) for v in s)
+                if (bx | bz) >> n:
+                    raise ValueError(f"local bases must fit in {n} qubits")
+                s = (np.uint64(bx), np.uint64(bz))
             block.append(s)
             if len(block) == batch:
                 run(block)
@@ -1128,9 +1200,9 @@ class _MomentSums:
         mean_d = self.s1 / s
         var = (self.s2 - s * mean_d ** 2) / (s - 1)           # sample variance (around the sample mean)
         m2, m4 = self.s2 / s, self.s4 / s                       # moments around the exact mean
-        se = np.sqrt(np.clip(m4 - m2 ** 2, 0.0, None) / s)
+        se = _sample_variance_stderr(m4 - m2 ** 2, var, s)
         ym = self.y1 / s
-        yse = np.sqrt(max(self.y2 / s - ym ** 2, 0.0) / s)
+        yse = float(_sample_variance_stderr(self.y2 / s - ym ** 2, var.sum(), s))
         info = dict(info)
         info.update(sample_mean=mu + mean_d, sample_mean_stderr=np.sqrt(np.clip(var, 0.0, None) / s))
         return VarianceResult(scheme=scheme, method="mc", total=float(var.sum()), per_target=var,
@@ -1151,6 +1223,7 @@ def _pauli_shadow_mc(tg: _Targets, state: QubitState, mu: np.ndarray, n_snapshot
     wt = (tg.W[:, nid].toarray() * w3[None, :]).T                 # (terms, K)
     const = np.asarray(tg.W[:, tg.id_col].toarray()).ravel() if tg.id_col >= 0 else np.zeros(tg.K)
     acc = _MomentSums(tg.K)
+    batch = max(1, min(batch, (1 << 22) // psi.size))      # bounds the rotated-state block
     done = 0
     while done < n_snapshots:
         nb = min(batch, n_snapshots - done)
@@ -1190,12 +1263,12 @@ def _matchgate_mc(tg: _Targets, state: QubitState, mu: np.ndarray, n_snapshots: 
     n = tg.n
     nid = np.flatnonzero(~((tg.xs == 0) & (tg.zs == 0)))
     xs, zs = tg.xs[nid], tg.zs[nid]
-    masks, _ = pauli_to_majorana(xs, zs)
-    masks = np.atleast_1d(masks)
+    masks = _even_majorana_masks(tg)[0][nid]
     lam = _lambda_table(n)[(np.bitwise_count(masks) // 2).astype(np.int64)]
     wt = (tg.W[:, nid].toarray() / lam[None, :]).T                 # (terms, K)
     const = np.asarray(tg.W[:, tg.id_col].toarray()).ravel() if tg.id_col >= 0 else np.zeros(tg.K)
     acc = _MomentSums(tg.K)
+    batch = max(1, min(batch, (1 << 22) // psi.size))      # bounds the state block
     done = 0
     max_dev = 0.0
     while done < n_snapshots:
@@ -1318,7 +1391,11 @@ def combine_independent(results: Sequence[VarianceResult]) -> VarianceResult:
     shots on experiment l gives Var_e = sum_l v_{l,e} / f_l per shot. The optimum
     f_l = sqrt(V_l) / sum sqrt(V_m), V_l = sum_e v_{l,e}, gives
     ``total`` = (sum_l sqrt(V_l))^2; ``uniform_total`` = L sum_l V_l. Expectations
-    add up. Standard errors (if every input has one) combine by the delta method.
+    add up; ``n_settings`` is the sum over the parts (None if any part is
+    randomized); ``allocation`` holds the f_l. Nested optimal allocations (e.g. QWC
+    groups inside each part) give the global optimum over all settings,
+    (sum_l sum_G sqrt(V_lG))^2. Standard errors (if every input has one) combine by
+    the delta method.
     """
     results = list(results)
     if not results:
@@ -1338,9 +1415,11 @@ def combine_independent(results: Sequence[VarianceResult]) -> VarianceResult:
         rel = np.divide(se, sq, out=np.zeros(v.size), where=sq > 0)
         stderr = float(sq.sum() * np.sqrt(np.sum(rel ** 2)))
     methods = sorted({r.method for r in results})
+    nset = (int(sum(r.n_settings for r in results)) if all(r.n_settings is not None for r in results)
+            else None)
     return VarianceResult(scheme="combined", method=methods[0] if len(methods) == 1 else "+".join(methods),
                           total=float(sq.sum() ** 2), per_target=np.asarray(per, dtype=float),
-                          expectation=sum(r.expectation for r in results), n_settings=None, allocation=f,
+                          expectation=sum(r.expectation for r in results), n_settings=nset, allocation=f,
                           uniform_total=float(v.size * v.sum()), per_target_uniform=np.asarray(per_u, float),
                           setting_variances=v, stderr=stderr, info={"parts": results})
 
@@ -1369,19 +1448,23 @@ def _df_ci(active, state):
     return space, ci
 
 
-def _df_fragments(active, factorization, df_options):
+def _df_fragments(active, factorization, df_options, shift: bool):
+    """(factorization, leaves L_l, one-body matrix of fragment 0, shifts c_l, constant)."""
     from ..factor import double_factorize
 
     if factorization is None:
         factorization = double_factorize(active.eri, **df_options)
     elif df_options:
         raise ValueError("pass either a factorization or double_factorize options, not both")
-    eri_df = factorization.to_eri()
-    hp = np.asarray(active.h1) - 0.5 * np.einsum("prrq->pq", eri_df)
-    return factorization, hp, eri_df
+    leaves = factorization.leaves()
+    hp = np.asarray(active.h1) - 0.5 * np.einsum("prrq->pq", factorization.to_eri())
+    c = np.einsum("lpp->l", leaves) if shift else np.zeros(leaves.shape[0])
+    # 1/2 (F - c)^2 = 1/2 F^2 - c F + c^2/2: the linear terms move into fragment 0
+    h0 = hp + np.einsum("l,lpq->pq", c, leaves)
+    return factorization, leaves, h0, c, -0.5 * float(np.sum(c ** 2))
 
 
-def df_variance(active, state, *, factorization=None, **df_options) -> VarianceResult:
+def df_variance(active, state, *, factorization=None, shift: bool = False, **df_options) -> VarianceResult:
     """Per-shot energy variance of DF basis-rotation grouping (module docstring).
 
     Args:
@@ -1390,25 +1473,31 @@ def df_variance(active, state, *, factorization=None, **df_options) -> VarianceR
             (converted with ``to_ci``; it must lie in the (n_alpha, n_beta) sector).
         factorization: a ``DoubleFactorization`` to use; otherwise
             ``factor.double_factorize(active.eri, **df_options)`` (exact by default;
-            pass e.g. ``n_leaves`` or ``eig_threshold`` to truncate).
+            pass e.g. ``first="eigh"``, ``n_leaves`` or ``eig_threshold``).
+        shift: False (default, the form of the module docstring) measures
+            1/2 F_l^2. True measures 1/2 (F_l - c_l)^2 with c_l = tr L_l, i.e. the
+            leaves in E~_pq = E_pq - delta_pq (n_k - 1 per rotated spatial orbital, the
+            form of the DF lambda in docs/conventions.md); the linear terms
+            -c_l F_l move into fragment 0, whose matrix becomes
+            h' + sum_l c_l L_l = T', plus the constant -1/2 sum_l c_l^2. Same
+            operator, different split, hence different per-setting variances.
 
     Returns a VarianceResult with ``n_settings`` = L + 1 (fragment 0 is the
     one-body term), ``setting_variances`` = Var_l, ``allocation`` = the optimal
     f_l, ``expectation`` = [<H>] (exact Hamiltonian), and ``info``:
     ``energy_model`` = <H_DF>, ``bias`` = <H_DF> - <H>, ``fragment_means`` (<H_0>,
-    <H_l> = <F_l^2>/2), ``n_leaves``, ``factorization``.
+    <H_l>), ``shifts`` c_l, ``n_leaves``, ``factorization``.
     """
     from ..fci_ops import Hamiltonian, one_body
 
     space, ci = _df_ci(active, state)
-    fac, hp, _ = _df_fragments(active, factorization, df_options)
-    leaves = fac.leaves()
-    h0 = one_body(space, hp, ci)
+    fac, leaves, h0m, shifts, const = _df_fragments(active, factorization, df_options, shift)
+    h0 = one_body(space, h0m, ci)
     means = [float(np.vdot(ci, h0).real)]
     var = [float(np.vdot(h0, h0).real) - means[0] ** 2]
-    for leaf in leaves:
-        f1 = one_body(space, leaf, ci)
-        f2 = one_body(space, leaf, f1)
+    for leaf, c in zip(leaves, shifts):
+        f1 = one_body(space, leaf, ci) - c * ci
+        f2 = one_body(space, leaf, f1) - c * f1
         f2m = float(np.vdot(f1, f1).real)               # <F^2> = ||F psi||^2 (F Hermitian)
         means.append(0.5 * f2m)
         var.append(0.25 * (float(np.vdot(f2, f2).real) - f2m ** 2))
@@ -1416,10 +1505,10 @@ def df_variance(active, state, *, factorization=None, **df_options) -> VarianceR
     sq = np.sqrt(np.clip(var, 0.0, None))
     nset = var.size
     f = sq / sq.sum() if sq.sum() > 0 else np.full(nset, 1.0 / nset)
-    e_model = float(active.ecore + sum(means))
+    e_model = float(active.ecore + const + sum(means))
     e_exact = Hamiltonian(active).energy(ci)
     info = {"energy_model": e_model, "bias": e_model - e_exact, "fragment_means": np.array(means),
-            "n_leaves": int(fac.n_leaves), "factorization": fac}
+            "shifts": shifts, "n_leaves": int(fac.n_leaves), "factorization": fac}
     return VarianceResult(scheme="df", method="exact", total=float(sq.sum() ** 2),
                           per_target=np.array([float(sq.sum() ** 2)]), expectation=np.array([e_exact]),
                           n_settings=nset, allocation=f, uniform_total=float(nset * var.sum()),
@@ -1439,14 +1528,15 @@ def _determinant_occupations(norb: int, nelec) -> np.ndarray:
     return (oa[:, None, :] + ob[None, :, :]).reshape(-1, norb)
 
 
-def df_variance_mc(active, state, n_shots: int, *, factorization=None, seed=None,
+def df_variance_mc(active, state, n_shots: int, *, factorization=None, shift: bool = False, seed=None,
                    **df_options) -> VarianceResult:
     """Monte Carlo validation of :func:`df_variance` by sampling in the rotated bases.
 
     For every fragment the CI vector is rotated into the fragment's orbital
     basis (``pyscf.fci.addons.transform_ci`` with the eigenvectors of h' or of
     L_l), ``n_shots`` determinants are sampled from |ci'|^2 and the diagonal
-    operator is evaluated: sum_k eps_k n_k (fragment 0) or 1/2 (sum_k mu_lk n_k)^2.
+    operator is evaluated: sum_k eps_k n_k (fragment 0) or 1/2 (sum_k mu_lk n_k - c_l)^2
+    (c_l = 0, or tr L_l with ``shift=True``).
     ``setting_variances`` are the sample variances, ``total`` = (sum sqrt V_hat_l)^2
     with its delta-method ``stderr``, ``uniform_total`` = (L + 1) sum V_hat_l with
     ``uniform_stderr``. ``info``: ``setting_stderr``, ``fragment_sample_means``
@@ -1457,14 +1547,14 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, seed=None
     from pyscf.fci import addons
 
     space, ci = _df_ci(active, state)
-    fac, hp, _ = _df_fragments(active, factorization, df_options)
+    fac, _, h0m, shifts, const = _df_fragments(active, factorization, df_options, shift)
     rng = _rng(seed)
     n_shots = int(n_shots)
     occ = _determinant_occupations(active.norb, active.nelec)
-    eps, u0 = np.linalg.eigh(hp)
-    frags = [(u0, eps, False)] + [(u, mu, True) for mu, u in zip(fac.eigenvalues, fac.eigenvectors)]
+    eps, u0 = np.linalg.eigh(h0m)
+    frags = [(u0, eps, None)] + [(u, mu, c) for mu, u, c in zip(fac.eigenvalues, fac.eigenvectors, shifts)]
     v_hat, v_se, means_s, means_d, mean_var = [], [], [], [], []
-    for u, ev, square in frags:
+    for u, ev, c in frags:
         n_k = u.shape[1]
         if n_k < active.norb:      # truncated leaf: complete the basis (the extra orbitals have mu = 0)
             q, _ = np.linalg.qr(np.concatenate([u, np.eye(active.norb)], axis=1))
@@ -1476,14 +1566,14 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, seed=None
         rot = addons.transform_ci(ci, active.nelec, u)
         prob = (np.abs(rot) ** 2).ravel()
         lin = occ @ ev
-        val = 0.5 * lin ** 2 if square else lin
+        val = lin if c is None else 0.5 * (lin - c) ** 2
         means_d.append(float(prob @ val) / float(prob.sum()))
         idx = rng.choice(prob.size, size=n_shots, p=prob / prob.sum())
         x = val[idx]
         d = x - x.mean()
         v = float(d @ d) / (n_shots - 1)
         v_hat.append(v)
-        v_se.append(float(np.sqrt(max(np.mean(d ** 4) - v ** 2, 0.0) / n_shots)))
+        v_se.append(float(_sample_variance_stderr(np.mean(d ** 4) - np.mean(d ** 2) ** 2, v, n_shots)))
         means_s.append(float(x.mean()))
         mean_var.append(v / n_shots)
     v_hat, v_se = np.array(v_hat), np.array(v_se)
@@ -1496,7 +1586,7 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, seed=None
     e_exact = Hamiltonian(active).energy(ci)
     info = {"setting_stderr": v_se, "fragment_sample_means": np.array(means_s),
             "fragment_means_exact_distribution": np.array(means_d),
-            "sample_mean": float(active.ecore + sum(means_s)),
+            "sample_mean": float(active.ecore + const + sum(means_s)),
             "sample_mean_stderr": float(np.sqrt(sum(mean_var))), "factorization": fac}
     return VarianceResult(scheme="df", method="mc", total=float(sq.sum() ** 2),
                           per_target=np.array([float(sq.sum() ** 2)]), expectation=np.array([e_exact]),
