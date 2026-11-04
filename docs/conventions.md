@@ -78,7 +78,9 @@ slope −Re Σ g·A and flips it if needed.
 Because the generators are spin-free, the exact CQE preserves S² (singlets stay
 singlets). M1 uses **steepest descent with an exact line search**. This
 converges slowly in the tail (it zig-zags), so it serves as a reference
-trajectory, not as a production optimizer.
+trajectory, not as a production optimizer. With `run_cqe(..., eps_candidates=...)`
+each step instead takes the lowest energy among a few fixed step sizes, as a
+hardware run would; such steps can raise the energy.
 
 ## Reduced Hamiltonian and variance
 

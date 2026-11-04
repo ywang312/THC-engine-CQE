@@ -98,3 +98,45 @@ def test_first_residual_from_hf_is_ov_ov_block(h4):
     # SCF gradient tolerance (1e-9).
     assert np.abs(rd.A[~mask]).max() < 1e-8
     assert np.abs(rd.A[mask]).max() > 1e-3
+
+
+def test_fixed_eps_candidates(h4):
+    """eps_candidates: every step takes the lowest energy among the fixed step sizes."""
+    from thc_engine_cqe.fci_ops import expm_apply, normalize, two_body
+
+    cands = (0.025, 0.05, 0.1, 0.2)
+    space = FCISpace.of(h4)
+    ham = Hamiltonian(h4)
+    states = []
+    res = run_cqe(h4, max_iter=6, eps_candidates=cands, keep_generators=True,
+                  callback=lambda step, ci: states.append(ci))
+    psi = space.hf()
+    for step, nxt in zip(res.steps, states):
+        # independent check: the energy of exp(eps G) psi at every candidate
+        es = [ham.energy(normalize(expm_apply(lambda v: two_body(space, step.generator, v), psi, e)))
+              for e in cands]
+        assert step.eps == cands[int(np.argmin(es))]
+        assert np.isclose(step.energy_after, min(es), atol=1e-10)
+        assert np.isclose(ham.energy(nxt), step.energy_after, atol=1e-10)
+        psi = nxt
+    e_fci, _ = h4.fci()
+    assert res.energies[-1] - e_fci < 0.1 * (res.energies[0] - e_fci)
+
+
+def test_fixed_eps_candidates_can_overshoot(h4):
+    """With only an overshooting step size the step is still taken, as on hardware
+    (E(1.0) - E(0) = +1.86 Ha along the first H4 generator)."""
+    res = run_cqe(h4, max_iter=1, eps_candidates=(1.0,))
+    (step,) = res.steps
+    assert step.eps == 1.0 and step.energy_after > step.energy + 1.0
+
+
+def test_line_search_rejects_bad_candidates():
+    from thc_engine_cqe.cqe import line_search
+
+    with pytest.raises(ValueError):
+        line_search(lambda e: e, 1.0, candidates=())
+    with pytest.raises(ValueError):
+        line_search(lambda e: e, 1.0, candidates=(0.1, -0.2))
+    eps, e = line_search(lambda x: (x - 0.3) ** 2, 1.0, candidates=(0.1, 0.25, 0.5))
+    assert eps == 0.25 and np.isclose(e, 0.05**2)

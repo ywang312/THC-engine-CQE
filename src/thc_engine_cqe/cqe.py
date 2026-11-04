@@ -4,13 +4,14 @@ Each iteration computes the exact ACSE residual A of the current state, forms
 the generator G = sum g[p,q,r,s] e_{pq,rs} (g = conj(A), optionally compressed
 by a user callback), and moves along Psi(eps) = exp(eps G) Psi with an exact
 line search. This is the reference trajectory against which compressed and
-noisy variants are compared.
+noisy variants are compared. ``run_cqe(..., eps_candidates=...)`` replaces the
+exact line search by a choice among a few fixed step sizes, as on hardware.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import numpy as np
 import scipy.optimize
@@ -80,9 +81,24 @@ def generator_norm_estimate(space: FCISpace, g: np.ndarray, psi: np.ndarray, ite
         x = y / est
     return est
 
-# to do: this line_search should also provide a numerical option to select the lowest energy from a few fixed eps to mimic resource-friendly hardware execution
-def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid: int = 64) -> tuple[float, float]:
-    """Minimize E(eps) on [0, eps_max]: coarse grid, then bounded Brent refinement."""
+
+def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid: int = 64,
+                candidates: Sequence[float] | None = None) -> tuple[float, float]:
+    """Minimize E(eps) on [0, eps_max]: coarse grid, then bounded Brent refinement.
+
+    With ``candidates``, E is evaluated only at those fixed step sizes and the
+    lowest is returned; ``eps_max`` and ``n_grid`` are then ignored. This mimics
+    a resource-friendly hardware CQE, where each energy costs a set of
+    measurements: one energy per candidate and no refinement. The lowest
+    candidate is taken even if it raises the energy, as such a run would.
+    """
+    if candidates is not None:
+        cand = np.asarray(candidates, dtype=float).ravel()
+        if cand.size == 0 or not np.all(cand > 0):
+            raise ValueError("candidates must be a non-empty sequence of positive step sizes")
+        vals = np.array([energy_of_eps(e) for e in cand])
+        i = int(np.argmin(vals))
+        return float(cand[i]), float(vals[i])
     grid = np.linspace(0.0, eps_max, n_grid + 1)
     vals = np.array([energy_of_eps(e) for e in grid])
     i = int(np.argmin(vals))
@@ -98,12 +114,16 @@ def line_search(energy_of_eps: Callable[[float], float], eps_max: float, n_grid:
 
 
 def _krylov_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: float,
-                 tol: float) -> tuple[float, float, np.ndarray]:
+                 tol: float, candidates: Sequence[float] | None = None
+                 ) -> tuple[float, float, np.ndarray]:
     space = ham.space
 
     def matvec(v):
         return two_body(space, g, v)
 
+    if candidates is not None:
+        # One Krylov space, accurate up to the largest candidate, serves all of them.
+        eps_max = float(np.max(candidates))
     for _ in range(6):
         prop = KrylovPropagator(matvec, psi, eps_max=eps_max, tol=tol)
         V = prop.basis()
@@ -114,10 +134,10 @@ def _krylov_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: floa
             y = prop.coefficients(eps)
             return float((np.vdot(y, hproj @ y) / np.vdot(y, y)).real) + ham.ecore
 
-        eps, e = line_search(energy, eps_max)
-        if eps < 0.98 * eps_max:
+        eps, e = line_search(energy, eps_max, candidates=candidates)
+        if candidates is not None or eps < 0.98 * eps_max:
             return eps, e, normalize(prop.state(eps))
-        eps_max *= 2.0
+        eps_max *= 2.0  # the minimum is on the edge of the bracket: enlarge it
     return eps, e, normalize(prop.state(eps))
 
 
@@ -125,7 +145,8 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             r_tol: float = 1e-7, e_tol: float = 1e-11, compress: Compressor | None = None,
             keep_generators: bool = False, keep_residuals: bool = False,
             krylov_tol: float = 1e-10, e_exact: float | None = None,
-            callback: Callable[[CQEStep, np.ndarray], None] | None = None) -> CQEResult:
+            callback: Callable[[CQEStep, np.ndarray], None] | None = None,
+            eps_candidates: Sequence[float] | None = None) -> CQEResult:
     """Run the exact CQE from ``ci0`` (default: the Hartree-Fock determinant).
 
     Args:
@@ -134,6 +155,12 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             flipped; if its slope vanishes the run stops.
         e_exact: reference energy stored on the result (e.g. FCI) for errors.
         callback: called as callback(step, ci_after) after every iteration.
+        eps_candidates: fixed step sizes. If given, each step evaluates the energy
+            only at these and takes the lowest (:func:`line_search`), instead of
+            the exact line search. Steps can then raise the energy. eps multiplies
+            the unnormalized generator g = conj(A). On the M1 systems the exact
+            line search picks eps ~ 0.03-0.2, roughly independent of ||A||, so a
+            set such as (0.025, 0.05, 0.1, 0.2) is a reasonable start.
     """
     ham = Hamiltonian(active)
     space = ham.space
@@ -156,9 +183,15 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
                                         A if keep_residuals else None))
             break
         gnorm = generator_norm_estimate(space, g, psi)
-        # what is this 1.5 below for??
+        # Initial line-search bracket [0, 1.5/||G||]. E(eps) = <psi|exp(eps G)^dag H
+        # exp(eps G)|psi> is a sum of sinusoids in eps whose angular frequencies are
+        # differences of eigenvalues of -iG, so at most 2||G||. With 1.5 just under
+        # pi/2, even the fastest one completes less than half a period inside the
+        # bracket, so it has at most one minimum there; the bracket also bounds the
+        # Krylov space. It is conservative: the optimum is typically at 0.5-30% of it,
+        # and _krylov_step doubles it if the minimum lands on the edge.
         eps_max = 1.5 / max(gnorm, 1e-12)
-        eps, e_new, psi_new = _krylov_step(ham, g, psi, eps_max, krylov_tol)
+        eps, e_new, psi_new = _krylov_step(ham, g, psi, eps_max, krylov_tol, eps_candidates)
         step = CQEStep(it, rd.energy, rd.variance, rd.residual_norm, slope, full_slope, eps,
                        e_new, g if keep_generators else None, A if keep_residuals else None)
         result.steps.append(step)
