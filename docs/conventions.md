@@ -93,6 +93,51 @@ satisfies E_el = Σ K·dm2. It follows that
 holds exactly. `residual.variance_from_cse` computes this sum, and
 `Hamiltonian.energy_and_variance` gives σ² directly as ‖HΨ‖² − E².
 
+## Factorized integrals and λ (`factor.eri_factor`, `cholesky`, `df`, `thc`)
+
+Every ERI factorization returns a dense model tensor through `to_eri()`; the
+model Hamiltonian is `active.with_eri(factor.to_eri())`. THC uses OpenFermion's
+layout (`etaPp` (M, N), `MPQ` (M, M)), with (pq|rs) ≈ Σ_PQ η_Pp η_Pq M_PQ η_Qr η_Qs.
+`fit_thc` returns unit-norm leaf rows, so `MPQ` is OpenFermion's normalized
+central tensor. DF stores leaves L_l = U_l diag(μ_l) U_lᵀ with (pq|rs) ≈ Σ_l L_l[p,q] L_l[r,s].
+
+The block-encoding 1-norms follow OpenFermion's `resource_estimates` (Lee et
+al., PRX Quantum 2, 030305 (2021)). They start from the exact identity
+
+  H − ecore = Σ_pq T'_pq E_pq + ½ Σ_pqrs (pq|rs) Ẽ_pq Ẽ_rs − ½ Σ_pr (pp|rr),
+
+  Ẽ_pq = E_pq − δ_pq,  T'_pq = h_pq − ½ Σ_r (pr|rq) + Σ_r (rr|pq).
+
+Here λ_T = Σ_k |eig_k(T')|, λ_DF = λ_T + ¼ Σ_l (Σ_k |μ_lk|)², and THC λ is
+OpenFermion's `compute_lambda`. As in OpenFermion, T' uses the *exact* ERIs:
+pass them as `eri_exact` to `lam`. Agreement with OpenFermion is tested to
+1e-10, and the FeMoco reference values (THC λ = 294, DF λ = 294.8) are reproduced.
+
+## Generator double factorization (`factor.generator`)
+
+For an anti-Hermitian pair-order tensor g, with gs = (g + g[r,s,p,q])/2,
+
+  G = Σ_pqrs g[p,q,r,s] e_{pq,rs} = Σ_k c_k i Q̂_k² + Ô_F
+
+holds as an operator identity on the whole Fock space. Here:
+
+- Q̂_k = Σ Q_k[p,q] E_pq, with each Q_k Hermitian and tr(Q_k Q_l) = δ_kl.
+- The c_k are real and sorted by decreasing |c_k|. They are minus the
+  eigenvalues of the real symmetric N²×N² matrix `coupling_matrix(gs)`, the |c_k|
+  are the singular values of gs reshaped to N²×N², and Σ c_k² = ‖gs‖².
+- F = −i Σ_k c_k Q_k², so Ô_F = Σ F[p,q] E_pq is an orbital-rotation generator.
+
+A real g gives exact conjugate pairs (c, Q) and (−c, Q*). Each leaf compiles as
+Q̂_k = U(V_k) D_k U(V_k)†, with Q_k = V_k diag(μ_k) V_k† and D_k = Σ_p μ_kp n_p,
+so exp(i t c_k Q̂_k²) is an orbital rotation, a diagonal Coulomb phase and the
+inverse rotation. Here U(V) a†_q U(V)† = Σ_p V[p,q] a†_p.
+
+The truncation to the first n leaves keeps its own one-body term
+F_n = −i Σ_{k<n} c_k Q_k². It is the orthogonal projection g_n of g, so its slope
+is −‖g_n‖² and every truncation is a descent direction. Odd truncations of real
+generators split a conjugate pair and are complex; `run_cqe` propagates them
+exactly, and the state becomes complex.
+
 ## Spin-orbital conventions (Fock-space oracle only)
 
 Mode p is (p, α) and mode N+p is (p, β). Basis index i has bit k set when mode

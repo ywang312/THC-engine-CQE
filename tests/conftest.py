@@ -1,3 +1,10 @@
+import os
+
+# The test systems are tiny. PySCF and BLAS read the thread count when they are
+# first imported, and concurrent runs oversubscribing shared cores slow the suite
+# down by 5-10x, so default to one thread (override by setting OMP_NUM_THREADS).
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+
 import numpy as np
 import pytest
 

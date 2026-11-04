@@ -247,6 +247,10 @@ class KrylovPropagator:
     exp(eps Op) psi ~ ||psi|| V expm(eps Hm) e_1. Accuracy is monitored with the
     standard a-posteriori estimate eps * h_{m+1,m} |e_m^T expm(eps Hm) e_1|,
     and the space is enlarged until it is below ``tol`` at ``eps_max``.
+
+    The basis is promoted to complex as soon as ``matvec`` returns a complex
+    vector, so a complex operator acting on a real ``psi`` is propagated exactly
+    (the state becomes complex).
     """
 
     def __init__(self, matvec: Callable[[np.ndarray], np.ndarray], psi: np.ndarray,
@@ -264,7 +268,11 @@ class KrylovPropagator:
         target = m_init
         while True:
             while m < target:
-                w = np.asarray(matvec(vs[m].reshape(self.shape)), dtype=np.result_type(dtype, vs[m])).ravel()
+                w = np.asarray(matvec(vs[m].reshape(self.shape))).ravel()
+                if np.iscomplexobj(w) and not np.iscomplexobj(vs[0]):
+                    dtype = np.result_type(dtype, w)
+                    vs = [v.astype(dtype) for v in vs]
+                w = w.astype(np.result_type(dtype, w), copy=False)
                 col = np.zeros(m + 2, dtype=np.result_type(w, float))
                 for _ in range(2):  # re-orthogonalize twice for stability
                     for j in range(m + 1):

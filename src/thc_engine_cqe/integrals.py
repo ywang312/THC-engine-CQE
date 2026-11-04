@@ -107,25 +107,55 @@ class ActiveSpace:
                        label=self.label if label is None else label)
 
     # ------------------------------------------------------------- reference
-    def fci(self, nroots: int = 1, spin_square: float | None = 0.0, **kwargs):
+    def fci(self, nroots: int = 1, spin_square: float | None = 0.0,
+            shifts: tuple[float, ...] = (0.1, 1.0, 5.0), spin_tol: float = 1e-6, **kwargs):
         """Exact (FCI) solution in the active space.
 
         Returns ``(e_total, ci)`` where ``e_total`` includes ``ecore`` and ``ci``
-        is a PySCF CI array of shape (n_alpha_strings, n_beta_strings).
-        ``spin_square`` fixes <S^2> (default: singlet when n_alpha == n_beta;
-        pass ``None`` to disable).
+        is a PySCF CI array of shape (n_alpha_strings, n_beta_strings); for
+        ``nroots > 1``, an array of energies and a list of CI arrays.
+
+        ``spin_square`` fixes <S^2> when n_alpha == n_beta (default: singlet;
+        pass ``None`` to disable). PySCF's ``fix_spin_`` penalty, shift * S^2
+        for a singlet target, cannot lift a state lying more than shift * S(S+1)
+        below the target sector. So <S^2> of every root is checked, and the solve
+        is repeated with each penalty in ``shifts`` until all roots are within
+        ``spin_tol`` of the target; otherwise a RuntimeError is raised. The
+        energies are Rayleigh quotients of H itself, without the penalty.
+        Extra keyword arguments (e.g. ``conv_tol``, ``max_cycle``) go to the solver.
         """
         from pyscf import fci
+        from pyscf.fci import spin_op
 
-        solver = fci.direct_spin1.FCI()
-        solver.conv_tol = kwargs.pop("conv_tol", 1e-12)
-        solver.max_cycle = kwargs.pop("max_cycle", 500)
-        solver.nroots = nroots
-        if spin_square is not None and self.nelec[0] == self.nelec[1]:
-            solver = fci.addons.fix_spin_(solver, ss=spin_square)
-        e, ci = solver.kernel(self.h1, self.eri, self.norb, self.nelec,
-                              ecore=self.ecore, **kwargs)
-        return e, ci
+        conv_tol = kwargs.pop("conv_tol", 1e-12)
+        max_cycle = kwargs.pop("max_cycle", 500)
+        target = spin_square if self.nelec[0] == self.nelec[1] else None
+        s2: list[float] = []
+        for shift in (shifts if target is not None else (None,)):
+            solver = fci.direct_spin1.FCI()
+            solver.conv_tol = conv_tol
+            solver.max_cycle = max_cycle
+            solver.nroots = nroots
+            if shift is not None:
+                solver = fci.addons.fix_spin_(solver, shift=shift, ss=target)
+            _, ci = solver.kernel(self.h1, self.eri, self.norb, self.nelec,
+                                  ecore=self.ecore, **kwargs)
+            cis = list(ci) if nroots > 1 else [ci]
+            if target is None:
+                break
+            s2 = [spin_op.spin_square0(c, self.norb, self.nelec)[0] for c in cis]
+            if all(abs(s - target) <= spin_tol for s in s2):
+                break
+        else:
+            raise RuntimeError(
+                f"FCI for {self.label or 'active space'}: no {nroots} root(s) with "
+                f"<S^2> = {target:g} for penalty shifts {shifts} (got <S^2> = "
+                f"{', '.join(f'{s:.6f}' for s in s2)}); pass larger shifts or spin_square=None")
+        es = [fci.direct_spin1.energy(self.h1, self.eri, c, self.norb, self.nelec)
+              / float(np.vdot(c, c)) + self.ecore for c in cis]
+        if nroots > 1:
+            return np.array(es), cis
+        return es[0], cis[0]
 
     # ------------------------------------------------------------ constructors
     @classmethod
