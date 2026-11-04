@@ -156,6 +156,7 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
                                         A if keep_residuals else None))
             break
         gnorm = generator_norm_estimate(space, g, psi)
+        # what is this 1.5 below for??
         eps_max = 1.5 / max(gnorm, 1e-12)
         eps, e_new, psi_new = _krylov_step(ham, g, psi, eps_max, krylov_tol)
         step = CQEStep(it, rd.energy, rd.variance, rd.residual_norm, slope, full_slope, eps,
