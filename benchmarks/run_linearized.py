@@ -15,8 +15,9 @@ The exact CQE then runs from HF with steepest descent, CG and L-BFGS for
 - energy in soft modes, lambda < 1e-3 lambda_max (null modes excluded);
 - "outside": higher orders and states outside the linearized sector.
 
-``--long-iters n`` adds L-BFGS runs of n steps that record the null-mode energy
-along the way (e.g. 2000 for N2).
+``--long-iters n`` adds runs of n steps (for each optimizer in
+``--long-optimizers``) that record the energy in the null modes along the way
+(e.g. 2000 for N2).
 
 Outputs: <out>/linearized_<sys>.json per system and <out>/linearized_summary.md.
 
@@ -117,18 +118,20 @@ def run_system(name: str, args) -> dict:
         out["runs"].append({"optimizer": opt, "steps": len(res.steps), "final_error": float(res.errors[-1]),
                             "split": split})
     if args.long_iters:
-        rec = []
         null = lin.null_modes()
+        out["long"] = {}
+        for opt in args.long_optimizers:
+            rec = []
 
-        def cb(step, ci):
-            it = step.iteration + 1
-            if it in args.long_marks or it == args.long_iters:
-                me = lin.mode_energies(ci)
-                rec.append({"iteration": it, "error": me["sector"] + me["outside"],
-                            "null": float(me["per_mode"][null].sum())})
+            def cb(step, ci):
+                it = step.iteration + 1
+                if it in args.long_marks or it == args.long_iters:
+                    me = lin.mode_energies(ci)
+                    rec.append({"iteration": it, "error": me["sector"] + me["outside"],
+                                "null": float(me["per_mode"][null].sum())})
 
-        run_cqe(act, max_iter=args.long_iters, optimizer="lbfgs", r_tol=0.0, e_tol=0.0, callback=cb)
-        out["long_lbfgs"] = rec
+            run_cqe(act, max_iter=args.long_iters, optimizer=opt, r_tol=0.0, e_tol=0.0, callback=cb)
+            out["long"][opt] = rec
     out["seconds"] = time.time() - t0
     return out
 
@@ -155,13 +158,15 @@ def markdown_summary(results: list[dict], args) -> str:
             sp = run["split"]
             lines.append(f"| {r['system']} | {run['optimizer']} | {run['final_error']:.2e} | {sp['null']:.2e} | "
                          f"{sp['soft']:.2e} ({sp['n_soft']}) | {sp['stiff']:.2e} | {sp['outside']:.1e} |")
-    long = [r for r in results if r.get("long_lbfgs")]
+    long = [r for r in results if r.get("long")]
     if long:
-        lines += ["", "## Long L-BFGS runs: energy in null modes", "",
-                  "| system | iteration | E - E_0 | in null modes |", "|---|---|---|---|"]
+        lines += ["", "## Long runs: energy in null modes", "",
+                  "| system | optimizer | iteration | E - E_0 | in null modes |", "|---|---|---|---|---|"]
         for r in long:
-            for rec in r["long_lbfgs"]:
-                lines.append(f"| {r['system']} | {rec['iteration']} | {rec['error']:.3e} | {rec['null']:.3e} |")
+            for opt, recs in r["long"].items():
+                for rec in recs:
+                    lines.append(f"| {r['system']} | {opt} | {rec['iteration']} | {rec['error']:.3e} | "
+                                 f"{rec['null']:.3e} |")
     return "\n".join(lines)
 
 
@@ -171,10 +176,12 @@ def main(argv=None) -> int:
     ap.add_argument("--max-iter", type=int, default=60)
     ap.add_argument("--soft-rtol", type=float, default=1e-3)
     ap.add_argument("--long-iters", type=int, default=0)
+    ap.add_argument("--long-optimizers", default="sd,cg,lbfgs")
     ap.add_argument("--threads", type=int, default=None)
     ap.add_argument("--out", default="results/")
     args = ap.parse_args(argv)
     args.long_marks = (10, 30, 100, 300, 1000)
+    args.long_optimizers = [s.strip() for s in args.long_optimizers.split(",") if s.strip()]
     args.threads_env = pin_threads(args.threads)
     os.makedirs(args.out, exist_ok=True)
     results = []
