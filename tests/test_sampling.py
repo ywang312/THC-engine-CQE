@@ -11,9 +11,10 @@ import math
 import numpy as np
 import pytest
 
-from thc_engine_cqe import systems
+from thc_engine_cqe import sampling, systems
 from thc_engine_cqe.cqe import run_cqe
 from thc_engine_cqe.diagnostics.linearized import linearize, structured_basis
+from thc_engine_cqe.fci_ops import FCISpace
 from thc_engine_cqe.measure import routes, schemes, targets
 from thc_engine_cqe.measure.pauli import QubitMapping, QubitState
 from thc_engine_cqe.optimizers import structure_error, symmetrize_residual
@@ -53,6 +54,11 @@ def it2_h4(h4):
     return run_cqe(h4, max_iter=2).ci
 
 
+@pytest.fixture(scope="module")
+def hf_h4(h4):
+    return FCISpace.of(h4).hf()
+
+
 def _direct_variances(active, ci, kind):
     m = QubitMapping(active.norb)
     el = targets.element_set(active.norb, kind)
@@ -64,7 +70,8 @@ def _direct_variances(active, ci, kind):
 def mg_var(h4, fci_h4):
     """Direct route, matchgate shadows, at FCI: exact per-shot per-element variances.
 
-    Observed: spin-orbital total 426.3 (per element 0.63-13.6), spin-free 671.4 (1.37-54.6).
+    Spin-orbital total 426.3 (per element 0.635-13.64), spin-free 671.4 (1.364-54.54);
+    asserted in test_element_variances_and_the_default_variance_source.
     """
     return {kind: _direct_variances(h4, fci_h4[1], kind) for kind in targets.KINDS}
 
@@ -174,7 +181,8 @@ def test_aux_route_mean_is_A_plus_bias(h4, it2_h4):
 
 def test_aux_bias_equals_aux_residual_minus_exact_residual(h4, it2_h4):
     """The filled bias -sum_l Im dm2(Lambda_l)/delta - A is the fill of aux_residual - exact_residual,
-    for both element kinds (the spin-orbital one through contract_spin) and every method."""
+    for both element kinds (the spin-orbital one through contract_spin) and every method;
+    bias=False drops it."""
     n = h4.norb
     rd = _rd(h4, it2_h4)
     for method in routes.METHODS:
@@ -190,6 +198,11 @@ def test_aux_bias_equals_aux_residual_minus_exact_residual(h4, it2_h4):
             assert np.array_equal(model(rd, it2_h4, 0), symmetrize_residual(rd.A + b))
             tensors.append(b)
         assert np.abs(tensors[0] - tensors[1]).max() < 1e-13 * np.abs(tensors[0]).max()
+        assert np.abs(tensors[0]).max() > 1e-3 * np.abs(rd.A).max()          # a bias that bias=False must drop
+        off = ResidualNoise(h4, route="aux", kind="spin_free", shots=np.inf, delta=0.3, aux_method=method,
+                            per_element_variance=np.zeros(60), bias=False, rng=0)
+        assert not off.bias and not off.bias_tensor(it2_h4).any()
+        assert np.array_equal(off(rd, it2_h4, 0), symmetrize_residual(rd.A))
 
 
 def test_exact_aux_route_damps_each_excitation_by_sinc(h4, lin_h4):
@@ -264,17 +277,20 @@ def test_full_covariance_option(h4, it2_h4):
 
 def test_noise_floor_predicts_the_noisy_cqe_h4(h4, lin_h4, mg_var):
     """Fixed-step SD from FCI with ResidualNoise (direct route, matchgate shadows, spin-orbital
-    elements, S = 1e6 shots per iteration): the time-averaged energy of the fast modes
-    (1 - eps lambda/2 < 0.98; 16 of 19) matches LinearizedCQE.noise_floor(eps, noise_factor).
-    Predicted floor 1.105e-5 Ha (eps = 0.03). Observed ratios of the fast-mode energy: 0.98-1.05
-    over 3 seeds x eps in {0.03, 0.05} x S in {1e5, 1e6} x both element kinds; total E - E_FCI
-    0.97-1.03 of the predicted total."""
+    elements, S = 1e6 shots per iteration, 200 + 1500 steps): the time-averaged energy of the fast
+    modes (1 - eps lambda/2 < 0.98; 16 of 19) matches LinearizedCQE.noise_floor(eps, noise_factor).
+    Predicted floor 1.105e-5 Ha (eps = 0.03). The linear model, simulated with the transient from
+    FCI, gives this ratio a per-run standard deviation of 1.8% (estimate); the 8% tolerance is
+    4.4 of them and within the spec's 15%. Observed over 46 runs with 8 seeds (eps in {0.03,
+    0.05}, S in {1e5, 1e6}, both kinds): fast modes 0.97-1.05, total E - E_FCI 0.95-1.03 of the
+    predicted total (module docstring)."""
     eps, s = 0.03, 1e6
     model = ResidualNoise(h4, kind="spin_orbital", shots=s, per_element_variance=mg_var["spin_orbital"], rng=1)
     pred = lin_h4.noise_floor(eps, noise_factor(model, h4.norb))
     assert pred["stable"] and not pred["undriven"].any()
     assert abs(pred["total"] / 1.105e-5 - 1) < 1e-3
     fast = 1 - 0.5 * eps * lin_h4.stiffness < 0.98
+    assert fast.sum() == 16
     acc = np.zeros(lin_h4.n_states)
     count = [0]
     n_burn = 200
@@ -287,7 +303,7 @@ def test_noise_floor_predicts_the_noisy_cqe_h4(h4, lin_h4, mg_var):
     run_cqe(h4, ci0=lin_h4.psi0, max_iter=n_burn + 1500, eps_candidates=(eps,), r_tol=0.0, e_tol=0.0,
             residual_estimator=model, callback=cb)
     mean = acc / count[0]
-    assert abs(mean[fast].sum() / pred["per_mode"][fast].sum() - 1) < 0.15
+    assert abs(mean[fast].sum() / pred["per_mode"][fast].sum() - 1) < 0.08
     assert model.ledger.n_iterations == n_burn + 1500
 
 
@@ -295,17 +311,21 @@ def test_aux_bias_fixed_point_matches_bias_offset_h4(h4, lin_h4):
     """Aux route (first-order DF-Trotter, delta = 0.1, untruncated DF), shots = inf, fixed-step SD
     (eps = 0.05) from FCI: the per-mode energies after n steps match the linear prediction
     (y*_m (1 - p_m^n))^2, p_m = 1 - eps lambda_m / 2, with y* = -B^+ b(Psi_0) from bias_offset.
-    The three softest modes (lambda <= 0.98) hold 0.03% of the offset (4.02e-6 Ha), so 250
-    steps reach 99.99% of it. Observed: 1.014 (total, after 400 and 1500 steps; 1.13 at
-    delta = 0.3); with the linear state dependence of the bias, b(Psi) = b(Psi_0) + J d, the
-    linear prediction agrees to 1e-4 (3e-3 at delta = 0.3)."""
+    The three softest modes (lambda = 0.054, 0.953, 0.983; the next is 2.76) hold 0.031% of the
+    offset (4.024e-6 Ha), so 250 steps reach 99.991% of it (all asserted). Observed: 1.014
+    (total, after 400 and 1500 steps; 1.13-1.14 at delta = 0.3); with the linear state
+    dependence of the bias, b(Psi) = b(Psi_0) + J d, the linear prediction agrees to 1e-4
+    (2e-4 to 2.7e-3 at delta = 0.3)."""
     eps, n_it = 0.05, 250
+    assert np.allclose(lin_h4.stiffness[:4], [0.0541, 0.9526, 0.9827, 2.7635], rtol=0, atol=5e-5)
     model = ResidualNoise(h4, route="aux", kind="spin_free", shots=np.inf, delta=0.1, aux_method="df-trotter",
                           per_element_variance=np.zeros(60), rng=0)
     pred = lin_h4.bias_offset(model.bias_tensor(lin_h4.psi0))
     assert abs(pred["energy"] / 4.024e-6 - 1) < 1e-3
+    assert abs(pred["per_mode"][:3].sum() / pred["energy"] / 3.085e-4 - 1) < 1e-3
     pm = 1 - 0.5 * eps * lin_h4.stiffness
     pred_n = ((lin_h4.modes.T @ pred["y"]) * (1 - pm ** n_it)) ** 2
+    assert abs(pred_n.sum() / pred["energy"] - 0.999909) < 1e-6
     res = run_cqe(h4, ci0=lin_h4.psi0, max_iter=n_it, eps_candidates=(eps,), r_tol=0.0, e_tol=0.0,
                   residual_estimator=model)
     got = lin_h4.mode_energies(res.ci)
@@ -329,9 +349,9 @@ def test_exact_aux_route_keeps_the_fixed_point(h4, lin_h4, fci_h4):
 def test_snapshot_residual_matches_the_gaussian_diagonal(h4, it2_h4):
     """Simulated matchgate snapshots at SD iterate 2: unbiased for the exact residual, per-element
     variances equal to the exact matchgate per-element variances (the Gaussian model's diagonal),
-    and correlated elements. Observed with 1e5 snapshots (FCI and iterate 2): variance ratios
-    0.98-1.02 per element, off-diagonal correlation coefficients RMS 0.049 (spin-orbital) and
-    0.096 (spin-free), max |rho| 0.42 and 0.73."""
+    and correlated elements. Observed with 1e5 snapshots (FCI and iterate 2, three seeds):
+    variance ratios 0.97-1.03 per element, off-diagonal correlation coefficients RMS 0.049
+    (spin-orbital) and 0.095-0.096 (spin-free), max |rho| 0.42-0.43 and 0.72-0.73."""
     kind = "spin_orbital"
     vr = _direct_variances(h4, it2_h4, kind)
     snap = SnapshotResidual(h4, kind=kind, shots=100, rng=31)
@@ -371,14 +391,59 @@ def test_snapshot_residual_in_run_cqe(h4, it2_h4):
         runs.append(res)
     for s1, s2 in zip(runs[0].steps, runs[1].steps):
         assert np.array_equal(s1.residual_est, s2.residual_est) and s1.energy_after == s2.energy_after
-    mean, cov = SnapshotResidual(h4, shots=1, rng=52).element_covariance(it2_h4, 2000)
-    assert mean.shape == (150,) and cov.shape == (150, 150) and np.allclose(cov, cov.T)
+
+
+def test_snapshot_helpers_see_the_same_snapshots_for_any_batch(h4, it2_h4):
+    """With equal seeds, estimate, snapshot_estimates and element_covariance (both branches) use the
+    same snapshots, whatever the block size: estimate is the mean of the single-snapshot
+    estimates, element_covariance is their sample covariance (1/(n-1)) or the second moment
+    about the given mean (1/n). The estimates are bit-identical across block sizes."""
+    r = 2000
+    x = SnapshotResidual(h4, shots=1, rng=52).snapshot_estimates(it2_h4, r)            # default batch 512
+    assert x.shape == (r, 150)
+    scale = np.abs(x).max()
+    mean, cov = SnapshotResidual(h4, shots=1, rng=52, batch=300).element_covariance(it2_h4, r)
+    assert np.abs(mean - x.mean(axis=0)).max() < 1e-12 * scale
+    assert np.abs(cov - np.cov(x.T)).max() < 1e-12 * np.abs(cov).max()
+    a = routes.exact_residual(h4, it2_h4, targets.element_set(h4.norb, "spin_orbital"), "spin_orbital")
+    mean_a, cov_a = SnapshotResidual(h4, shots=1, rng=52, batch=77).element_covariance(it2_h4, r, mean=a)
+    assert np.abs(mean_a - x.mean(axis=0)).max() < 1e-12 * scale
+    assert np.abs(cov_a - (x - a).T @ (x - a) / r).max() < 1e-12 * np.abs(cov_a).max()
+    est = [SnapshotResidual(h4, shots=r, rng=52, batch=b).estimate(it2_h4) for b in (None, 128, 7)]
+    assert np.abs(est[0] - x.mean(axis=0)).max() < 1e-12 * scale
+    assert np.array_equal(est[0], est[1]) and np.array_equal(est[0], est[2])
+    sums = SnapshotResidual(h4, shots=1, rng=52, batch=1000).string_sums(it2_h4, r)
+    assert np.array_equal(sums, np.round(sums)) and np.abs(sums).max() <= r
+    model = SnapshotResidual(h4, shots=700, rng=3, batch=100)
+    assert model.info["batch"] == 100 and SnapshotResidual(h4, shots=1, rng=0).info["batch"] == 512
+    assert np.array_equal(model.estimate(it2_h4), SnapshotResidual(h4, shots=700, rng=3).estimate(it2_h4))
+
+
+def test_snapshot_matchings_are_uniform():
+    """The ranks of 2n uniforms paired consecutively give every perfect matching of the 2n Majoranas
+    with probability 1/(2n-1)!! (chi^2 over all 15 and 105 matchings), as valid matchings with
+    a < b in every pair and pairs sorted by a."""
+    from scipy.stats import chi2
+
+    rng = np.random.default_rng(91)
+    for n, count in ((3, 15), (4, 105)):
+        draws = 200 * count
+        mt = sampling._matchings_from_uniforms(rng.random((draws, 2 * n)))
+        assert mt.shape == (draws, n, 2)
+        assert np.array_equal(np.sort(mt.reshape(draws, -1), axis=1), np.tile(np.arange(2 * n), (draws, 1)))
+        assert np.all(mt[:, :, 0] < mt[:, :, 1]) and np.all(np.diff(mt[:, :, 0], axis=1) > 0)
+        _, freq = np.unique(mt.reshape(draws, -1), axis=0, return_counts=True)
+        assert freq.size == count
+        stat = float(((freq - 200.0) ** 2 / 200.0).sum())
+        assert chi2.sf(stat, count - 1) > 1e-3
 
 
 # --------------------------------------------------------------------------- energies and ledger
-def test_energy_noise(h4, fci_h4, it2_h4):
+def test_energy_noise(h4, fci_h4, it2_h4, hf_h4):
     """E_est = E + N(0, V/S): DF variances at the estimated state itself (shift=True), frozen
-    variances for the other schemes; unbiased with variance V/S by sampling."""
+    variances for the other schemes; unbiased with variance V/S by sampling, and draw by draw
+    E + sqrt(V(ci)/S) z with the Generator's normals. Shifted DF variance relative to FCI:
+    0.793 at HF and 0.946 at SD iterate 2."""
     e_it2 = compute_residual(h4, it2_h4).energy
     model = EnergyNoise(h4, shots=1e4, rng=61)
     v = schemes.df_variance(h4, it2_h4, shift=True).total
@@ -388,11 +453,28 @@ def test_energy_noise(h4, fci_h4, it2_h4):
     assert abs(draws.mean()) < 4.5 * math.sqrt(v / 1e4 / m)
     assert abs(draws.var() / (v / 1e4) - 1) < 5 * math.sqrt(2 / m)
     assert model.ledger.summary()["energy_shots_candidate"] == m * 1e4
+    # draw by draw, with the variance of the state passed in (DF, "exact" mode)
+    states = (hf_h4, it2_h4, fci_h4[1])
+    v_df = [schemes.df_variance(h4, ci, shift=True).total for ci in states]
+    assert v_df[0] / v_df[2] == pytest.approx(0.7932, abs=5e-4)
+    assert v_df[1] / v_df[2] == pytest.approx(0.9463, abs=5e-4)
+    e = EnergyNoise(h4, shots=100.0, rng=11)
+    z = np.random.default_rng(11).standard_normal(3)
+    for k, ci in enumerate(states):
+        assert e(0.25, ci, "candidate") - 0.25 == pytest.approx(math.sqrt(v_df[k] / 100.0) * z[k], rel=1e-12)
+    # frozen schemes: V at reference_ci (default FCI), the same for every state
     st = QubitState.from_ci(h4.norb, h4.nelec, fci_h4[1], QubitMapping(h4.norb))
     qwc = EnergyNoise(h4, scheme="qwc", shots=1e4, rng=62)
     assert qwc.variance_mode == "frozen"
     assert qwc.frozen_variance == pytest.approx(
         schemes.qwc_variance(targets.energy_target(h4), st).total, rel=1e-12)
+    st2 = QubitState.from_ci(h4.norb, h4.nelec, it2_h4, QubitMapping(h4.norb))
+    v2 = schemes.qwc_variance(targets.energy_target(h4), st2).total
+    qwc2 = EnergyNoise(h4, scheme="qwc", shots=100.0, rng=12, reference_ci=it2_h4)
+    assert qwc2.frozen_variance == pytest.approx(v2, rel=1e-12) and abs(v2 / qwc.frozen_variance - 1) > 0.05
+    z = np.random.default_rng(12).standard_normal(2)
+    for k, ci in enumerate((hf_h4, fci_h4[1])):
+        assert qwc2(0.0, ci, "current") == pytest.approx(math.sqrt(v2 / 100.0) * z[k], rel=1e-12)
     assert EnergyNoise(h4, shots=np.inf, rng=63)(-1.5, it2_h4, "current") == -1.5
     assert EnergyNoise(h4, shots=1.0, per_shot_variance=0.0, rng=64)(-1.5, it2_h4, "current") == -1.5
     with pytest.raises(ValueError):
@@ -466,6 +548,72 @@ def test_element_variances_and_the_default_variance_source(h4, fci_h4, it2_h4, m
                        atol=1e-12)
     parts = ra.info["parts"]
     assert len(parts) == 11 and ra.total == pytest.approx(sum(math.sqrt(p.total) for p in parts) ** 2)
+    so, sf = mg_var["spin_orbital"], mg_var["spin_free"]
+    assert so.method == sf.method == "exact"
+    for res, (total, lo, hi) in ((so, (426.3, 0.635, 13.64)), (sf, (671.4, 1.364, 54.54))):
+        assert res.total == pytest.approx(total, abs=0.05)
+        assert res.per_target.min() == pytest.approx(lo, abs=5e-4)
+        assert res.per_target.max() == pytest.approx(hi, abs=5e-3)
+
+
+def test_computed_variances_are_frozen_at_reference_ci(h4, hf_h4):
+    """reference_ci selects the state of the computed variances (aux route with QWC, whose single
+    elements differ most between HF and FCI)."""
+    kw = dict(route="aux", scheme="qwc", kind="spin_free", delta=0.1, shots=1.0, rng=0)
+    at_hf = ResidualNoise(h4, reference_ci=hf_h4, **kw)
+    at_fci = ResidualNoise(h4, **kw)
+    ref = element_variances(h4, hf_h4, route="aux", scheme="qwc", kind="spin_free", delta=0.1)
+    assert np.array_equal(at_hf.variances, ref.per_target)
+    assert np.array_equal(at_fci.variances, element_variances(h4, None, route="aux", scheme="qwc",
+                                                              kind="spin_free", delta=0.1).per_target)
+    assert (at_hf.variances / at_fci.variances).min() < 0.02
+
+
+def test_computed_variances_are_reproducible_from_the_model_seed(h4):
+    """Monte Carlo variances (here matchgate RB) without a seed draw from a child of the model's
+    SeedSequence: equal seeds give bit-identical variances, other seeds others; the recorded seed
+    reproduces them; the noise draws equal those of a model with given variances (the model's
+    stream is not used). The same holds for the frozen energy variance of a non-DF scheme."""
+    opts = {"method": "rb", "n_settings": 50}
+    a = ResidualNoise(h4, kind="spin_free", shots=1.0, rng=5, variance_options=opts)
+    b = ResidualNoise(h4, kind="spin_free", shots=1.0, rng=np.random.default_rng(5), variance_options=opts)
+    c = ResidualNoise(h4, kind="spin_free", shots=1.0, rng=6, variance_options=opts)
+    assert a.info["variance_result"].method == "rb"
+    assert np.array_equal(a.variances, b.variances) and not np.array_equal(a.variances, c.variances)
+    rec = a.info["variance_seed"]
+    assert rec["entropy"] == 5 and rec["spawn_key"] == (sampling._RESIDUAL_VARIANCE_TAG,)
+    again = element_variances(h4, None, kind="spin_free", **opts,
+                              seed=np.random.SeedSequence(rec["entropy"], spawn_key=rec["spawn_key"]))
+    assert np.array_equal(again.per_target, a.variances)
+    given = ResidualNoise(h4, kind="spin_free", shots=1.0, rng=5, per_element_variance=a.variances)
+    assert np.array_equal(a.sample_element_errors(), given.sample_element_errors())
+    seeded = ResidualNoise(h4, kind="spin_free", shots=1.0, rng=5, variance_options={**opts, "seed": 3})
+    assert seeded.info["variance_seed"] == 3
+    assert np.array_equal(seeded.variances, element_variances(h4, None, kind="spin_free", **opts, seed=3).per_target)
+    eopts = {"method": "rb", "n_settings": 30}
+    ea = EnergyNoise(h4, scheme="matchgate_shadow", shots=1.0, rng=5, scheme_options=eopts)
+    eb = EnergyNoise(h4, scheme="matchgate_shadow", shots=1.0, rng=5, scheme_options=eopts)
+    ec = EnergyNoise(h4, scheme="matchgate_shadow", shots=1.0, rng=6, scheme_options=eopts)
+    assert ea.frozen_variance == eb.frozen_variance != ec.frozen_variance
+    assert ea.info["variance_seed"]["spawn_key"] == (sampling._ENERGY_VARIANCE_TAG,)
+    eg = EnergyNoise(h4, scheme="matchgate_shadow", shots=1.0, rng=5, per_shot_variance=ea.frozen_variance)
+    assert ea(0.0, h4.fci()[1], "current") == eg(0.0, h4.fci()[1], "current")
+
+
+def test_child_seed_without_a_seed_sequence():
+    """A legacy-seeded bit generator has no SeedSequence: the child seed is hashed from a copy of
+    its stream, deterministically and without advancing the Generator."""
+    def legacy_generator():
+        bg = getattr(np.random.RandomState(3), "_bit_generator", None)      # numpy's legacy seeding
+        if bg is None or getattr(bg, "seed_seq", None) is not None:
+            pytest.skip("this numpy has no legacy-seeded bit generator without a SeedSequence")
+        return np.random.Generator(bg)
+
+    legacy, twin = legacy_generator(), legacy_generator()
+    s1 = sampling._child_seed(legacy, 7)
+    s2 = sampling._child_seed(legacy, 7)
+    assert s1.entropy == s2.entropy and s1.spawn_key == (7,)
+    assert legacy.random() == twin.random()
 
 
 def test_input_validation(h4, mg_var):
@@ -493,6 +641,8 @@ def test_input_validation(h4, mg_var):
         EnergyNoise(h4, shots=1.0, variance="exact", per_shot_variance=1.0, rng=0)
     with pytest.raises(ValueError):
         SnapshotResidual(h4, shots=10.5, rng=0)
+    with pytest.raises(ValueError):
+        SnapshotResidual(h4, shots=10, rng=0, batch=0)
     with pytest.raises(TypeError):
         noise_factor(SnapshotResidual(h4, shots=10, rng=0))
     rd = _rd(h4, h4.fci()[1])

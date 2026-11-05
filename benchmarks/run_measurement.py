@@ -830,7 +830,7 @@ def _reason(row: dict, ref: dict) -> str:
 
     def closest_it():
         s = st.get("closest")
-        return "–" if s is None else f"{s['iterate']} ({s['e_err'] * 1e3:.2f} mHa)"
+        return "–" if s is None else f"{s['iterate']} ({_mha(s['e_err'], 2)} mHa)"
 
     try:
         if cid.startswith("E-QWC"):
@@ -914,6 +914,12 @@ def _pct(x) -> str:
     return "–" if x is None else f"{100 * x:.3g}%"
 
 
+def _mha(x, dec: int = 3) -> str:
+    """E - E_FCI (Ha) in mHa; round-off-level values (FCI) print as 0."""
+    v = 1e3 * float(x)
+    return f"{0.0 if abs(v) < 0.5 * 10.0 ** -dec else v:.{dec}f}"
+
+
 def _signed(x) -> str:
     return "–" if x is None else f"{100 * x:+.3g}%"
 
@@ -936,7 +942,7 @@ def md_states(results: dict) -> list[str]:
              "norm A (spin-free elements) | sigma^2 (Ha^2) |", "|---|---|---|---|---|---|---|"]
     for name, res in results.items():
         for s in res["states"]:
-            lines.append(f"| {name} | {state_label(s['iterate'])} | {s['e_err'] * 1e3:.3f} | "
+            lines.append(f"| {name} | {state_label(s['iterate'])} | {_mha(s['e_err'])} | "
                          f"{_g(s['norm_A_full_spin_free'], 4)} | {_g(s['norm_A_elements_spin_orbital'], 4)} | "
                          f"{_g(s['norm_A_elements_spin_free'], 4)} | {_g(s['sigma2'], 4)} |")
     return lines + [""]
@@ -1126,7 +1132,7 @@ def md_claims(rows: list[dict]) -> list[str]:
             v, st = r["values"].get(key), r["states"].get(key)
             if v is None or st is None:
                 return "–"
-            where = "FCI" if st["iterate"] == "fci" else f"it. {st['iterate']}, {st['e_err'] * 1e3:.2f}"
+            where = "FCI" if st["iterate"] == "fci" else f"it. {st['iterate']}, {_mha(st['e_err'], 2)}"
             return f"{fmt(v)} ({where})"
 
         ratio = "–"
@@ -1185,7 +1191,7 @@ def md_system(res: dict, deltas) -> str:
                   f"(spin-orbital / spin-free), {_g(dt['spin_orbital']['pairs'])} / {_g(dt['spin_free']['pairs'])} "
                   "term pairs.", ""]
     for s in res["states"]:
-        lines.append(f"## Iterate {state_label(s['iterate'])}: E - E_FCI = {s['e_err'] * 1e3:.3f} mHa, "
+        lines.append(f"## Iterate {state_label(s['iterate'])}: E - E_FCI = {_mha(s['e_err'])} mHa, "
                      f"norm A (full) = {_g(s['norm_A_full_spin_free'], 4)}, sigma^2 = {_g(s['sigma2'], 4)}")
         lines.append("")
         if "residual" not in s:
@@ -1322,8 +1328,8 @@ def summary_only(args) -> int:
     """Rebuild the markdown files and the summary from the measurement_<system>.json files in --out.
 
     The states, deltas and residual systems are those recorded in the files (the first system's
-    settings); the runtime total is the sum of the systems' runtimes, and the cache check is taken from
-    an existing measurement_summary.json.
+    settings). The cache check and, if the files are those of that run, the wall time are taken from an
+    existing measurement_summary.json; otherwise the runtime total is the sum of the systems' runtimes.
     """
     results = {}
     for name in args.systems:
@@ -1345,12 +1351,17 @@ def summary_only(args) -> int:
         with open(os.path.join(args.out, f"measurement_{name}.md"), "w") as fh:
             fh.write(md_system(res, args.deltas))
     cache_check = None
+    total = float(sum(r["seconds"] for r in results.values()))
     old = os.path.join(args.out, "measurement_summary.json")
     if os.path.exists(old):
         with open(old) as fh:
-            cache_check = json.load(fh).get("cache_check")
+            prev = json.load(fh)
+        cache_check = prev.get("cache_check")
+        timing = prev.get("timing", {})
+        if set(timing) == set(results) and all(timing[n].get("total") == r["seconds"] for n, r in results.items()):
+            total = float(prev["seconds"])                  # the same run: keep its wall time
     settings = dict(recorded[0], summary_only=True)
-    write_summary(results, args, float(sum(r["seconds"] for r in results.values())), cache_check, settings)
+    write_summary(results, args, total, cache_check, settings)
     return 0
 
 

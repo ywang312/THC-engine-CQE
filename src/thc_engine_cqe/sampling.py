@@ -14,10 +14,23 @@ The models are estimator hooks of :func:`thc_engine_cqe.cqe.run_cqe`:
 
 Real states and integrals (M2 scope). Conventions: docs/conventions.md and the
 element sets, targets and routes of :mod:`thc_engine_cqe.measure.targets` and
-:mod:`thc_engine_cqe.measure.routes`. All randomness comes from the numpy
-Generator passed as ``rng`` (or built from a seed); ``model.seed`` records the
-entropy and spawn key of its SeedSequence. Give independent models independent
-streams, e.g. ``np.random.SeedSequence(seed).spawn(2)``.
+:mod:`thc_engine_cqe.measure.routes`.
+
+Randomness. All randomness comes from the numpy Generator passed as ``rng`` (or
+built from a seed); ``model.seed`` records the entropy and spawn key of its
+SeedSequence. Give independent models independent streams, e.g.
+``np.random.SeedSequence(seed).spawn(2)``. Variances that a model computes itself
+(the per-element variances of ResidualNoise, the energy variances of the non-DF
+schemes of EnergyNoise) can be Monte Carlo estimates: by default matchgate shadows
+switch from exact pair sums to Rao-Blackwellized sampling above 2e7 term pairs
+(``measure.schemes``). The direct-route targets have 1.0e7 (spin-orbital) and
+1.5e7 (spin-free) pairs for H4 but 1.7e9 and 4.2e9 for H6 (observed), so from
+N = 6 on the default variances are Monte Carlo estimates. Unless the options carry
+a ``seed``, those computations draw from a child of the model's SeedSequence,
+SeedSequence(entropy, spawn_key=spawn_key + (tag,)) with a fixed tag per model
+class, recorded in ``model.info["variance_seed"]``. They do not draw from ``rng``:
+equal seeds give bit-identical variances, and the noise draws are the same as with
+given variances (tested; also observed for H6 at 1.0 A).
 
 Residual noise model (ResidualNoise)
 ------------------------------------
@@ -98,17 +111,20 @@ Routes:
     sinc x = sin(x)/x (tested): the route damps the residual of every excitation by
     sinc(delta w_k). Fixed-step SD then maps y by I - (eps/2) K diag(sinc(delta w)), and
     relaxation slows; observed on H4, the sorted eigenvalues of K diag(sinc(delta w))
-    are 0.98-1.00 (delta = 0.1), 0.86-0.99 (0.3) and 0.51-0.96 (0.6) times the sorted
-    stiffnesses lambda.
+    are 0.984-0.999 (delta = 0.1), 0.862-0.990 (0.3) and 0.515-0.959 (0.6) times the
+    sorted stiffnesses lambda.
   - "df-trotter" and "df-fragments": the fragment propagators do not evolve an
     eigenstate by a phase, so b(Psi_0) != 0, of order delta^2, which moves the
     fixed point of fixed-step SD to y* = -B^+ b (``LinearizedCQE.bias_offset``).
-    Observed on H4 at FCI: ||b|| = 9.1e-3 (df-trotter) and 5.5e-3 (df-fragments)
-    at delta = 0.1, offsets 4.0e-6 and 7.6e-6 Ha (tested for df-trotter), scaling as
-    delta^2 and delta^4 to within 7% for delta = 0.01-0.3. The three softest modes
-    (lambda <= 0.98) hold 0.03% of the df-trotter offset, while 74% of the
-    df-fragments offset lies in the softest mode (lambda = 0.054, relaxation time
-    2/(eps lambda) = 740 steps at eps = 0.05; observed).
+    Observed on H4 at FCI, delta = 0.1: Frobenius norms of the filled N^4 bias tensor
+    9.08e-3 (df-trotter) and 5.49e-3 (df-fragments), or 5.71e-3 and 2.94e-3 over the
+    60 spin-free elements; offsets 4.02e-6 and 7.55e-6 Ha (tested for df-trotter).
+    Over delta in {0.01, 0.03, 0.1, 0.3}, ||b|| / delta^2 and offset / delta^4 stay
+    within 4.0% and 7.1% (df-trotter) and 1.2% and 3.8% (df-fragments) of their
+    delta = 0.01 values (observed). The H4 stiffnesses start 0.054, 0.953, 0.983,
+    2.76 (tested). The three softest modes hold 0.031% of the df-trotter offset
+    (tested), while 74% of the df-fragments offset lies in the softest mode
+    (relaxation time 2/(eps lambda) = 740 steps at eps = 0.05; observed).
 
   ``bias=False`` keeps the aux variances and drops the bias.
 * "isotropic": eta = (sigma / sqrt(S)) U z with U = ``structured_basis(N)`` and
@@ -132,8 +148,9 @@ The systematic error of freezing, observed along the exact SD trajectory from HF
 * Pauli shadows (H4 direct and aux, H6 at 1.0 A aux): totals within 0.4%, single
   elements 0.80-1.06;
 * QWC: totals within 3% (H4 aux, spin-free; 1.5% for H6 at 1.0 A and the H4 direct
-  route), but single aux-route elements change by factors up to 170 (ratio 0.006 at
-  HF, a single determinant); 0.85-1.08 for the H4 direct route.
+  route), but single aux-route elements change by factors up to 175 (ratio 0.0057 at
+  HF, a single determinant; H6 at 1.0 A, spin-free; 122 for H4); 0.85-1.08 for the H4
+  direct route.
 
 Correlated Gaussian (extension): ``per_element_covariance`` C (K, K, per shot) gives
 eta = C^{1/2} z / sqrt(S), e.g. with C from :meth:`SnapshotResidual.element_covariance`.
@@ -151,28 +168,43 @@ With an aux bias, the stationary mean energy of the linear model is the offset
 ||y*||^2 plus the noise floor tr C (they add).
 
 Validated on H4 (1.8 bohr), fixed-step SD from FCI with the direct route and
-matchgate shadows, 200 + 1500 steps: the time-averaged energy of the fast modes is
-0.98-1.05 of ``noise_floor`` and the total E - E_FCI 0.97-1.03 of it (3 seeds x
-eps in {0.03, 0.05} x S in {1e5, 1e6} x both kinds; predicted floors 1.1e-5 to
-2.7e-4 Ha; tested within 15%); at S = 5000 (floor 5.4e-3 Ha, eps = 0.05, 100 + 500
-steps) still 0.98-1.01, and 0.98-1.00 for the correlated Gaussian (observed;
-"Snapshot residual"). The aux-route fixed point (df-trotter,
-delta = 0.1, S = inf, eps = 0.05) is 1.014 of ``bias_offset`` (tested within 5%; 1.13
-at delta = 0.3). The difference is the state dependence of the bias,
-b(Psi) = b(Psi_0) + J d with J = O(delta^2): with J the linear prediction agrees to
-1e-4 (3e-3 at delta = 0.3; observed). For df-fragments only the relaxed modes
-agree (to 0.6-5%); in the softest mode, whose first-order residual is small, the
-nonlinear CQE departs from the linear prediction (after 1500 steps 0.92 of it at
-delta = 0.1 and 0.44 at delta = 0.3; observed).
+matchgate shadows, 200 + 1500 steps, both kinds, eps in {0.03, 0.05} and S in {1e5,
+1e6} (predicted floors 1.1e-5 to 2.7e-4 Ha). Over 46 runs with 8 seeds (observed),
+the time-averaged energy of the fast modes (1 - eps lambda/2 < 0.98) is 0.97-1.05 of
+``noise_floor`` and the total E - E_FCI is 0.95-1.03 of the predicted total. Runs
+that differ only in S give nearly the same ratios, because the linear dynamics only
+rescale. The linear model sets the scatter. Simulated with the transient from FCI
+(4000 replicas; estimate), the per-run standard deviation is 1.8-1.9% for the fast
+modes and 2.2-2.7% for the total. The total's expected ratio is 0.993 (eps = 0.03)
+and 0.997 (eps = 0.05), because the softest mode (lambda = 0.054) has not
+equilibrated. Every observation lies within 2.7 standard deviations; the test
+asserts 8% (4.4 standard deviations) for one seed. At S = 5000 (floor 5.4e-3 Ha,
+eps = 0.05, 100 + 500 steps) the total ratio is 0.95-1.01 for independent elements
+(7 runs) and 0.98-1.00 for the correlated Gaussian (observed; "Snapshot residual"),
+against a per-run standard deviation of 3.4% and 3.7% and an expected ratio of 0.99
+(estimates).
+
+The aux-route fixed point (df-trotter, delta = 0.1, S = inf, eps = 0.05) is 1.014 of
+``bias_offset`` (observed after 400 and 1500 steps; tested within 5%), and
+1.13-1.14 at delta = 0.3 (observed). The difference is the state dependence of the
+bias, b(Psi) = b(Psi_0) + J d with J = O(delta^2). With J (central differences), the
+linear prediction agrees to 1e-4 at delta = 0.1 and to 2e-4 (400 steps) and 2.7e-3
+(1500 steps) at delta = 0.3 (observed). For df-fragments only the relaxed modes
+agree, to 0.6-5.3% (observed). In the softest mode, whose first-order residual is
+small, the nonlinear CQE departs from the linear prediction: after 1500 steps the
+total is 0.92 (delta = 0.1) and 0.44 (delta = 0.3) of the 1500-step linear
+prediction (observed).
 
 Snapshot residual (SnapshotResidual)
 ------------------------------------
 A drop-in ``residual_estimator`` that simulates the direct route with matchgate
 shadows (Zhao, Rubin, Miyake, PRL 127, 110504 (2021)) instead of drawing Gaussian
 errors. Each snapshot draws a uniformly random perfect matching pi of the 2n
-Majoranas (``schemes.random_matchings``) and measures its n commuting pair
-operators i gamma_a gamma_b one after the other on the dense state (Born rule,
-projective). The post-measurement state phi is the joint eigenvector of the n
+Majoranas (the ranks of 2n uniforms, paired consecutively; uniformity tested) and
+measures its n commuting pair operators i gamma_a gamma_b one after the other on
+the dense state (Born rule, projective, with n more uniforms). A snapshot thus uses
+3n consecutive uniforms of the Generator, and the results do not depend on the
+block size ``batch`` (tested). The post-measurement state phi is the joint eigenvector of the n
 pair operators, so every Pauli string P_j of the targets covered by pi (a union of
 pairs of pi; enumerated as the unions of at most k_max = 3 pairs, the degree of the
 three-body X_e, and looked up among the target strings) has a sharp value
@@ -188,21 +220,29 @@ and the elements are correlated because they are read off the same snapshots. Th
 estimator is linear in the targets, so the same snapshots give the same filled
 tensor for both element kinds (tested).
 
-Observed on H4 (FCI and SD iterate 2, 1e5 snapshots): unbiased; per-element
-variances 0.98-1.02 of the exact matchgate variances, i.e. of the Gaussian model's
-diagonal (tested); off-diagonal correlation coefficients RMS 0.049 (spin-orbital)
-and 0.096 (spin-free), max |rho| 0.42 and 0.73. The correlations raise the SD
-floor. Exactly, through the matchgate variances of the mode targets
+Observed on H4 (FCI and SD iterate 2, both kinds, 1e5 snapshots, three seeds):
+unbiased (mean z-score RMS 0.88-1.10); per-element variances 0.97-1.03 of the exact
+matchgate variances, i.e. of the Gaussian model's diagonal (tested with 3e4
+snapshots); off-diagonal correlation coefficients RMS 0.049 (spin-orbital) and
+0.095-0.096 (spin-free), max |rho| 0.42-0.43 and 0.72-0.73. The correlations raise
+the SD floor. Exactly, through the matchgate variances of the mode targets
 Y_m = sum_e c_me X_e that drive the linearized dynamics, the correlated floor is
-1.32 (eps = 0.03) and 1.41 (eps = 0.05) times the independent-element floor, for
-both kinds; the empirical covariance of 1e5 snapshots gives the same ratios. In
-the real CQE (fixed-step SD from FCI, S = 5000 snapshots per iteration, eps = 0.05,
-100 + 500 steps; observed), the mean E - E_FCI is 7.4e-3 and 7.8e-3 Ha with
-snapshots (2 seeds), 7.4e-3 to 7.6e-3 with the correlated Gaussian
-(``per_element_covariance`` from 2e5 snapshots; prediction 7.6e-3) and 5.3e-3 to
-5.4e-3 with independent elements (prediction 5.4e-3): the snapshot floor is that
-of the correlated Gaussian, 1.4 times the independent-element floor, with no
-visible non-Gaussian effect.
+14.56/S Ha (eps = 0.03) and 38.10/S Ha (eps = 0.05) for both kinds: 1.32 and 1.41
+times the independent-element floor of the spin-orbital kind, 1.30 and 1.41 times
+that of the spin-free kind (observed). The empirical covariances of 1e5 snapshots
+give 1.31-1.32 and 1.41-1.42 (spin-orbital) and 1.29-1.30 and 1.40-1.41
+(spin-free; observed, three seeds).
+
+Real CQE (fixed-step SD from FCI, S = 5000 snapshots per iteration, eps = 0.05,
+100 + 500 steps; observed). The snapshot runs give a mean E - E_FCI of 7.26e-3 to
+7.77e-3 Ha (5 runs; 2 with the present random stream, 3 with an earlier one of the
+same distribution). That is 0.95-1.02 of the correlated Gaussian's linear prediction
+(7.62e-3 to 7.63e-3 Ha, ``per_element_covariance`` from 2e5 snapshots; per-run
+standard deviation 3.7%, estimate) and 1.35-1.44 times the independent-element
+prediction (5.39e-3). The correlated Gaussian itself gives 7.45e-3 to 7.59e-3 (6
+runs) and independent elements 5.14e-3 to 5.43e-3 (7 runs). The snapshot floor is
+therefore that of the correlated Gaussian, 1.4 times the independent-element floor,
+with no visible non-Gaussian effect.
 
 Energy noise (EnergyNoise)
 --------------------------
@@ -213,9 +253,10 @@ E~_pq = E_pq - delta_pq, 1.23 Ha^2 for H6 at 1.0 A at FCI against 5.02 unshifted
 see measure/schemes.py), evaluated at the estimated state itself ("exact"), or V
 frozen at ``reference_ci`` (QWC, Pauli shadows, matchgate shadows, whose energy
 variances cost 0.5-0.6 s per state at H6; see "Timings"). The shifted DF variance
-changes along the SD trajectory: at HF it is 0.79-0.81 of its FCI value and at SD
-iterate 2 0.94-0.95 (H4, H6 at 1.0 A; observed), so a frozen V would overstate the
-early noise by up to 25%. run_cqe calls the
+changes along the SD trajectory. Relative to its FCI value it is 0.793 at HF and
+0.946 at SD iterate 2 for H4 (tested), and 0.805 and 0.939 for H6 at 1.0 A
+(observed). A V frozen at FCI would therefore overstate the variance at HF by 26%
+(H4) and 24% (H6), and the standard deviation by 12% and 11%. run_cqe calls the
 estimator once with "current" per iteration and once per nonzero candidate; the
 zero candidate reuses the current estimate (no call, no shots). The chosen
 candidate's estimate is not reused as the next "current" estimate: run_cqe draws
@@ -243,16 +284,18 @@ from FCI, one candidate unless noted; H4 at 1.8 bohr / H6 at 1.0 A):
   DF fragment by a Taylor series);
 * EnergyNoise, 11 candidates (12 estimates per iteration): DF variance at every state
   22 / 46, i.e. about 1.5 / 3.3 ms per estimate; frozen variance 3.9 / 8.7;
-* SnapshotResidual: 69 ms / 1.6 s per 1000 snapshots (about 1.4e4 / 6e2 snapshots per
-  second; dense states of 2^8 / 2^12 amplitudes);
+* SnapshotResidual: 52-76 ms / 1.5 s per 1000 snapshots (1.3e4-1.9e4 / 680 snapshots
+  per second; dense states of 2^8 / 2^12 amplitudes); a 600-step H4 run with 5000
+  snapshots per iteration took 175-178 s;
 * setup of computed variances (direct route, matchgate shadows, spin-orbital, at FCI):
-  2.5 s / 17 s (exact pair sums / Rao-Blackwellized with 2e4 settings); per-state energy
+  2.5 s / 12-17 s (exact pair sums / Rao-Blackwellized with 2e4 settings); per-state energy
   variances (``EnergyNoise.variance_of``) 2-5 ms at H4, at H6 3 ms for DF and 0.5-0.6 s
   for QWC, Pauli and matchgate shadows.
 """
 
 from __future__ import annotations
 
+import copy
 import math
 from typing import Mapping
 
@@ -279,6 +322,9 @@ ENERGY_SCHEMES = ("df", "qwc", "pauli_shadow", "matchgate_shadow")
 _CONTEXTS = ("current", "candidate")
 # Relative tolerance of the internal structure check of A_est (the driver allows 1e-10).
 _STRUCTURE_RTOL = 1e-12
+# Last spawn-key entry of the child seeds that computed variances draw from (:func:`_child_seed`).
+_RESIDUAL_VARIANCE_TAG = 0x76726573     # "vres"
+_ENERGY_VARIANCE_TAG = 0x76656E65       # "vene"
 
 
 # ================================================================ helpers
@@ -297,6 +343,39 @@ def _seed_record(rng: np.random.Generator) -> dict | None:
     if seq is None or not hasattr(seq, "entropy"):
         return None
     return {"entropy": seq.entropy, "spawn_key": tuple(getattr(seq, "spawn_key", ()))}
+
+
+def _child_seed(rng: np.random.Generator, tag: int) -> np.random.SeedSequence:
+    """A seed for one auxiliary computation of a model, derived from ``rng`` without drawing from it.
+
+    If the Generator has a SeedSequence (every Generator except legacy-seeded ones), the
+    child is SeedSequence(entropy, spawn_key=spawn_key + (tag,)): a function of the model's
+    recorded seed only, independent of the stream position, and never touched by the
+    Generator's own draws. ``SeedSequence.spawn`` reaches it only as child number ``tag``
+    (about 2e9). Otherwise the child is hashed from the next four words of a copy of the
+    bit generator, so the model's stream is not advanced in either case.
+    """
+    seq = getattr(rng.bit_generator, "seed_seq", None)
+    if isinstance(seq, np.random.SeedSequence):
+        return np.random.SeedSequence(seq.entropy, spawn_key=tuple(seq.spawn_key) + (int(tag),),
+                                      pool_size=seq.pool_size)
+    words = copy.deepcopy(rng.bit_generator).random_raw(4)
+    return np.random.SeedSequence([int(w) for w in words], spawn_key=(int(tag),))
+
+
+def _with_seed(options: Mapping | None, rng: np.random.Generator, tag: int) -> tuple[dict, object]:
+    """``options`` with a ``seed`` for the scheme's Monte Carlo methods, and a record of it.
+
+    A given non-None seed is kept (and recorded as given); otherwise the seed is
+    :func:`_child_seed` of the model's Generator, recorded as {"entropy", "spawn_key"}:
+    ``np.random.SeedSequence(rec["entropy"], spawn_key=rec["spawn_key"])`` rebuilds it.
+    """
+    opts = dict(options or {})
+    if opts.get("seed") is not None:
+        return opts, opts["seed"]
+    seq = _child_seed(rng, tag)
+    opts["seed"] = seq
+    return opts, {"entropy": seq.entropy, "spawn_key": tuple(seq.spawn_key)}
 
 
 def _check_shots(shots, *, integer: bool = False) -> float:
@@ -488,7 +567,12 @@ def element_variances(active: ActiveSpace, ci=None, *, route: str = "direct",
     elements are ``targets.element_set(N, kind)``; ``mapping`` defaults to the blocked
     order; ``scheme_options`` go to ``schemes.scheme_variance`` (e.g. ``method``,
     ``n_settings``, ``seed``; matchgate shadows use the exact pair sums up to 2e7 pairs
-    and Rao-Blackwellized Monte Carlo above, ``measure.schemes``).
+    and Rao-Blackwellized Monte Carlo above, ``measure.schemes``). The sampling methods
+    ("rb", "mc", and "auto" when it picks "rb") draw from ``seed``; with seed=None the
+    schemes use fresh OS entropy, so pass a seed for reproducible values (the
+    noise models do this themselves; module docstring, "Randomness"). For
+    "df-fragments" a seed that is not a Generator is turned into one Generator shared
+    by the L + 1 states, so that their settings differ.
     """
     from .measure import schemes
     from .measure.pauli import QubitMapping, QubitState
@@ -592,7 +676,18 @@ class ResidualNoise:
             normals per call).
         ledger: a :class:`ShotLedger` to charge (default: a new one, ``self.ledger``).
         mapping: the qubit mapping of the variance computation (default blocked).
-        variance_options: keyword arguments of :func:`element_variances` (scheme options).
+        variance_options: keyword arguments of :func:`element_variances` (scheme
+            options). Without a ``seed`` (or with None), the computation gets a child
+            seed of ``rng`` (module docstring, "Randomness"), so equal ``rng`` seeds
+            give bit-identical variances and the noise draws do not depend on how the
+            variances were obtained.
+
+    ``info`` records ``variance_source`` ("given", "covariance", "computed" or
+    "isotropic"); for computed variances also ``variance_result`` (the
+    ``schemes.VarianceResult``) and ``variance_seed``, either the given seed or
+    {"entropy", "spawn_key"} of the derived SeedSequence:
+    ``element_variances(..., seed=np.random.SeedSequence(rec["entropy"],
+    spawn_key=rec["spawn_key"]))`` reproduces the variances (tested).
     """
 
     def __init__(self, active: ActiveSpace, *, route: str = "direct", scheme: str = "matchgate_shadow",
@@ -668,11 +763,11 @@ class ResidualNoise:
             self.info.update(variance_source="covariance")
         elif per_element_variance is None:
             ref = _fci_ci(active)[1] if reference_ci is None else reference_ci
+            opts, seed_rec = _with_seed(variance_options, self.rng, _RESIDUAL_VARIANCE_TAG)
             res = element_variances(active, ref, route=route, scheme=scheme, kind=kind, delta=self.delta,
-                                    aux_method=self.aux_method or "exact", df=self._df, mapping=mapping,
-                                    **dict(variance_options or {}))
+                                    aux_method=self.aux_method or "exact", df=self._df, mapping=mapping, **opts)
             v = res.per_target
-            self.info.update(variance_source="computed", variance_result=res)
+            self.info.update(variance_source="computed", variance_result=res, variance_seed=seed_rec)
         else:
             res = per_element_variance
             v = getattr(res, "per_target", res)
@@ -816,7 +911,12 @@ class EnergyNoise:
         rng, ledger: as for :class:`ResidualNoise`.
         reference_ci: state of the frozen variance (default: FCI).
         per_shot_variance: a given frozen V (implies variance="frozen").
-        mapping, scheme_options: qubit mapping and options of the non-DF schemes.
+        mapping, scheme_options: qubit mapping and options of the non-DF schemes
+            (``schemes.scheme_variance``). Without a ``seed``, the non-DF schemes get a
+            child seed of ``rng``, recorded in ``info["variance_seed"]`` as for
+            :class:`ResidualNoise`. Every variance evaluation reuses that seed, so a
+            Monte Carlo method gives the same estimate for the same state. The DF
+            variance is exact and uses no randomness.
     """
 
     def __init__(self, active: ActiveSpace, *, scheme: str = "df", shots: float, variance: str = "auto",
@@ -843,13 +943,17 @@ class EnergyNoise:
         self.seed = _seed_record(self.rng)
         self.ledger = ShotLedger() if ledger is None else ledger
         self.mapping = mapping
-        self.scheme_options = dict(scheme_options or {})
+        self.info: dict = {}
         self.factorization = None
         if scheme == "df":
             from .factor import double_factorize
 
             self.factorization = double_factorize(np.asarray(active.eri)) if factorization is None \
                 else factorization
+            self.scheme_options = dict(scheme_options or {})
+        else:
+            self.scheme_options, seed_rec = _with_seed(scheme_options, self.rng, _ENERGY_VARIANCE_TAG)
+            self.info["variance_seed"] = seed_rec
         self._target = None
         self.frozen_variance = None
         if variance == "frozen":
@@ -900,6 +1004,14 @@ class SnapshotResidual:
     from the same snapshots. The dense state has 2^(2N) amplitudes (H4: 256,
     H6: 4096).
 
+    Random stream: every snapshot takes 3n consecutive uniforms of ``rng`` (n qubits;
+    2n for its matching, n for its outcomes), so the snapshots, and with them
+    :meth:`estimate`, :meth:`snapshot_estimates`, :meth:`string_sums` and
+    :meth:`element_covariance`, depend only on the Generator's state and the number
+    of snapshots, not on ``batch``: equal seeds give the same snapshots in all four
+    (tested). A model's draws advance its Generator; the ledger is charged only by
+    ``model(rd, ci, it)``.
+
     Args:
         active: the active space.
         kind: element set ("spin_orbital" or "spin_free").
@@ -907,7 +1019,8 @@ class SnapshotResidual:
         rng, ledger: as for :class:`ResidualNoise`.
         mapping: qubit mapping (default blocked; the estimator's statistics do not
             depend on it).
-        batch: snapshots per vectorized block (default max(32, 2^17 / 2^n): 512 for H4).
+        batch: snapshots per vectorized block (default max(32, 2^17 / 2^n): 512 for
+            H4); memory and speed only. Recorded in ``info["batch"]``.
     """
 
     def __init__(self, active: ActiveSpace, *, kind: str = "spin_orbital", shots: int, rng,
@@ -959,8 +1072,11 @@ class SnapshotResidual:
         self._subsets = [np.array(list(combinations(range(self.n_qubits), k)), dtype=np.intp)
                          for k in range(1, kmax + 1)]
         self.batch = int(batch) if batch is not None else max(32, (1 << 17) // (1 << self.n_qubits))
+        if self.batch < 1:
+            raise ValueError(f"batch must be a positive integer, got {batch!r}")
         self._pair_ops: dict = {}
-        self.info = {"n_strings": self.n_strings, "k_max": kmax, "max_eigenvalue_deviation": 0.0}
+        self.info = {"n_strings": self.n_strings, "k_max": kmax, "batch": self.batch,
+                     "max_eigenvalue_deviation": 0.0}
 
     @property
     def elements(self) -> np.ndarray:
@@ -1000,36 +1116,37 @@ class SnapshotResidual:
     def _sample_batch(self, psi: np.ndarray, r: int):
         """(rows, cols, values) of the covered strings of r snapshots (values +-1).
 
-        Each snapshot draws a uniformly random perfect matching of the 2n Majoranas
-        and measures its n commuting pair operators i gamma_a gamma_b one after the
-        other (projective, Born probabilities; the state is kept unnormalized with
-        its squared norm tracked). The pairs of each matching are measured in the
-        order of their smaller Majorana, so that at every step many snapshots
-        measure the same pair and share one vectorized update.
+        Each snapshot takes 3n consecutive uniforms of the Generator (one
+        ``random((r, 3n))`` call, row-major, so the stream does not depend on how the
+        snapshots are blocked): the first 2n give a uniformly random perfect matching
+        of the 2n Majoranas (:func:`_matchings_from_uniforms`), the other n drive the
+        Born rule of its n commuting pair operators i gamma_a gamma_b, measured one
+        after the other (projective; the state is kept unnormalized with its squared
+        norm tracked). The pairs of each matching are measured in the order of their
+        smaller Majorana, so that at every step many snapshots measure the same pair
+        and share one vectorized update.
         """
-        from .measure.schemes import random_matchings
-
         n = self.n_qubits
         one = np.uint64(1)
-        mt = random_matchings(n, r, self.rng)
-        mt = np.take_along_axis(mt, np.argsort(mt[:, :, 0], axis=1)[:, :, None], axis=1)
+        m2 = 2 * n
+        u = self.rng.random((r, 3 * n))
+        mt = _matchings_from_uniforms(u[:, :m2])
+        born = u[:, m2:]
         phi = np.broadcast_to(psi, (r, psi.size)).astype(np.complex128)
         nrm2 = np.full(r, float(np.vdot(psi, psi).real))
         pair_masks = (one << mt[:, :, 0].astype(np.uint64)) | (one << mt[:, :, 1].astype(np.uint64))
-        m2 = 2 * n
         for t in range(n):
             pid = mt[:, t, 0] * m2 + mt[:, t, 1]
             order = np.argsort(pid, kind="stable")
             uniq, start = np.unique(pid[order], return_index=True)
             stops = np.r_[start[1:], r]
-            u = self.rng.random(r)
             for key, lo, hi in zip(uniq, start, stops):
                 rows = order[lo:hi]
                 src, phase = self._pair_operator(key // m2, key % m2)
                 sub = phi[rows]
                 op = sub[:, src] * phase
                 ev = np.einsum("rb,rb->r", np.conj(sub), op).real / nrm2[rows]
-                s = np.where(u[rows] < 0.5 * (1.0 + ev), 1.0, -1.0)
+                s = np.where(born[rows, t] < 0.5 * (1.0 + ev), 1.0, -1.0)
                 phi[rows] = 0.5 * (sub + s[:, None] * op)
                 nrm2[rows] *= 0.5 * (1.0 + s * ev)
         # covered strings: unions of 1..k_max pairs of the matching, looked up among the targets' strings
@@ -1116,6 +1233,21 @@ class SnapshotResidual:
     def __call__(self, rd: ResidualData, ci: np.ndarray, it: int) -> np.ndarray:
         self.ledger.charge_residual(self.shots, it)
         return _structured(self.fill(self.estimate(ci)))
+
+
+def _matchings_from_uniforms(u: np.ndarray) -> np.ndarray:
+    """Perfect matchings (r, n, 2) of the 2n Majoranas from (r, 2n) i.i.d. uniforms.
+
+    The ranks of a row of i.i.d. uniforms form a uniformly random permutation; pairing
+    it consecutively gives each of the (2n-1)!! matchings with probability 1/(2n-1)!!
+    (n! 2^n permutations per matching; tested). Ties, of probability below
+    (2n)^2 2^-54 per row for 53-bit uniforms, only perturb this at that level. Pairs
+    (a, b) have a < b and are sorted by a.
+    """
+    r, m = u.shape
+    perm = np.argsort(u, axis=1).reshape(r, m // 2, 2)
+    perm.sort(axis=2)
+    return np.take_along_axis(perm, np.argsort(perm[:, :, 0], axis=1)[:, :, None], axis=1)
 
 
 def _diag_sparse(d: np.ndarray):
