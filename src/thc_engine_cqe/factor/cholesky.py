@@ -85,9 +85,13 @@ def cholesky_eri(eri: np.ndarray, tol: float = 1e-10, max_vectors: int | None = 
     lp = np.zeros((nmax, npair))
     k = 0
     while k < nmax:
-        a = int(np.argmax(d))
-        if not d[a] >= floor:  # also stops on NaN
+        dk = float(d.max())
+        if not dk >= floor:  # also stops on NaN
             break
+        # The pivot is the lowest packed index among near-ties. Spatial symmetry makes some
+        # diagonals exactly equal (degenerate orbitals), and a plain argmax would let round-off
+        # choose among them, and with it the order of norm-tied vectors.
+        a = int(np.flatnonzero(d >= dk - 1e-12 * dmax)[0])
         col = w[:, a] - lp[:k].T @ lp[:k, a]
         lp[k] = col / np.sqrt(d[a])
         d -= lp[k] ** 2

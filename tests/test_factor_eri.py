@@ -29,6 +29,7 @@ _BUILDERS = {
     "lih": lambda: systems.lih(),
     "h6": lambda: systems.hydrogen_chain(6, 1.8, "bohr"),
     "random5": lambda: random_active_space(5, (2, 2), seed=7),
+    "n2": lambda: systems.n2(1.098),
 }
 MOLECULES = ["h4", "lih", "h6"]
 
@@ -100,6 +101,32 @@ def test_cholesky_input_checks():
             else:
                 with pytest.raises(ValueError):
                     cholesky_eri(bad, tol=1e-6)
+
+
+def _sym8(x):
+    x = x + x.transpose(1, 0, 2, 3)
+    x = x + x.transpose(0, 1, 3, 2)
+    return x + x.transpose(2, 3, 0, 1)
+
+
+@pytest.mark.parametrize("name", ["lih", "n2"])
+def test_cholesky_pivot_ties_do_not_follow_round_off(name):
+    """Spatial symmetry makes some supermatrix diagonals of LiH and N2 exactly equal, so with a
+    plain argmax round-off chose among them and set the order of norm-tied DF leaves (an 8-fold
+    symmetric perturbation of size 1e-15 reordered them in 20 of 20 trials for LiH and 18 of 20 for
+    N2; the DF-Trotter product order follows the leaf order). With the pivot taken as the lowest
+    index among near-ties, the Cholesky vectors and the DF leaves of perturbed ERIs equal the
+    unperturbed ones up to the propagated perturbation (observed <= 3e-12; a reordering changes
+    them by the size of a leaf, about 0.1)."""
+    eri = get_system(name).eri
+    ref_l = cholesky_eri(eri, tol=1e-12)
+    ref_leaves = double_factorize(eri).leaves()
+    norms = np.linalg.norm(ref_leaves, axis=(1, 2))
+    assert np.any(np.abs(np.diff(norms)) <= 1e-12 * norms.max())   # the system has tied leaves
+    for seed in range(5):
+        p = 1e-15 * _sym8(np.random.default_rng(seed).standard_normal(eri.shape))
+        assert np.abs(cholesky_eri(eri + p, tol=1e-12) - ref_l).max() < 1e-9
+        assert np.abs(double_factorize(eri + p).leaves() - ref_leaves).max() < 1e-9
 
 
 # -------------------------------------------------------------------- DF
