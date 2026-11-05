@@ -582,6 +582,10 @@ def test_computed_variances_are_reproducible_from_the_model_seed(h4):
     assert np.array_equal(a.variances, b.variances) and not np.array_equal(a.variances, c.variances)
     rec = a.info["variance_seed"]
     assert rec["entropy"] == 5 and rec["spawn_key"] == (sampling._RESIDUAL_VARIANCE_TAG,)
+    kid = ResidualNoise(h4, kind="spin_free", shots=1.0, variance_options=opts,
+                        rng=np.random.default_rng(np.random.SeedSequence(5).spawn(2)[1]))
+    assert kid.info["variance_seed"]["spawn_key"] == (1, sampling._RESIDUAL_VARIANCE_TAG)
+    assert not np.array_equal(kid.variances, a.variances)          # spawned siblings get their own seeds
     again = element_variances(h4, None, kind="spin_free", **opts,
                               seed=np.random.SeedSequence(rec["entropy"], spawn_key=rec["spawn_key"]))
     assert np.array_equal(again.per_target, a.variances)
