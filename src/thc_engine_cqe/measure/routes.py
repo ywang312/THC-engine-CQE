@@ -539,6 +539,8 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
     df = opts.pop("df", None)
     states = opts.pop("states", None)
     opts = _scheme_options(opts)
+    if states is not None:
+        states = _check_states(states, space)              # any iterable of CI arrays -> list
     n_leaves = None
     if method != "exact":
         if states is None and df is None:
@@ -552,7 +554,6 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
     if states is None:
         states = aux_states(active, ci, delta, method, df=df)
     else:
-        states = _check_states(states, space)
         want = 1 if method != "df-fragments" else (None if df is None else n_leaves + 1)
         if want is not None and len(states) != want:
             raise ValueError(f"method {method!r} needs {want} auxiliary state(s), got {len(states)}")

@@ -741,9 +741,10 @@ def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
 
 
 def test_variance_wiring_validation(h4):
-    """Unknown or energy-only schemes, a mapping of another size, inconsistent reused states, a scheme
-    method given twice, a hamiltonian without its mapping, reused targets of the wrong number, empty
-    element sets and genuinely complex states raise."""
+    """Unknown or energy-only schemes, a mapping of another size, reused states of the wrong number,
+    size or norm, a scheme method given twice, a hamiltonian without its mapping, reused targets of the
+    wrong number, empty element sets and genuinely complex states raise. Reused states may be any
+    iterable (a generator gives the same result as the list; without ``df`` the state count sets L)."""
     act, ci = h4
     so = tg.element_set(act.norb)
     with pytest.raises(ValueError, match="residual routes"):         # before any state is prepared
@@ -762,6 +763,13 @@ def test_variance_wiring_validation(h4):
                                  states=frag[:5], df=double_factorize(act.eri))
     short = rt.aux_residual_variance(act, ci, 0.1, "df-fragments", so[:3], "spin_orbital", "qwc", states=frag[:5])
     assert short.info["n_states"] == 5 and short.info["n_leaves"] == 4
+    lazy = rt.aux_residual_variance(act, ci, 0.1, "df-fragments", so[:3], "spin_orbital", "qwc",
+                                    states=(s for s in frag[:5]))              # any iterable of states
+    assert lazy.info["n_states"] == 5 and lazy.info["n_leaves"] == 4 and lazy.total == short.total
+    with pytest.raises(ValueError, match="entries"):                           # reused states are validated
+        rt.aux_residual_variance(act, ci, 0.1, "exact", so[:3], "spin_orbital", "qwc", states=[np.ones(5)])
+    with pytest.raises(ValueError, match="norm"):
+        rt.aux_residual_variance(act, ci, 0.1, "exact", so[:3], "spin_orbital", "qwc", states=[2 * frag[0]])
     with pytest.raises(TypeError, match="once"):
         rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", method="exact", scheme_method="mc")
     with pytest.raises(ValueError, match="mapping"):

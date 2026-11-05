@@ -2,7 +2,9 @@
 
 For every system the exact steepest-descent CQE (``cqe.run_cqe`` defaults: SD with the exact line
 search) runs from HF. The states are the iterates ``--states`` (default 0, 2, 4, 5, 7; iterate k is the
-state after k steps, iterate 0 the HF determinant) and the FCI ground state ("fci"). For each state the
+state after k steps, iterate 0 the HF determinant) and the FCI ground state ("fci"); for the claims
+systems h6a and h6b the two consecutive iterates whose E - E_FCI brackets 6.6 mHa are added if they are
+not requested (observed: h6a 4 and 5, requested by default; h6b 10 and 11; ``--no-bracket``). For each state the
 script records E - E_FCI, ||A|| and sigma^2 = <H^2> - <H>^2 (the variance of a measurement of H in its
 own eigenbasis, a lower bound for every scheme), and computes exact per-shot variances with
 ``measure.schemes``, through the routes of ``measure.routes`` for the residual.
@@ -54,8 +56,12 @@ Reductions (to keep the full run within about 60 minutes on one thread)
   the ratio ``frag/(L+1)^2``).
 * Direct route with matchgate shadows at N = 6 (1.6e6 Pauli terms): Rao-Blackwellized estimate
   (``schemes``, method "rb") with ``--rb-settings`` random matchings (default 5000), and
-  ``--rb-settings-claims`` (default 20000) at the claims states; standard errors are reported. H4
-  uses the exact pair sums.
+  ``--rb-settings-claims`` (default 20000) at the claims states; the standard error of the total and
+  the largest per-element relative standard error are reported (the min and max over elements of
+  noisy estimates are biased outward). At the claims states the spin-orbital set also gets the exact
+  pair sums (``max_pairs=inf``; 8.8e8 commuting pairs, about 3 minutes per state, observed;
+  ``--direct-mg-exact none`` skips them), which the claims table uses, and the RB estimate there is
+  compared with them (z-scores in the per-system files). H4 uses the exact pair sums.
 * Direct route with Pauli shadows at N = 6: exact pair sums (89-198 s per call, observed) only at the
   claims states (spin-orbital at both, spin-free at iterate 2) with ``--pauli-direct claims``
   (default); ``all`` computes them at every state, ``none`` nowhere. H4 always uses the exact sums.
@@ -66,10 +72,13 @@ reductions.
 Claims
 ------
 The comparison with the earlier, unverified H6 analysis (spec.md "Goal") is in the summary: for each
-claim our value at h6a iterate 2 and at the state closest to 6.6 mHa above FCI (and for the 1.5 A
-energy claims, h6b at FCI), the ratio ours / claimed, the verdict (reproduced if the ratio at the
-6.6 mHa state is within 30%, or our value lies within 30% of a claimed range) and the likely reason
-for a discrepancy.
+claim our value at iterate 2, at the iterate closest to 6.6 mHa above FCI, at the two iterates
+bracketing it and at FCI (h6a; h6b for the 1.5 A energy claims), the ratio ours / claimed and the
+verdict at iterate 2, at the closest state and at FCI (reproduced if the ratio is within 30%, or our
+value lies within [0.7 lo, 1.3 hi] of a claimed range), a primary verdict (at the closest state; at
+FCI for the 1.5 A energy claims, which spec_B.md places at FCI-like states) and the likely reason for
+a discrepancy. ``--summary-only`` rebuilds the markdown files and the summary from the JSON files in
+``--out`` without computing.
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS
 / MKL_NUM_THREADS, numpy's BLAS threads (effective only if numpy is not loaded yet, as when this file
@@ -81,6 +90,7 @@ Outputs: <out>/measurement_<sys>.json and <out>/measurement_<sys>.md per system,
 Usage:
     python benchmarks/run_measurement.py --threads 1 --out results/
     python benchmarks/run_measurement.py --quick --threads 1 --out /tmp/quick
+    python benchmarks/run_measurement.py --summary-only --out results/
 """
 
 from __future__ import annotations
@@ -117,6 +127,7 @@ AUX_SCHEMES = (("qwc", ORDERS), ("pauli_shadow", ORDERS), ("matchgate_shadow", (
 DF_VARIANTS = (("cholesky", {}, False), ("eigh", {"first": "eigh"}, False),
                ("cholesky_shift", {}, True), ("eigh_shift", {"first": "eigh"}, True))
 SMALL_PAIRS = 2e7              # direct targets with at most this many term pairs use exact sums everywhere
+BRACKET_MAX_ITER = 60          # SD steps searched for the iterates bracketing 6.6 mHa (claims systems)
 
 
 def build_system(name: str):
@@ -256,30 +267,48 @@ def rb_seed(system: str, it, kind: str) -> int:
 
 
 # ===================================================================== trajectory
-def trajectory(act, iterates):
-    """[(iterate, ci)] for the requested SD iterates (iterate 0 = HF) and ("fci", ci_FCI); E_FCI."""
+def trajectory(act, iterates, bracket: float | None = None):
+    """SD iterates of the exact CQE from HF (iterate k = after k steps) and the FCI state.
+
+    Returns (E_FCI, [(iterate, ci)], extra): the requested ``iterates`` (ints and/or "fci"), plus, with
+    ``bracket`` (Ha), the two consecutive iterates whose E - E_FCI bracket it (the last at or above it
+    and the first below it; SD with the exact line search lowers the energy at every step), searched
+    up to BRACKET_MAX_ITER steps. ``extra`` lists the bracketing iterates that were not requested; the
+    states are returned in ascending iterate order, FCI last.
+    """
     import numpy as np
 
     from thc_engine_cqe.cqe import run_cqe
-    from thc_engine_cqe.fci_ops import FCISpace
+    from thc_engine_cqe.fci_ops import FCISpace, Hamiltonian
 
     e_fci, ci_fci = act.fci()
     space = FCISpace.of(act)
     want = sorted(k for k in iterates if k != "fci")
+    n_iter = max(want[-1] if want else 0, BRACKET_MAX_ITER if bracket is not None else 0)
     cis = {0: space.hf()}
-    if want and want[-1] > 0:
+    if n_iter > 0:
         def callback(step, ci_after):
             cis[len(cis)] = np.array(ci_after, copy=True)
 
-        run_cqe(act, max_iter=want[-1], callback=callback)
+        run_cqe(act, max_iter=n_iter, callback=callback)
+    extra = []
+    if bracket is not None:
+        ham = Hamiltonian(act)
+        err = {k: ham.energy(np.asarray(c).reshape(space.shape) / np.linalg.norm(c)) - e_fci for k, c in cis.items()}
+        above = [k for k in cis if err[k] >= bracket]
+        if above and max(above) + 1 in cis:
+            extra = [k for k in (max(above), max(above) + 1) if k not in want]
+        else:
+            print(f"warning: no SD iterate pair brackets E - E_FCI = {bracket * 1e3:.2f} mHa within "
+                  f"{len(cis) - 1} steps", flush=True)
     out = []
-    for k in iterates:
+    for k in sorted(set(want) | set(extra)) + (["fci"] if "fci" in iterates else []):
         if k == "fci" or k in cis:
             c = np.asarray(ci_fci if k == "fci" else cis[k], dtype=float).reshape(space.shape)
             out.append((k, c / np.linalg.norm(c)))
         else:
             raise SystemExit(f"iterate {k} was not reached (the CQE stopped after {len(cis) - 1} steps)")
-    return float(e_fci), out
+    return float(e_fci), out, extra
 
 
 def state_info(act, ci, e_fci) -> dict:
@@ -422,18 +451,32 @@ def residual_part(act, ci, it, ctx, plan) -> dict:
     for kind in KINDS:
         el, a, w = exact[kind]
         xs = ctx["direct_targets"][kind]
-        for scheme in ("matchgate_shadow", "pauli_shadow"):
-            small = ctx["direct_pairs"][kind] <= SMALL_PAIRS
-            opts = {}
-            if scheme == "pauli_shadow" and not small and kind not in plan["pauli_kinds"]:
-                continue
-            if scheme == "matchgate_shadow" and not small:
-                opts = {"n_settings": plan["rb_settings"], "seed": rb_seed(ctx["name"], it, kind)}
+        small = ctx["direct_pairs"][kind] <= SMALL_PAIRS
+        runs = []                                   # (scheme, scheme options)
+        if small:
+            runs.append(("matchgate_shadow", {}))
+        else:
+            if kind in plan["mg_exact_kinds"]:      # exact pair sums (8.8e8 commuting pairs at H6, observed)
+                runs.append(("matchgate_shadow", {"max_pairs": np.inf}))
+            runs.append(("matchgate_shadow", {"scheme_method": "rb", "n_settings": plan["rb_settings"],
+                                              "seed": rb_seed(ctx["name"], it, kind)}))
+        if small or kind in plan["pauli_kinds"]:
+            runs.append(("pauli_shadow", {}))
+        exact_mg = None
+        for scheme, opts in runs:
             t = time.perf_counter()
             res = routes.direct_residual_variance(act, ci, el, kind, scheme, mapping=m, targets=xs, **opts)
             rec = _entry(res, a, w, None, {"route": "direct", "scheme": scheme, "order": "blocked",
                                            "seed": opts.get("seed")}, it != "fci")
             rec["seconds"] = time.perf_counter() - t
+            if scheme == "matchgate_shadow" and res.method == "exact":
+                exact_mg = res
+            elif scheme == "matchgate_shadow" and exact_mg is not None:      # RB against the exact sums
+                pz = (np.asarray(res.per_target) - exact_mg.per_target) / np.asarray(res.per_target_stderr)
+                rec["vs_exact"] = {"total_exact": float(exact_mg.total),
+                                   "z_total": float((res.total - exact_mg.total) / res.stderr),
+                                   "per_element_z_sd": float(np.std(pz)), "per_element_z_max": float(np.abs(pz).max()),
+                                   "per_element_rel_dev_max": float(np.max(np.abs(res.per_target / exact_mg.per_target - 1)))}
             timing["direct_matchgate" if scheme == "matchgate_shadow" else "direct_pauli"] += rec["seconds"]
             out[kind]["direct"].append(rec)
     out["timing"] = timing
@@ -451,9 +494,11 @@ def run_system(name: str, args) -> dict:
     t0 = time.perf_counter()
     act = build_system(name)
     n = act.norb
-    e_fci, states = trajectory(act, args.states)
+    claims_system = name in (CLAIMS_SYSTEM, CLAIMS_SYSTEM_STRETCHED)
+    e_fci, states, extra = trajectory(act, args.states, CLAIM_ERROR if claims_system and not args.no_bracket else None)
     residual = name in args.residual_systems
-    print(f"[{name}] {act.label}: N={n}, nelec={act.nelec}, {len(states)} states, "
+    print(f"[{name}] {act.label}: N={n}, nelec={act.nelec}, {len(states)} states"
+          f"{f' (added the iterates {extra} bracketing 6.6 mHa)' if extra else ''}, "
           f"residual={'yes' if residual else 'no'}", flush=True)
     ctx = {"name": name, "deltas": args.deltas,
            "mappings": {o: QubitMapping(n, o) for o in ORDERS}}
@@ -465,7 +510,8 @@ def run_system(name: str, args) -> dict:
            "n_leaves": int(ctx["df"].n_leaves), "n_leaves_eigh": int(ctx["df_energy"]["eigh"].n_leaves),
            "hamiltonian_terms": {o: int(ctx["hamiltonian"][o].n_terms) for o in ORDERS},
            "energy_qwc_groups": {o: int(ctx["energy_grouping"][o].n_groups) for o in ORDERS},
-           "states": [], "timing": {"energy": 0.0, "aux": 0.0, "direct_matchgate": 0.0, "direct_pauli": 0.0}}
+           "bracket_iterates_added": extra, "states": [],
+           "timing": {"energy": 0.0, "aux": 0.0, "direct_matchgate": 0.0, "direct_pauli": 0.0}}
     infos = [(it, ci, state_info(act, ci, e_fci)) for it, ci in states]
     # claims states: iterate 2 and the iterate closest to 6.6 mHa above FCI (non-FCI states)
     claims_states = set()
@@ -505,7 +551,8 @@ def run_system(name: str, args) -> dict:
                         "rb_settings": args.rb_settings_claims if claim else args.rb_settings,
                         "pauli_kinds": (KINDS if args.pauli_direct == "all"
                                         else () if args.pauli_direct == "none"
-                                        else (KINDS if (claim and it == 2) else ("spin_orbital",) if claim else ()))}
+                                        else (KINDS if (claim and it == 2) else ("spin_orbital",) if claim else ())),
+                        "mg_exact_kinds": ("spin_orbital",) if (claim and args.direct_mg_exact == "claims") else ()}
                 rec["plan"] = {k: list(v) if isinstance(v, tuple) else v for k, v in plan.items()}
                 rec["residual"] = residual_part(act, ci, it, ctx, plan)
                 for k, v in rec["residual"]["timing"].items():
@@ -529,7 +576,7 @@ def verify_cache(args) -> dict:
     from thc_engine_cqe.measure.pauli import QubitMapping, QubitState, jw_hamiltonian
 
     act = build_system("h4")
-    _, sts = trajectory(act, [2])
+    _, sts, _ = trajectory(act, [2])
     ci = sts[0][1]
     m = QubitMapping(act.norb)
 
@@ -576,13 +623,14 @@ def _aux(s: dict, kind: str, method: str, d: float, scheme: str, order: str = "b
     return None
 
 
-def _direct(s: dict, kind: str, scheme: str):
+def _direct(s: dict, kind: str, scheme: str, method: str | None = None):
+    """The direct-route entry of a scheme (the exact one if there are several, unless ``method`` is given)."""
     if s is None or "residual" not in s:
         return None
-    for e in s["residual"][kind]["direct"]:
-        if e["scheme"] == scheme:
-            return e
-    return None
+    hits = [e for e in s["residual"][kind]["direct"]
+            if e["scheme"] == scheme and (method is None or e["method"] == method)]
+    exact = [e for e in hits if e["method"] == "exact"]
+    return (exact or hits or [None])[0]
 
 
 def _get(fn, s):
@@ -637,13 +685,34 @@ def _direct_field(kind, scheme, *fields):
     return f
 
 
+VERDICT_STATES = ("it2", "closest", "fci")
+
+
+def _primary(row: dict) -> None:
+    """``row["verdict"]`` from the verdict at the row's verdict state."""
+    ok = row["verdicts"][row["verdict_state"]]
+    row["verdict"] = "not computed" if ok is None else "reproduced" if ok else "not reproduced"
+
+
+def _within(x, claimed, rng) -> bool | None:
+    """Reproduced within 30%: ours / claimed in [0.7, 1.3], or ours in [0.7 lo, 1.3 hi] for a claimed range."""
+    if x is None:
+        return None
+    if rng is not None:
+        return bool(0.7 * rng[0] <= x <= 1.3 * rng[1])
+    return bool(0.7 <= x / claimed <= 1.3)
+
+
 def claims(results: dict) -> list[dict]:
     """The comparison with the earlier analysis (module docstring): one row per claim.
 
-    Values at the reference states of h6a (1.0 A; for the 1.5 A energy claims, h6b), the ratio ours /
-    claimed at iterate 2 and at the closest state, the verdict (within 30% at the closest state, at FCI
-    for the 1.5 A claims; for a claimed range, our value within [0.7 lo, 1.3 hi]), alternatives (other
-    variants of our computation) and the likely reason for a discrepancy, built from these numbers.
+    Values at the reference states of h6a (1.0 A; for the 1.5 A energy claims, h6b): iterate 2, the
+    iterate closest to 6.6 mHa above FCI, the two iterates bracketing 6.6 mHa and FCI; the ratio ours /
+    claimed and the verdict (reproduced within 30%; for a claimed range, our value within [0.7 lo,
+    1.3 hi]) at iterate 2, at the closest state and at FCI; the primary verdict (``verdict``) is the
+    one at the closest state (the claims' state), at FCI for the 1.5 A energy claims ("FCI-like states",
+    spec_B.md); alternatives (other variants of our computation) and the likely reason for a
+    discrepancy, built from these numbers.
     """
     ref = {"1.0": _reference_states(results.get(CLAIMS_SYSTEM)),
            "1.5": _reference_states(results.get(CLAIMS_SYSTEM_STRETCHED))}
@@ -657,16 +726,11 @@ def claims(results: dict) -> list[dict]:
                "states": {k: None if v is None else {"iterate": v["iterate"], "e_err": v["e_err"]}
                           for k, v in st.items()},
                "alternatives": {lab: {k: (_get(f, st[k]) if st[k] is not None else None)
-                                      for k in ("it2", "closest", "fci")} for lab, f in alts}}
+                                      for k in VERDICT_STATES} for lab, f in alts}}
         if claimed is not None:
-            row["ratio"] = {k: (None if vals[k] is None else vals[k] / claimed) for k in ("it2", "closest", "fci")}
-        x = vals[verdict_at]
-        if x is None:
-            row["verdict"] = "not computed"
-        elif rng is not None:
-            row["verdict"] = "reproduced" if 0.7 * rng[0] <= x <= 1.3 * rng[1] else "not reproduced"
-        else:
-            row["verdict"] = "reproduced" if 0.7 <= x / claimed <= 1.3 else "not reproduced"
+            row["ratio"] = {k: (None if vals[k] is None else vals[k] / claimed) for k in VERDICT_STATES}
+        row["verdicts"] = {k: _within(vals[k], claimed, rng) for k in VERDICT_STATES}
+        _primary(row)
         rows.append(row)
         return row
 
@@ -711,11 +775,12 @@ def claims(results: dict) -> list[dict]:
               alts=[("min", _direct_field(so, "matchgate_shadow", "per_element", "min")),
                     ("max", _direct_field(so, "matchgate_shadow", "per_element", "max")),
                     ("Pauli shadows, mean", _direct_field(so, "pauli_shadow", "per_element", "mean"))])
-    if row["values"]["closest"] is not None:      # mean 12-16 and min / max 7 / 41, each within 30%
-        mn, mx = row["alternatives"]["min"]["closest"], row["alternatives"]["max"]["closest"]
-        ok = (0.7 * 12 <= row["values"]["closest"] <= 1.3 * 16 and mn is not None and 0.7 * 7 <= mn <= 1.3 * 7
-              and mx is not None and 0.7 * 41 <= mx <= 1.3 * 41)
-        row["verdict"] = "reproduced" if ok else "not reproduced"
+    for k in VERDICT_STATES:                      # mean in 12-16 and min / max = 7 / 41, each within 30%
+        mean, mn, mx = row["values"][k], row["alternatives"]["min"][k], row["alternatives"]["max"][k]
+        row["verdicts"][k] = (None if None in (mean, mn, mx) else
+                              bool(_within(mean, None, (12.0, 16.0)) and _within(mn, 7.0, None)
+                                   and _within(mx, 41.0, None)))
+    _primary(row)
     # ------------------------------------------------------------ shots
     add("S-aux-QWC-0.1", "shots for 30%, aux + QWC, delta = 0.1 (840 elements)", 5.9e9,
         _aux_field(so, "exact", 0.1, "qwc", "interleaved", "shots_var_uniform"),
@@ -748,54 +813,81 @@ def _alt(row, label, at="closest"):
 
 def _reason(row: dict, ref: dict) -> str:
     """The likely reason for agreement or discrepancy, from the numbers of the row."""
-    cid, v, r = row["id"], row["values"], row.get("ratio", {})
+    cid, v = row["id"], row["values"]
     at = row["verdict_state"]
     st = ref[row["geometry"]]
+    claimed = row["claimed"]
 
     def norm_a(key):
         s = st.get(key)
         return None if s is None or "residual" not in s else s["residual"]["spin_orbital"]["norm_A_elements"]
 
+    def trend(label=None, fmt=None):
+        """Values at iterate 2 / closest / FCI (of the row, or of an alternative)."""
+        fmt = fmt or _g
+        src = v if label is None else row["alternatives"][label]
+        return " / ".join(fmt(src.get(k)) for k in VERDICT_STATES)
+
+    def closest_it():
+        s = st.get("closest")
+        return "–" if s is None else f"{s['iterate']} ({s['e_err'] * 1e3:.2f} mHa)"
+
     try:
         if cid.startswith("E-QWC"):
-            return (f"QWC depends on the qubit order: the claim matches the interleaved (OpenFermion) order; "
-                    f"blocked gives {_g(_alt(row, 'QWC blocked', at))} ({_g(_alt(row, 'QWC blocked', at) / row['claimed'])}x)")
+            b = _alt(row, "QWC blocked", at)
+            return (f"QWC depends on the qubit order: the claim matches the interleaved (OpenFermion) order; blocked "
+                    f"gives {_g(b)} ({_g(b / claimed)}x); weakly state-dependent (it. 2 / closest / FCI: {trend()})")
         if cid.startswith("E-DF"):
-            return (f"the DF split is not unique: the claim matches leaves from the ERI supermatrix "
-                    f"eigendecomposition (OpenFermion's low-rank form), unshifted; pivoted-Cholesky leaves give "
-                    f"{_g(_alt(row, 'Cholesky leaves', at) / row['claimed'])}x, shifted leaves (E_pq - delta_pq) "
-                    f"{_g(_alt(row, 'eigh, shifted', at) / row['claimed'])}x")
+            return (f"the DF split is not unique: the claim matches leaves from the eigendecomposition of the ERI "
+                    f"supermatrix (OpenFermion's low-rank form), unshifted; pivoted-Cholesky leaves give "
+                    f"{_g(_alt(row, 'Cholesky leaves', at) / claimed)}x, shifted leaves (E_pq - delta_pq) "
+                    f"{_g(_alt(row, 'eigh, shifted', at) / claimed)}x; state-dependent (it. 2 / closest / FCI: "
+                    f"{trend()})")
         if cid.startswith("E-MG"):
-            return ("state-insensitive (iterate 2 to FCI within "
-                    f"{_pct(abs(v['it2'] / v['fci'] - 1))}); Pauli shadows are "
-                    f"{_g(_alt(row, 'Pauli shadows, interleaved', at) / v[at])}x larger (interleaved)")
+            return (f"state-independent (it. 2 / closest / FCI: {trend()}); Pauli shadows are "
+                    f"{_g(_alt(row, 'Pauli shadows, interleaved', at) / v[at])}x larger (interleaved order)")
         if cid == "Q-MG":
-            return (f"delta^2 v_e at delta = 0.1; nearly state-independent (per element {_g(_alt(row, 'min'))}-"
-                    f"{_g(_alt(row, 'max'))}); a 2D with a factor 1/2 would give 1/4 of it")
+            return (f"delta^2 v_e at delta = 0.1 (exact route, matchgate shadows); state-independent (mean it. 2 / "
+                    f"closest / FCI: {trend()}; per element {_g(_alt(row, 'min'))}-{_g(_alt(row, 'max'))}); a 2D "
+                    f"with a factor 1/2 would give a quarter of it; Pauli shadows give "
+                    f"{_g(_alt(row, 'Pauli shadows blocked') / v[at])}x (blocked) and "
+                    f"{_g(_alt(row, 'Pauli shadows interleaved') / v[at])}x (interleaved) more")
         if cid == "Q-QWC":
-            return (f"matches uniform allocation over the QWC groups (equal shots per setting), interleaved order "
-                    f"with {_g(_alt(row, 'groups interleaved'))} groups against the claimed 854; the optimal "
-                    f"allocation gives {_g(_alt(row, 'interleaved, optimal allocation'))} "
-                    f"({_g(_alt(row, 'interleaved, optimal allocation') / row['claimed'])}x)")
+            opt = _alt(row, "interleaved, optimal allocation")
+            return (f"matches uniform allocation over the QWC groups (equal shots per setting) in the interleaved "
+                    f"order, {_g(_alt(row, 'groups interleaved'))} groups against the claimed 854 (another grouping "
+                    f"order); the optimal allocation gives {_g(opt)} ({_g(opt / claimed)}x)")
         if cid.startswith("bias"):
-            return (f"exact exp(-i delta H); at iterate 2 / closest: spin-free {_pct(_alt(row, '315 spin-free', 'it2'))} / "
-                    f"{_pct(_alt(row, '315 spin-free'))}; DF-Trotter {_pct(_alt(row, '840 df-trotter', 'it2'))} / "
-                    f"{_pct(_alt(row, '840 df-trotter'))} (does not vanish at FCI)")
+            return (f"exact exp(-i delta H), relative Frobenius bias over the 840 elements; it. 2 / closest: "
+                    f"{_pct(v['it2'])} / {_pct(v['closest'])} (spin-free {_pct(_alt(row, '315 spin-free', 'it2'))} / "
+                    f"{_pct(_alt(row, '315 spin-free'))}), inside the claimed range; DF-Trotter "
+                    f"{_pct(_alt(row, '840 df-trotter', 'it2'))} / {_pct(_alt(row, '840 df-trotter'))} and "
+                    f"DF fragments {_pct(_alt(row, '840 df-fragments', 'it2'))} / {_pct(_alt(row, '840 df-fragments'))} "
+                    f"are larger (their bias does not vanish with A)")
         if cid == "D-MG":
-            return (f"matchgate shadows (Rao-Blackwellized); min / max {_g(_alt(row, 'min'))} / {_g(_alt(row, 'max'))} "
-                    f"at the closest state, {_g(_alt(row, 'min', 'it2'))} / {_g(_alt(row, 'max', 'it2'))} at iterate 2")
+            e = _direct(st[at], "spin_orbital", "matchgate_shadow")
+            mean, mn, mx = v[at], _alt(row, "min", at), _alt(row, "max", at)
+            return (f"matchgate shadows, {'exact pair sums' if e['method'] == 'exact' else 'Rao-Blackwellized'} at "
+                    f"the verdict state: min / mean / max = {_g(mn)} / {_g(mean)} / {_g(mx)} against the claimed 7 / "
+                    f"12-16 / 41 (min {_signed(mn / 7 - 1)}, mean {_signed(mean / 12 - 1)} of the lower end, max "
+                    f"{_signed(mx / 41 - 1)}); state-independent (mean it. 2 / closest / FCI: {trend()}), so not a "
+                    f"state effect; why the claimed min and mean are larger is unknown (a sampled estimate is "
+                    f"possible)")
         if cid.startswith("S-") and cid != "S-E-DF":
             na2, nac = norm_a("it2"), norm_a("closest")
-            txt = (f"S ~ 1/||A||^2: ||A|| (840) = {_g(na2, 4)} at iterate 2, {_g(nac, 4)} at the closest state, so "
-                   f"the claims' state (6.6 mHa) matches our iterate {st['closest']['iterate']}, not our iterate 2")
+            txt = (f"S ~ 1/||A||^2: ||A|| (840 elements) = {_g(na2, 4)} at iterate 2 and {_g(nac, 4)} at iterate "
+                   f"{closest_it()}, so S is {_g((na2 / nac) ** 2)}x smaller at our iterate 2; the claims' state "
+                   f"(6.6 mHa) matches our iterate {st['closest']['iterate']}, not our iterate 2")
             if cid == "S-aux-QWC-0.1":
-                txt += (f"; uniform allocation over the groups (as for Var(Im 2D) = 36); the optimal allocation needs "
-                        f"{_g(_alt(row, 'interleaved, optimal') / v['closest'])}x of it")
+                txt += (f"; uniform allocation over the groups (as for Var(Im 2D) = 36); the optimal allocation "
+                        f"needs {_g(_alt(row, 'interleaved, optimal') / v['closest'])}x of it")
             elif cid.startswith("S-aux-MG"):
-                txt += "; variance only (the bias-aware count is in the alternatives)"
+                txt += "; variance only (bias-aware in the alternatives)"
+            elif cid == "S-direct-MG":
+                txt += "; at the closest state the rest is the per-element variance (row D-MG)"
             return txt
         if cid == "S-E-DF":
-            return "S = V_DF / 0.0016^2 with eigh leaves (row E-DF-1.0)"
+            return f"S = V_DF / 0.0016^2 with eigh leaves (row E-DF-1.0); it. 2 / closest / FCI: {trend()}"
     except (TypeError, ZeroDivisionError, KeyError):
         return "–"
     return "–"
@@ -820,6 +912,10 @@ def _g(x, digits=3) -> str:
 
 def _pct(x) -> str:
     return "–" if x is None else f"{100 * x:.3g}%"
+
+
+def _signed(x) -> str:
+    return "–" if x is None else f"{100 * x:+.3g}%"
 
 
 def _shots(e: dict | None, key: str) -> str:
@@ -928,8 +1024,11 @@ def md_residual_variance(results: dict, deltas) -> list[str]:
              "(delta-independent up to O(delta^2)), and the per-element mean of delta^2 v_e (matchgate). QWC "
              "settings in parentheses. trotter/exact: total(df-trotter) / total(exact); frag/(L+1)^2: "
              "total(df-fragments) / ((L + 1)^2 total(exact)); both as the range over delta, schemes and orders. "
-             "Direct route: sum_e v_e and the per-element min / mean / max (matchgate: Rao-Blackwellized with "
-             "the settings in the per-system files, H4 exact; Pauli: exact, '–' where not computed).", "",
+             "Direct route: sum_e v_e and the per-element min / mean / max (matchgate: exact pair sums for H4 and, "
+             "spin-orbital set, at the claims states; elsewhere Rao-Blackwellized over random matchings, with the "
+             "standard error of the total, the number of settings and the largest per-element relative standard "
+             "error; min and max of noisy per-element estimates are biased outward. Pauli: exact, '–' where not "
+             "computed).", "",
              "| system | iterate | kind | K | QWC blocked | QWC interleaved | Pauli blocked | Pauli interleaved | "
              "matchgate | MG per element | trotter/exact | frag/(L+1)^2 (L) | direct MG | direct MG min/mean/max | "
              "direct Pauli |", "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
@@ -951,9 +1050,15 @@ def md_residual_variance(results: dict, deltas) -> list[str]:
             cell.append(f"{fr} ({res['n_leaves']})" if fr != "–" else "–")
             dm = _direct(s, kind, "matchgate_shadow")
             dp = _direct(s, kind, "pauli_shadow")
-            cell.append(_g(dm and dm["total"]))
-            cell.append("–" if dm is None else
-                        f"{_g(dm['per_element']['min'])} / {_g(dm['per_element']['mean'])} / {_g(dm['per_element']['max'])}")
+            if dm is None:
+                cell += ["–", "–"]
+            else:
+                rb = dm["method"] == "rb"
+                cell.append(f"{_g(dm['total'])}" + (f" +- {_g(dm['stderr'], 2)} (RB {dm['n_samples']})" if rb
+                                                     else " (exact)"))
+                pe = dm["per_element"]
+                cell.append(f"{_g(pe['min'])} / {_g(pe['mean'])} / {_g(pe['max'])}"
+                            + (f" (+-{_pct(dm.get('per_element_rel_stderr_max'))})" if rb else ""))
             cell.append(_g(dp and dp["total"]))
             lines.append(f"| {name} | {state_label(s['iterate'])} | {kind} | {r['K']} | " + " | ".join(cell) + " |")
     return lines + [""]
@@ -999,13 +1104,16 @@ def md_shots(results: dict, deltas) -> list[str]:
 def md_claims(rows: list[dict]) -> list[str]:
     lines = ["## Comparison with the earlier, unverified H6 claims", "",
              f"Ours for H6/STO-3G at 1.0 A (h6a): iterate 2, the iterate closest to {CLAIM_ERROR * 1e3:.1f} mHa above "
-             "FCI (the claims' state), the two states bracketing it and FCI (iterate and E - E_FCI in mHa in each "
-             "cell). The 1.5 A energy claims use h6b, with the verdict at FCI (their FCI-like states). Ratio = ours "
-             "/ claimed at iterate 2 and at the closest state. Verdict: reproduced if the ratio at the verdict state "
-             "is within 30% (for a claimed range: our value within [0.7 lo, 1.3 hi]). Alternatives (iterate 2 / "
-             "closest / FCI): other variants of our computation.", "",
+             "FCI (the claims' state), the two iterates bracketing it and FCI (iterate and E - E_FCI in mHa in each "
+             "cell). The 1.5 A energy claims use h6b (H6 at 1.5 A) at the same kinds of states. Ratio = ours / "
+             "claimed at iterate 2 / closest / FCI. Reproduced (yes / no at iterate 2 / closest / FCI): ratio within "
+             "30%, or for a claimed range our value within [0.7 lo, 1.3 hi]. The primary verdict is the one at the "
+             "closest state, and at FCI for the 1.5 A energy claims (FCI-like states, spec_B.md). Alternatives "
+             "(iterate 2 / closest / FCI): other variants of our computation.", "",
              "| claim | claimed | ours, iterate 2 | ours, closest | bracket (above / below) | ours, FCI | ratio (it. 2 / "
-             "closest) | verdict | alternatives | likely reason |", "|---|---|---|---|---|---|---|---|---|---|"]
+             "closest / FCI) | reproduced (it. 2 / closest / FCI) | verdict | alternatives | likely reason |",
+             "|---|---|---|---|---|---|---|---|---|---|---|"]
+    yn = {True: "yes", False: "no", None: "–"}
     for r in rows:
         pct = r["id"].startswith("bias")
         fmt = _pct if pct else _g
@@ -1022,16 +1130,25 @@ def md_claims(rows: list[dict]) -> list[str]:
             return f"{fmt(v)} ({where})"
 
         ratio = "–"
-        if r.get("ratio") is not None and (r["ratio"]["it2"] is not None or r["ratio"]["closest"] is not None):
-            ratio = f"{_g(r['ratio']['it2'])} / {_g(r['ratio']['closest'])}"
+        if r.get("ratio") is not None:
+            ratio = " / ".join(_g(r["ratio"][k]) for k in VERDICT_STATES)
         alts = "; ".join(f"{k}: {fmt(v['it2']) if not k.startswith('groups') else _g(v['it2'])} / "
                          f"{fmt(v['closest']) if not k.startswith('groups') else _g(v['closest'])} / "
                          f"{fmt(v['fci']) if not k.startswith('groups') else _g(v['fci'])}"
                          for k, v in r["alternatives"].items())
+        verdicts = " / ".join(yn[r["verdicts"][k]] for k in VERDICT_STATES)
         verdict = r["verdict"] + (" (at FCI)" if r["verdict_state"] == "fci" else "")
         bracket = f"{cell('above')} / {cell('below')}"
         lines.append(f"| {r['claim']} | {claimed} | {cell('it2')} | {cell('closest')} | {bracket} | {cell('fci')} | "
-                     f"{ratio} | {verdict} | {alts or '–'} | {r['reason']} |")
+                     f"{ratio} | {verdicts} | {verdict} | {alts or '–'} | {r['reason']} |")
+    lines += ["", "Verdicts:", ""]
+    groups = {"reproduced at the claims' state (primary verdict)": [r for r in rows if r["verdict"] == "reproduced"],
+              "not reproduced at the claims' state": [r for r in rows if r["verdict"] == "not reproduced"],
+              "not computed": [r for r in rows if r["verdict"] == "not computed"],
+              "not reproduced at our iterate 2": [r for r in rows if r["verdicts"]["it2"] is False]}
+    for label, sel in groups.items():
+        if sel:
+            lines.append(f"* {label}: " + "; ".join(r["claim"] for r in sel) + ".")
     return lines + [""]
 
 
@@ -1057,7 +1174,11 @@ def md_system(res: dict, deltas) -> str:
              f"N = {res['norb']}, nelec = {tuple(res['nelec'])}, E_FCI = {res['e_fci']:.10f} Ha, DF leaves L = "
              f"{res['n_leaves']} (Cholesky) / {res['n_leaves_eigh']} (eigh); H has {res['hamiltonian_terms']['blocked']} "
              f"Pauli terms, {res['energy_qwc_groups']['blocked']} / {res['energy_qwc_groups']['interleaved']} QWC groups "
-             "(blocked / interleaved).", ""]
+             "(blocked / interleaved)."
+             + (f" SD iterates {', '.join(map(str, res['bracket_iterates_added']))} were added because they bracket "
+                "6.6 mHa above FCI." if res.get("bracket_iterates_added") else "")
+             + (f" Claims states (iterate 2 and the iterate closest to 6.6 mHa above FCI): "
+                f"{', '.join(map(str, res['claims_states']))}." if res.get("claims_states") else ""), ""]
     if "direct_targets" in res:
         dt = res["direct_targets"]
         lines += [f"Direct-route targets X_e: {dt['spin_orbital']['terms']} / {dt['spin_free']['terms']} Pauli terms "
@@ -1072,7 +1193,8 @@ def md_system(res: dict, deltas) -> str:
         if s.get("plan"):
             p = s["plan"]
             lines += [f"Plan: df-fragments orders {p['fragment_orders'] or 'none'}; matchgate RB settings "
-                      f"{p['rb_settings']}; Pauli direct kinds {p['pauli_kinds'] or 'none'} (always for small targets).", ""]
+                      f"{p['rb_settings']}; exact matchgate direct sums for {p.get('mg_exact_kinds') or 'none'}; Pauli "
+                      f"direct kinds {p['pauli_kinds'] or 'none'} (small targets: exact sums for both schemes).", ""]
         for kind in KINDS:
             r = s["residual"][kind]
             lines += [f"### {kind} (K = {r['K']}, norm A full = {_g(r['norm_A_full'], 4)}, elements = "
@@ -1089,7 +1211,15 @@ def md_system(res: dict, deltas) -> str:
             for e in r["direct"]:
                 pe = e["per_element"]
                 se = "" if e.get("stderr") is None else f" +- {_g(e['stderr'], 2)}"
-                meth = e["method"] + ("" if e["method"] != "rb" else f" ({e['n_samples']} settings, seed {e['seed']})")
+                meth = e["method"]
+                if e["method"] == "rb":
+                    meth += (f" ({e['n_samples']} settings, seed {e['seed']}; per-element rel. stderr <= "
+                             f"{_pct(e.get('per_element_rel_stderr_max'))}")
+                    vx = e.get("vs_exact")
+                    if vx:
+                        meth += (f"; against the exact sums: z(total) = {vx['z_total']:+.2f}, per-element z SD "
+                                 f"{vx['per_element_z_sd']:.2f}, max |z| {vx['per_element_z_max']:.2f}")
+                    meth += ")"
                 lines.append(f"| direct | – | 0 | {e['scheme']} | {e['order']} | {meth} | {_g(e['total'])}{se} | "
                              f"{_g(pe['min'])} / {_g(pe['mean'])} / {_g(pe['max'])} | – | {_shots(e, 'shots_var')} | "
                              f"{_shots(e, 'shots_var')} |")
@@ -1098,9 +1228,12 @@ def md_system(res: dict, deltas) -> str:
 
 
 def markdown_summary(results: dict, rows: list[dict], args, total: float, cache_check) -> str:
+    added = "; ".join(f"{name} {', '.join(map(str, res['bracket_iterates_added']))}" for name, res in results.items()
+                      if res.get("bracket_iterates_added"))
     lines = ["# Measurement cost of the CQE energy and residual (M2, workflow B)", "",
              f"Exact per-shot variances along exact SD CQE trajectories (`benchmarks/run_measurement.py`). Systems "
-             f"{', '.join(results)}; states {', '.join(state_label(s) for s in args.states)}; deltas "
+             f"{', '.join(results)}; states {', '.join(state_label(s) for s in args.states)}"
+             + (f" (plus the iterates bracketing 6.6 mHa above FCI: {added})" if added else "") + "; deltas "
              f"{', '.join(f'{d:g}' for d in args.deltas)}; residual systems {', '.join(args.residual_systems)}. "
              "Conventions and reductions: the script's module docstring. Per-system detail: measurement_<system>.md.", ""]
     lines += md_claims(rows)
@@ -1127,6 +1260,12 @@ def main(argv=None) -> int:
     ap.add_argument("--rb-settings-claims", type=int, default=20000, help="the same at the claims states")
     ap.add_argument("--pauli-direct", default="claims", choices=("claims", "all", "none"),
                     help="where the exact direct-route Pauli-shadow sums run for N >= 6")
+    ap.add_argument("--direct-mg-exact", default="claims", choices=("claims", "none"),
+                    help="exact direct-route matchgate sums (spin-orbital set) at the claims states, besides RB")
+    ap.add_argument("--no-bracket", action="store_true",
+                    help="do not add the SD iterates bracketing 6.6 mHa above FCI for h6a and h6b")
+    ap.add_argument("--summary-only", action="store_true",
+                    help="rebuild the markdown files and the summary from the JSON files in --out (no computation)")
     ap.add_argument("--quick", action="store_true", help="H4 only, states 0,2,5,fci, deltas 0.1,0.6 (< 2 min)")
     ap.add_argument("--no-cache", action="store_true", help="disable the oracle cache")
     ap.add_argument("--verify-cache", action="store_true", help="check the cache for bitwise identity first")
@@ -1141,6 +1280,8 @@ def main(argv=None) -> int:
     args.residual_systems = [s for s in _names(args.residual_systems) if s in args.systems]
     args.states = _states(args.states)
     args.deltas = _floats(args.deltas)
+    if args.summary_only:
+        return summary_only(args)
     args.threads_env = pin_threads(args.threads)
     os.makedirs(args.out, exist_ok=True)
     t0 = time.perf_counter()
@@ -1161,8 +1302,13 @@ def main(argv=None) -> int:
         print(f"[{name}] done in {res['seconds']:.1f} s (energy {t['energy']:.1f}, aux {t['aux']:.1f}, direct MG "
               f"{t['direct_matchgate']:.1f}, direct Pauli {t['direct_pauli']:.1f}; cache {res['oracle_cache']})",
               flush=True)
+    write_summary(results, args, time.perf_counter() - t0, cache_check, settings)
+    return 0
+
+
+def write_summary(results: dict, args, total: float, cache_check, settings: dict) -> None:
+    """The claims rows, measurement_summary.md and measurement_summary.json."""
     rows = claims(results)
-    total = time.perf_counter() - t0
     with open(os.path.join(args.out, "measurement_summary.md"), "w") as fh:
         fh.write(markdown_summary(results, rows, args, total, cache_check))
     summary = {"settings": settings, "claims": rows, "seconds": total, "cache_check": cache_check,
@@ -1170,6 +1316,41 @@ def main(argv=None) -> int:
     with open(os.path.join(args.out, "measurement_summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1, default=_json_default)
     print(f"wrote {os.path.join(args.out, 'measurement_summary.md')} ({total:.1f} s)")
+
+
+def summary_only(args) -> int:
+    """Rebuild the markdown files and the summary from the measurement_<system>.json files in --out.
+
+    The states, deltas and residual systems are those recorded in the files (the first system's
+    settings); the runtime total is the sum of the systems' runtimes, and the cache check is taken from
+    an existing measurement_summary.json.
+    """
+    results = {}
+    for name in args.systems:
+        path = os.path.join(args.out, f"measurement_{name}.json")
+        if not os.path.exists(path):
+            print(f"[{name}] skipped: {path} not found", flush=True)
+            continue
+        with open(path) as fh:
+            results[name] = json.load(fh)
+    if not results:
+        raise SystemExit(f"no measurement_<system>.json files for {args.systems} in {args.out}")
+    recorded = [r["settings"] for r in results.values()]
+    if any(s["deltas"] != recorded[0]["deltas"] for s in recorded):
+        raise SystemExit("the systems were computed with different deltas")
+    args.states = recorded[0]["states"]
+    args.deltas = [float(d) for d in recorded[0]["deltas"]]
+    args.residual_systems = [n for n, r in results.items() if any("residual" in s for s in r["states"])]
+    for name, res in results.items():
+        with open(os.path.join(args.out, f"measurement_{name}.md"), "w") as fh:
+            fh.write(md_system(res, args.deltas))
+    cache_check = None
+    old = os.path.join(args.out, "measurement_summary.json")
+    if os.path.exists(old):
+        with open(old) as fh:
+            cache_check = json.load(fh).get("cache_check")
+    settings = dict(recorded[0], summary_only=True)
+    write_summary(results, args, float(sum(r["seconds"] for r in results.values())), cache_check, settings)
     return 0
 
 
