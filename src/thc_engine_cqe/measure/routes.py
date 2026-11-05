@@ -122,7 +122,7 @@ The scheme options pass through; the scheme's ``method`` is passed as
 validates the wiring end to end on H4; tested). The scheme code builds a dense
 table of <P(x, z)> for every z once per call whenever it fits (``measure.schemes``,
 "Expectation values"); for the 840 spin-orbital and 315 spin-free H6 Q_e this table
-(1024 x 4096 entries) takes 0.2-0.8 s per call, against 4-16 ms for the pair sums
+(1024 x 4096 entries) takes 0.2-0.82 s per call, against 4-16 ms for the pair sums
 themselves (observed, one thread, any of the three schemes; the table time varies
 with the machine load), so a df-fragments call costs about L + 1 times one state.
 

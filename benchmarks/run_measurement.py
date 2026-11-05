@@ -49,8 +49,9 @@ Conventions
 
 Reductions (to keep the full run within about 60 minutes on one thread)
 -----------------------------------------------------------------------
-* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (observed: 0.2-0.8 s
-  for an N = 6 state against 4-16 ms for the pair sums; ``measure.routes`` docstring). While a system runs,
+* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (observed: 0.18-0.83 s
+  per table on average over a run of an N = 6 system, depending on the sparsity of the state and on the
+  machine load, against 4-16 ms for the pair sums; ``measure.routes`` docstring). While a system runs,
   the private factory ``schemes._Expectations`` is wrapped by a content-keyed LRU cache (qubit count,
   basis and amplitudes, hashed), so the 3 schemes and 2 element sets that measure one state share one
   table. The table is a deterministic function of the state; ``--verify-cache`` (run by ``--quick``)
@@ -64,7 +65,7 @@ Reductions (to keep the full run within about 60 minutes on one thread)
   ``--rb-settings-claims`` (default 20000) at the claims states; the standard error of the total and
   the largest per-element relative standard error are reported (the min and max over elements of
   noisy estimates are biased outward). At the claims states the spin-orbital set also gets the exact
-  pair sums (``max_pairs=inf``; 8.8e8 commuting pairs, 157-168 s per state, observed;
+  pair sums (``max_pairs=inf``; 8.8e8 commuting pairs, 157-234 s per state, observed, with the load;
   ``--direct-mg-exact none`` skips them), which the claims table uses, and the RB estimate there is
   compared with them (z-scores in the per-system files). H4 uses the exact pair sums.
 * Direct route with Pauli shadows at N = 6: exact pair sums (61-263 s per call, observed) only at the
@@ -125,7 +126,9 @@ pi_x before pi_y, fixed signs), so the N2 numbers are reproducible and hold for 
 N2 numbers of earlier runs used an arbitrary orientation and differ in exactly these quantities. The
 constant ORIENTATION_DEPENDENT (now empty) lists the systems whose builder leaves the orientation to
 round-off; their dependent numbers are marked † and get ORIENTATION_NOTES. LiH's single degenerate pair is
-a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search round-off).
+a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search round-off),
+and the df-trotter values of LiH and N2 depend on the round-off order of their equal-norm Cholesky leaves
+(TRAJECTORY_NOTE: per-element minima up to 1.6%, totals 2e-6, observed).
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS
 / MKL_NUM_THREADS, numpy's BLAS threads (effective only if numpy is not loaded yet, as when this file
@@ -207,8 +210,10 @@ ORIENTATION_NOTES = {
            "qubit Hamiltonian, and these numbers depend on it: the QWC (with its group counts) and Pauli-shadow "
            "energy variances, DF with pivoted-Cholesky leaves, the df-trotter and df-fragments biases (their "
            "fragments are the Cholesky leaves) and every per-element minimum or maximum; the aux-route QWC and "
-           "Pauli-shadow totals only weakly (at most 1.1e-4 relative between the two runs). Independent of it: "
-           "E, sigma^2, ||A||, the "
+           "Pauli-shadow totals only weakly (at most 1.1e-4 relative between the two runs), and so does the "
+           "unweighted norm over the 315 spin-free representatives (column 'norm A (spin-free elements)'; their "
+           "multiplicities are 2 and 4). Independent of it: E, sigma^2, the full-tensor ||A|| and ||A||_840 (all "
+           "840 elements have multiplicity 8), the "
            "matchgate totals and per-element means (energy and both routes), DF with eigh leaves and the bias of "
            "the exact aux route. Observed at FCI over the relative angle of the pairs (7.5-degree steps over the "
            "180-degree period): QWC blocked 3.91-8.45 and interleaved 3.00-6.40 Ha^2, Pauli shadows blocked "
@@ -224,27 +229,53 @@ ORIENTATION_NOTES = {
 }
 ORIENTATION_NOTES_FIXED = {
     "n2": ("Orbital orientation (n2): the CAS(6,6) active space has two degenerate pairs, pi_u (active orbitals 0, "
-           "1) and pi_g (3, 4). Their orientation is fixed by the builder (`systems.n2`), so these numbers are "
-           "reproducible, but the relative orientation of the two pairs and the order inside each pair are not "
-           "symmetries of the qubit Hamiltonian: the QWC (with its group counts) and Pauli-shadow energy "
-           "variances, DF with pivoted-Cholesky leaves, the df-trotter and df-fragments biases and the per-element "
-           "minima and maxima hold for that convention only. Observed at FCI with the orbitals of RHF without "
-           "symmetry, over the relative angle of the pairs (7.5-degree steps over the 180-degree period): QWC "
-           "blocked 3.91-8.45 and interleaved 3.00-6.40 Ha^2, Pauli shadows blocked 462-903 and interleaved "
-           "335-1467 Ha^2, Cholesky DF 1.033-1.037 Ha^2; with both pairs aligned to the x and y axes, 3.91 / 4.00 / "
-           "903 / 335 (QWC blocked / interleaved, Pauli blocked / interleaved; pi_u ordered y, x and pi_g x, y) or "
-           "4.12 / 3.00 / 462 / 1467 (the same order in both pairs). Independent of it: E, sigma^2, ||A||, the "
-           "matchgate totals and per-element means (energy and both routes; matchgate energy 224.18 Ha^2), DF with "
-           "eigh leaves (0.928 Ha^2) and the bias of the exact aux route."),
+           "1) and pi_g (3, 4). `systems.n2` fixes their orientation: a symmetry-adapted (D2h) RHF and "
+           "`systems.canonical_orbitals` give axis-aligned pairs, pi_x before pi_y in both, with fixed signs, so "
+           "these numbers are reproducible (observed: a reduced N2 run, states 0, 2 and FCI, gives identical tables "
+           "with 1 and 2 BLAS threads; its JSON values agree to 3.2e-7 relative, df-trotter values to 1.3e-4, "
+           "see the reproducibility note). The relative orientation of the two pairs and the order inside each "
+           "pair are still not "
+           "symmetries of the qubit Hamiltonian, so the QWC (with its group counts) and Pauli-shadow energy "
+           "variances, DF with pivoted-Cholesky leaves, the df-trotter and df-fragments biases (their fragments "
+           "are the Cholesky leaves), every per-element minimum or maximum and, weakly, the aux-route QWC and "
+           "Pauli-shadow totals hold for this convention only; so does the unweighted norm over the 315 "
+           "spin-free representatives (column 'norm A (spin-free elements)'; multiplicities 2 and 4), unlike the "
+           "full-tensor ||A|| that the shot counts use. N2 numbers of runs made before this convention (RHF "
+           "without symmetry) used an orientation set by round-off and differ in exactly these quantities "
+           "(observed against the previous full run: energy QWC up to 57%, Pauli shadows up to 48%, Cholesky DF "
+           "0.8%, df-trotter and df-fragments biases up to 1.3% and 15%, aux-route QWC totals 3.7e-4, the "
+           "315-element norm 2.6-4.3%, and the Rao-Blackwellized direct-route estimates at their noise level, "
+           "0.2%); the orientation-independent quantities listed below agree to the trajectory round-off (at most "
+           "8e-6 relative; E_FCI to 6e-14 Ha). The "
+           "aligned orbitals also make integrals vanish by symmetry: H has 247 Pauli terms (383 before), 93 / 85 "
+           "QWC groups (164 / 171) and the 840 X_e 3.9e5 terms (6.6e5). Observed at FCI with the orbitals of RHF "
+           "without symmetry, over the relative angle of the pairs (7.5-degree steps over the 180-degree period): "
+           "QWC blocked 3.91-8.45 and interleaved 3.00-6.40 Ha^2, Pauli shadows blocked 462-903 and interleaved "
+           "335-1467 Ha^2, Cholesky DF 1.033-1.037 Ha^2; with both pairs axis-aligned, 4.12 / 3.00 / 462 / 1467 "
+           "(QWC blocked / interleaved, Pauli blocked / interleaved) with the same order in both pairs, the "
+           "convention of `systems.n2` (this run below), and 3.91 / 4.00 / 903 / 335 with opposite orders. "
+           "Independent of it: E, sigma^2, the full-tensor ||A|| and ||A||_840, the matchgate totals and "
+           "per-element means (energy and both routes; matchgate energy 224.18 Ha^2 at FCI), DF with eigh leaves "
+           "(0.928 Ha^2) and the bias of the exact aux route."),
 }
 TRAJECTORY_NOTE = ("Reproducibility of the states: the SD iterates are reproducible to about 1e-9 Ha in E and 5e-6 "
                    "relative in ||A|| (observed for h4, lih and n2 between runs and containers; FCI and iterate 0 agree "
                    "to round-off). The exact line search locates each minimum from energy values, so its step is fixed "
-                   "only to about the square root of the round-off, and round-off differences (BLAS kernels, memory "
-                   "alignment) move the trajectory at that level. For h4 and lih the derived numbers changed by at "
-                   "most 3e-5 relative (observed), below the printed precision except for the rounding of a last "
-                   "digit, with one exception: per-element minima of QWC variances on df-trotter states (up to 1.6%, "
-                   "lih).")
+                   "only to about the square root of the round-off, and round-off differences (BLAS kernels, thread "
+                   "counts, memory alignment) move the trajectory at that level. The derived numbers above the "
+                   "round-off level changed by at most 3e-5 relative between runs, containers and invocations "
+                   "(observed, single thread: h6a and h8 bitwise identical, h4, h6 and h6b at most 3.5e-6, lih 2.8e-5; "
+                   "n2 between 1 and 2 BLAS threads at most 3.2e-7), below the printed precision except for the "
+                   "rounding of a last digit, with one exception. The df-trotter product runs over the Cholesky "
+                   "leaves in the order of decreasing norm, and leaves of equal norm (symmetry-equivalent pairs: 4 "
+                   "pairs each for lih and n2, none for the hydrogen chains) keep the order in which the pivoted "
+                   "Cholesky (`factor.cholesky_eri`) picks exactly tied diagonals, which round-off decides (observed: "
+                   "n2's tied leaves 6 and 7 came swapped in one of two processes with 2 BLAS threads; lih's "
+                   "df-trotter QWC per-element minima at delta = 0.6 differ by 0.2-1.6% between two single-thread "
+                   "full runs at every state, HF included, where the input state is the same). Swapping every tied "
+                   "pair changes df-trotter per-element minima by up to 1.6% (lih, QWC blocked, delta = 0.6) and 2e-4 "
+                   "(n2), totals by at most 2e-6 and the bias by at most 1.3e-5 relative (observed at M1 SD iterate "
+                   "2); the exact and df-fragments routes and the DF energy variances do not depend on the order.")
 
 
 def build_system(name: str):
@@ -1764,8 +1795,8 @@ def md_claims(rows: list[dict]) -> list[str]:
               f"partly reproduced at {prim}": [r for r in rows if r["verdict"] == "partly reproduced"],
               f"not reproduced at {prim}": [r for r in rows if r["verdict"] == "not reproduced"],
               "not computed": [r for r in rows if r["verdict"] == "not computed"],
-              "not reproduced at M1 SD iterate 2 (a different state, not the claims'; see the reasons)":
-                  [r for r in rows if r["verdicts"]["it2"] is False]}
+              f"reproduced at {prim} but not at M1 SD iterate 2 (a different state, not the claims'; see the reasons)":
+                  [r for r in rows if r["verdict"] == "reproduced" and r["verdicts"]["it2"] is False]}
     for label, sel in groups.items():
         if sel:
             lines.append(f"* {label}: " + "; ".join(r["claim"] for r in sel) + ".")
