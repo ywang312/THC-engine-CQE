@@ -29,7 +29,7 @@ independent elements of 2A^{ij}_{kl} for N = 6; spin-free: 315 independent eleme
     and bias-aware (inf = unreachable, ||bias|| >= 0.3 ||A||);
   * per-element statistics over the elements with |A_e| > t (t = 1e-4, 3e-4, 1e-3, 3e-3; ``subsets``
     in the JSON): their number, their share of ||A||^2 and S_ext = (sum_e m_e) mean_t / (0.09 ||A||^2),
-    the shots if every element had the subset mean (the earlier direct-route claims match t = 1e-3).
+    the shots if every element had the subset mean (observed: the earlier direct-route claims match t = 1e-3).
 At the FCI state A = 0, so only variances are reported there.
 
 Conventions
@@ -49,8 +49,8 @@ Conventions
 
 Reductions (to keep the full run within about 60 minutes on one thread)
 -----------------------------------------------------------------------
-* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (0.2-0.8 s for an
-  N = 6 state against 4-16 ms for the pair sums; ``measure.routes`` docstring). While a system runs,
+* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (observed: 0.2-0.8 s
+  for an N = 6 state against 4-16 ms for the pair sums; ``measure.routes`` docstring). While a system runs,
   the private factory ``schemes._Expectations`` is wrapped by a content-keyed LRU cache (qubit count,
   basis and amplitudes, hashed), so the 3 schemes and 2 element sets that measure one state share one
   table. The table is a deterministic function of the state; ``--verify-cache`` (run by ``--quick``)
@@ -115,12 +115,17 @@ variants of our computation, at the primary state) and the likely reason for a d
 ``--summary-only`` rebuilds the markdown files and the summary from the JSON files in ``--out`` without
 computing.
 
-Caveats (section of the summary; ORIENTATION_NOTES, TRAJECTORY_NOTE): N2's active space has two
-degenerate pi pairs whose relative orientation RHF leaves to round-off; QWC, Pauli-shadow and
-Cholesky-DF numbers (and the DF-route biases and every per-element min and max) depend on it and are
-marked † in the summary tables; matchgate, DF-eigh, E, sigma^2 and ||A|| do not. LiH's single degenerate
-pair is a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search
-round-off).
+Caveats (section of the summary; ORIENTATION_NOTES, ORIENTATION_NOTES_FIXED, TRAJECTORY_NOTE): N2's
+active space has two degenerate pi pairs. Their relative orientation and the order inside each pair are not
+symmetries of the qubit Hamiltonian: QWC, Pauli-shadow and Cholesky-DF numbers (and the DF-route biases and
+every per-element min and max) depend on them; matchgate, DF-eigh, E, sigma^2 and ||A|| do not.
+``systems.n2`` fixes them (symmetry-adapted D2h RHF and ``systems.canonical_orbitals``: axis-aligned pairs,
+pi_x before pi_y, fixed signs), so the N2 numbers are reproducible and hold for that convention
+(ORIENTATION_NOTES_FIXED). Before that change RHF ran without symmetry and round-off set the orientation:
+N2 numbers of earlier runs used an arbitrary orientation and differ in exactly these quantities. The
+constant ORIENTATION_DEPENDENT (now empty) lists the systems whose builder leaves the orientation to
+round-off; their dependent numbers are marked † and get ORIENTATION_NOTES. LiH's single degenerate pair is
+a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search round-off).
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS
 / MKL_NUM_THREADS, numpy's BLAS threads (effective only if numpy is not loaded yet, as when this file
@@ -176,7 +181,10 @@ CLAIM_SO_KEY = f"so{CLAIM_SO_ITERATE}"
 SUBSET_THRESHOLDS = (1e-4, 3e-4, 1e-3, 3e-3)   # per-element statistics over |A_e| > t (``subsets``)
 SUBSET_REF = 1e-3              # the subset that reproduces the direct-route claims (row D-MG)
 TRAJ_COMPARE_ITERS = 3         # iterations of the trajectory comparison (claims systems)
-ORIENTATION_DEPENDENT = ("n2",)  # systems whose numbers marked † depend on the orientation of degenerate MOs
+# Systems whose builder leaves the orientation of degenerate active MOs to round-off: their orientation-dependent
+# numbers are marked † (Caveats). Empty since systems.n2 builds symmetry-adapted canonical orbitals; put "n2"
+# back for a builder without a fixed orientation (e.g. RHF without symmetry, as systems.n2 before that change).
+ORIENTATION_DEPENDENT: tuple[str, ...] = ()
 # The earlier analysis's claimed shot counts with their claimed per-element variances (Var(A_hat_e) per shot):
 # ||A||_840 implied by S = 840 v / (0.09 ||A||^2) (summary, "Trajectories").
 CLAIMED_SHOTS = (("aux + QWC, delta = 0.1", 5.9e9, 36.0 / 0.1 ** 2),
@@ -186,11 +194,14 @@ CLAIMED_SHOTS = (("aux + QWC, delta = 0.1", 5.9e9, 36.0 / 0.1 ** 2),
                  ("direct shadows (mean 16)", 2.6e7, 16.0))
 CLAIMS_K = 840                 # spin-orbital elements of the claims (N = 6)
 TIE_DELTA = 0.1                # delta of the aux-route QWC tie-order spread (claims states)
-# Caveats printed in the markdown (section "Caveats" of the summary and the per-system files). The numbers
-# are observed with rotations of the degenerate active orbitals of systems.n2 / systems.lih at FCI.
+# Caveats printed in the markdown (section "Caveats" of the summary and the per-system files). The ranges are
+# observed with rotations of the degenerate active orbitals of N2 (RHF without symmetry, the earlier
+# systems.n2) and of systems.lih at FCI. ORIENTATION_NOTES is the note for a builder that leaves the
+# orientation to round-off (a system in ORIENTATION_DEPENDENT); for a system that is not in it,
+# ORIENTATION_NOTES_FIXED replaces the note (a builder that fixes the orientation: systems.n2 now).
 ORIENTATION_NOTES = {
     "n2": ("Orbital orientation (n2): the CAS(6,6) active space has two degenerate pairs, pi_u (active orbitals "
-           "0, 1) and pi_g (3, 4). `systems.n2` runs RHF without symmetry, so the orientation of each pair is set "
+           "0, 1) and pi_g (3, 4). This builder runs RHF without symmetry, so the orientation of each pair is set "
            "by round-off (observed: it differed between two full runs of this script, and between fresh processes "
            "with different BLAS thread counts). The relative orientation of the two pairs is not a symmetry of the "
            "qubit Hamiltonian, and these numbers depend on it: the QWC (with its group counts) and Pauli-shadow "
@@ -210,6 +221,21 @@ ORIENTATION_NOTES = {
             "arbitrary orientation, but rotating it is a symmetry of H (axial symmetry), so no number here depends "
             "on it (observed: QWC, Pauli-shadow, matchgate and DF energy variances at FCI unchanged to the printed "
             "5 digits under rotations of the pair)."),
+}
+ORIENTATION_NOTES_FIXED = {
+    "n2": ("Orbital orientation (n2): the CAS(6,6) active space has two degenerate pairs, pi_u (active orbitals 0, "
+           "1) and pi_g (3, 4). Their orientation is fixed by the builder (`systems.n2`), so these numbers are "
+           "reproducible, but the relative orientation of the two pairs and the order inside each pair are not "
+           "symmetries of the qubit Hamiltonian: the QWC (with its group counts) and Pauli-shadow energy "
+           "variances, DF with pivoted-Cholesky leaves, the df-trotter and df-fragments biases and the per-element "
+           "minima and maxima hold for that convention only. Observed at FCI with the orbitals of RHF without "
+           "symmetry, over the relative angle of the pairs (7.5-degree steps over the 180-degree period): QWC "
+           "blocked 3.91-8.45 and interleaved 3.00-6.40 Ha^2, Pauli shadows blocked 462-903 and interleaved "
+           "335-1467 Ha^2, Cholesky DF 1.033-1.037 Ha^2; with both pairs aligned to the x and y axes, 3.91 / 4.00 / "
+           "903 / 335 (QWC blocked / interleaved, Pauli blocked / interleaved; pi_u ordered y, x and pi_g x, y) or "
+           "4.12 / 3.00 / 462 / 1467 (the same order in both pairs). Independent of it: E, sigma^2, ||A||, the "
+           "matchgate totals and per-element means (energy and both routes; matchgate energy 224.18 Ha^2), DF with "
+           "eigh leaves (0.928 Ha^2) and the bias of the exact aux route."),
 }
 TRAJECTORY_NOTE = ("Reproducibility of the states: the SD iterates are reproducible to about 1e-9 Ha in E and 5e-6 "
                    "relative in ||A|| (observed for h4, lih and n2 between runs and containers; FCI and iterate 0 agree "
@@ -1320,8 +1346,12 @@ def _reason(row: dict, ref: dict) -> str:
                 pos = "at the top of the claimed range" if x >= 0.9 * hi else "inside the claimed range"
             txt = f"exact exp(-i delta H), relative Frobenius bias over the 840 elements: {_pct(x)} at {where}, {pos}"
             if at != "closest" and v.get("closest"):
-                txt += (f"; at {state_desc('closest')} it is {_pct(v['closest'])} ({_g(x / v['closest'])}x smaller): "
-                        f"at similar E - E_FCI the relative bias depends on the trajectory")
+                r = x / v["closest"]
+                sa, sc = st.get(at), st.get("closest")
+                similar = sa is not None and sc is not None and sa["e_err"] > 0 and 2 / 3 <= sc["e_err"] / sa["e_err"] <= 1.5
+                txt += (f"; at {state_desc('closest')} it is {_pct(v['closest'])} "
+                        f"({_g(r) + 'x smaller' if r >= 1 else _g(1 / r) + 'x larger'})"
+                        + (": at similar E - E_FCI the relative bias depends on the trajectory" if similar else ""))
             if at != "it2" and v.get("it2") is not None:
                 txt += f"; M1 SD iterate 2: {_pct(v['it2'])}"
             return (txt + f"; 315 spin-free at {where}: {_pct(_alt(row, '315 spin-free', at))}; DF-Trotter "
@@ -1377,6 +1407,8 @@ def _reason(row: dict, ref: dict) -> str:
                 t = _tie(row, "interleaved", at)
                 if t:
                     txt += f"; {t['n']} random tie orders: {_g(t['min'])}-{_g(t['max'])}"
+                    if min(t["canonical"], t["min"]) <= claimed <= max(t["canonical"], t["max"]):
+                        txt += f" (with the canonical value, a spread that contains the claimed {_g(claimed)})"
             elif cid.startswith("S-aux-MG"):
                 txt += f"; variance only (bias-aware: {_g(_alt(row, 'bias-aware', at))})"
             elif cid == "S-direct-MG":
@@ -1749,7 +1781,7 @@ def _threads_label(results: dict) -> str:
     return f"{n} thread{'s' if n != 1 else ''}" + ("" if env.get("blas_pinned") else ", BLAS threads not pinned")
 
 
-def md_timing(results: dict, total: float, cache_check) -> list[str]:
+def md_timing(results: dict, total: float, cache_check, total_kind: str = "wall") -> list[str]:
     lines = [f"## Runtime ({_threads_label(results)})", "",
              "| system | energy (s) | aux route (s) | direct matchgate (s) | direct Pauli (s) | total (s) | "
              "oracle tables built / reused |", "|---|---|---|---|---|---|---|"]
@@ -1758,7 +1790,8 @@ def md_timing(results: dict, total: float, cache_check) -> list[str]:
         c = res.get("oracle_cache", {})
         lines.append(f"| {name} | {t['energy']:.1f} | {t['aux']:.1f} | {t['direct_matchgate']:.1f} | "
                      f"{t['direct_pauli']:.1f} | {res['seconds']:.1f} | {c.get('misses', '–')} / {c.get('hits', '–')} |")
-    lines.append(f"| all | | | | | {total:.1f} | |")
+    lines.append(f"| all ({'wall time' if total_kind == 'wall' else 'sum over the systems, separate invocations'}) "
+                 f"| | | | | {total:.1f} | |")
     if cache_check is not None:
         lines += ["", f"Oracle cache check (H4 iterate 2, {cache_check['n_results']} results): bitwise identical = "
                       f"{cache_check['bitwise_identical']}."]
@@ -1771,7 +1804,8 @@ def orientation_note(res: dict) -> list[str]:
     name = res["system"]
     if name not in ORIENTATION_NOTES:
         return []
-    text = ORIENTATION_NOTES[name]
+    text = ORIENTATION_NOTES_FIXED[name] if (not dagger(name) and name in ORIENTATION_NOTES_FIXED) \
+        else ORIENTATION_NOTES[name]
     f = _state(res, "fci")
     if name == "n2" and f is not None:
         en = f["energy"]
@@ -1907,7 +1941,7 @@ def md_system(res: dict, deltas) -> str:
     return "\n".join(lines) + "\n"
 
 
-def markdown_summary(results: dict, rows: list[dict], args, total: float, cache_check) -> str:
+def markdown_summary(results: dict, rows: list[dict], args, total: float, cache_check, total_kind: str = "wall") -> str:
     added = "; ".join(f"{name} {', '.join(map(str, res['bracket_iterates_added']))}" for name, res in results.items()
                       if res.get("bracket_iterates_added"))
     so_added = "; ".join(f"{name} {', '.join(state_label(k) for k in res['so_iterates_added'])}"
@@ -1929,7 +1963,7 @@ def markdown_summary(results: dict, rows: list[dict], args, total: float, cache_
         lines += md_bias(results, args.deltas)
         lines += md_residual_variance(results, args.deltas)
         lines += md_shots(results, args.deltas)
-    lines += md_timing(results, total, cache_check)
+    lines += md_timing(results, total, cache_check, total_kind)
     return "\n".join(lines) + "\n"
 
 
@@ -1987,6 +2021,7 @@ def main(argv=None) -> int:
     for name in args.systems:
         res = run_system(name, args)
         res["settings"] = settings
+        res["cache_check"] = cache_check            # of this invocation (kept by --summary-only)
         results[name] = res
         with open(os.path.join(args.out, f"measurement_{name}.json"), "w") as fh:
             json.dump(res, fh, indent=1, default=_json_default)
@@ -2000,24 +2035,43 @@ def main(argv=None) -> int:
     return 0
 
 
-def write_summary(results: dict, args, total: float, cache_check, settings: dict) -> None:
-    """The claims rows, measurement_summary.md and measurement_summary.json."""
+def write_summary(results: dict, args, total: float, cache_check, settings: dict, total_kind: str = "wall") -> None:
+    """The claims rows, measurement_summary.md and measurement_summary.json. ``total_kind``: "wall" (the
+    wall time of one invocation) or "sum" (the sum of the systems' runtimes, from separate invocations)."""
     rows = claims(results)
     with open(os.path.join(args.out, "measurement_summary.md"), "w") as fh:
-        fh.write(markdown_summary(results, rows, args, total, cache_check))
-    summary = {"settings": settings, "claims": rows, "seconds": total, "cache_check": cache_check,
+        fh.write(markdown_summary(results, rows, args, total, cache_check, total_kind))
+    summary = {"settings": settings, "claims": rows, "seconds": total, "seconds_kind": total_kind,
+               "cache_check": cache_check,
                "timing": {k: v["timing"] | {"total": v["seconds"]} for k, v in results.items()}}
     with open(os.path.join(args.out, "measurement_summary.json"), "w") as fh:
         json.dump(summary, fh, indent=1, default=_json_default)
     print(f"wrote {os.path.join(args.out, 'measurement_summary.md')} ({total:.1f} s)")
 
 
+# Settings that change a system's numbers or the meaning of its runtimes: --summary-only combines per-system
+# files (e.g. from separate invocations) only if they agree on these. The others (--systems, --residual-systems,
+# --out, --verify-cache) do not: a system's computation depends only on its own builder, trajectory, seeds
+# (rb_seed, the tie-order seeds) and oracle cache, all set up per system in run_system.
+COMPUTE_SETTINGS = ("states", "deltas", "rb_settings", "rb_settings_claims", "pauli_direct", "direct_mg_exact",
+                    "no_bracket", "so_iterates", "tie_orders", "no_cache")
+
+
+def compute_settings(settings: dict) -> dict:
+    """The COMPUTE_SETTINGS of a recorded ``settings`` dict, plus the thread count and whether BLAS was pinned."""
+    env = settings.get("threads_env") or {}
+    return {**{k: settings.get(k) for k in COMPUTE_SETTINGS},
+            "threads": env.get("threads"), "blas_pinned": env.get("blas_pinned")}
+
+
 def summary_only(args) -> int:
     """Rebuild the markdown files and the summary from the measurement_<system>.json files in --out.
 
-    The states, deltas and residual systems are those recorded in the files (the first system's
-    settings). The cache check and, if the files are those of that run, the wall time are taken from an
-    existing measurement_summary.json; otherwise the runtime total is the sum of the systems' runtimes.
+    The files may come from separate invocations (one per system, say), but they must agree on
+    ``compute_settings`` (SystemExit otherwise); the states, deltas and residual systems are those recorded
+    in the files. The cache check is that of the invocations (recorded per system), else that of an existing
+    measurement_summary.json; the wall time of that summary is kept if the files are those of its run,
+    otherwise the runtime total is the sum of the systems' runtimes.
     """
     results = {}
     for name in args.systems:
@@ -2030,26 +2084,31 @@ def summary_only(args) -> int:
     if not results:
         raise SystemExit(f"no measurement_<system>.json files for {args.systems} in {args.out}")
     recorded = [r["settings"] for r in results.values()]
-    if any(s["deltas"] != recorded[0]["deltas"] for s in recorded):
-        raise SystemExit("the systems were computed with different deltas")
+    keys = {name: compute_settings(r["settings"]) for name, r in results.items()}
+    first = next(iter(keys.values()))
+    differ = [k for k in first if any(kv[k] != first[k] for kv in keys.values())]
+    if differ:
+        raise SystemExit("the systems were computed with different settings: " + "; ".join(
+            f"{k}: " + ", ".join(f"{name} {kv[k]!r}" for name, kv in keys.items()) for k in differ))
     args.states = recorded[0]["states"]
     args.deltas = [float(d) for d in recorded[0]["deltas"]]
     args.residual_systems = [n for n, r in results.items() if any("residual" in s for s in r["states"])]
     for name, res in results.items():
         with open(os.path.join(args.out, f"measurement_{name}.md"), "w") as fh:
             fh.write(md_system(res, args.deltas))
-    cache_check = None
-    total = float(sum(r["seconds"] for r in results.values()))
+    # the cache check of the invocations that computed the files (recorded per system), else the old summary's
+    cache_check = next((r["cache_check"] for r in results.values() if r.get("cache_check")), None)
+    total, total_kind = float(sum(r["seconds"] for r in results.values())), "sum"
     old = os.path.join(args.out, "measurement_summary.json")
     if os.path.exists(old):
         with open(old) as fh:
             prev = json.load(fh)
-        cache_check = prev.get("cache_check")
+        cache_check = cache_check or prev.get("cache_check")
         timing = prev.get("timing", {})
         if set(timing) == set(results) and all(timing[n].get("total") == r["seconds"] for n, r in results.items()):
-            total = float(prev["seconds"])                  # the same run: keep its wall time
-    settings = dict(recorded[0], summary_only=True)
-    write_summary(results, args, total, cache_check, settings)
+            total, total_kind = float(prev["seconds"]), prev.get("seconds_kind", "wall")   # the same run
+    settings = dict(recorded[0], summary_only=True, systems=list(results), residual_systems=args.residual_systems)
+    write_summary(results, args, total, cache_check, settings, total_kind)
     return 0
 
 

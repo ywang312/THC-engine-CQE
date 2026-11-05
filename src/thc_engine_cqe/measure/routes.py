@@ -600,8 +600,8 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
             count are checked). A PauliSum does not record its qubit order, so
             ``hamiltonian`` and ``targets`` each require ``mapping``, the mapping they
             were built with (ValueError without it; X_e of another order would give
-            wrong variances and a wrong ``expectation``, and a mismatched mapping
-            cannot be detected).
+            wrong variances and a wrong ``expectation``, and a mismatched mapping is
+            not detected).
             ``scheme_method`` (or ``method``) is the scheme's method; every other
             keyword goes to the scheme unchanged (``n_settings``, ``rel_stderr``,
             ``seed``, ``max_pairs``, ...).
