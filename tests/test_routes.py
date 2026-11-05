@@ -1,9 +1,12 @@
 """Tests of the residual routes (``thc_engine_cqe.measure.routes``): auxiliary states, infinite-shot
-estimates (bias) and shot counts.
+estimates (bias), shot counts, and the scheme wiring (per-shot variances of both routes).
 
 References independent of the module: dense Fock-space matrices and ``scipy.linalg.expm`` (H4),
 the fragment operators re-derived here from the DF leaves, Fock-oracle commutators, and
-<[H,[H,[H,Gamma]]]> from PySCF transition RDMs of H^k Psi.
+<[H,[H,[H,Gamma]]]> from PySCF transition RDMs of H^k Psi. The wiring tests rebuild the targets and
+states from ``targets``/``aux_states`` and call ``measure.schemes`` directly, check the expectations
+against the infinite-shot estimates and the exact residual, the 1/delta^2 scaling and the (L + 1)^2
+cost of df-fragments, and simulate the measurements end to end (``scheme_method="mc"``).
 
 Parity argument (bias O(delta^2) with real factors and real Psi): every fragment Hamiltonian is a
 real symmetric matrix in the determinant basis, so conj U(delta) = U(-delta) for each exact
@@ -22,8 +25,9 @@ from thc_engine_cqe.cqe import run_cqe
 from thc_engine_cqe.factor import double_factorize
 from thc_engine_cqe.fci_ops import FCISpace, Hamiltonian
 from thc_engine_cqe.measure import routes as rt
+from thc_engine_cqe.measure import schemes as sc
 from thc_engine_cqe.measure import targets as tg
-from thc_engine_cqe.measure.pauli import QubitMapping
+from thc_engine_cqe.measure.pauli import QubitMapping, QubitState
 from thc_engine_cqe.testing.fock import FockSpace
 
 DELTAS = np.array([1e-3, 3e-3, 1e-2, 3e-2, 1e-1])
@@ -552,3 +556,221 @@ def test_route_input_validation(h4, rng):
     for method in rt.METHODS:
         n_states = len(rt.aux_states(act, ci, 0.05, method))
         assert n_states == (1 if method != "df-fragments" else 1 + double_factorize(act.eri).n_leaves)
+
+
+# ========================================================= scheme wiring
+def scheme_reference(act, states, ops, scheme, mapping=None):
+    """schemes.scheme_variance of the vector target ``ops`` on each CI array of ``states``."""
+    mapping = QubitMapping(act.norb) if mapping is None else mapping
+    return [sc.scheme_variance(ops, QubitState.from_ci(act.norb, act.nelec, lam, mapping), scheme)
+            for lam in states]
+
+
+@pytest.mark.parametrize("method", rt.METHODS)
+def test_aux_variance_is_the_scheme_variance_on_the_auxiliary_states(h4, method):
+    """aux_residual_variance = schemes.scheme_variance of [-Q_e / delta] on QubitState.from_ci of each
+    auxiliary state, rebuilt here from aux_states and aux_targets (rtol 1e-12), for every scheme and
+    both element sets; "df-fragments" combines the L + 1 = 11 states with the optimal allocation
+    f_l = sqrt(V_l) / sum sqrt(V_m): total = (sum_l sqrt V_l)^2, per_target = sum_l v_l / f_l, QWC
+    n_settings = (L + 1) n_G. The expectation is aux_residual (1e-13), and reused ``states`` give
+    the same result."""
+    act, ci = h4
+    d = 0.3
+    states = rt.aux_states(act, ci, d, method)
+    n_leaves = None if method == "exact" else double_factorize(act.eri).n_leaves
+    for kind in tg.KINDS:
+        el = tg.element_set(act.norb, kind)
+        ops = [(-q) / d for q in tg.aux_targets(el, QubitMapping(act.norb), kind)]
+        est = rt.aux_residual(act, ci, d, method, kind=kind)
+        for scheme in sc.SCHEMES:
+            res = rt.aux_residual_variance(act, ci, d, method, None, kind, scheme)
+            ref = scheme_reference(act, states, ops, scheme)
+            v = np.array([r.total for r in ref])
+            if method != "df-fragments":
+                assert res.scheme == scheme and res.n_targets == len(el)
+                assert np.isclose(res.total, v[0], rtol=1e-12, atol=0)
+                assert np.allclose(res.per_target, ref[0].per_target, rtol=1e-12, atol=0)
+            else:
+                f = np.sqrt(v) / np.sqrt(v).sum()
+                assert res.scheme == "combined" and len(res.info["parts"]) == n_leaves + 1
+                assert np.isclose(res.total, np.sqrt(v).sum() ** 2, rtol=1e-12, atol=0)
+                assert np.allclose(res.allocation, f, rtol=1e-12, atol=0)
+                per = sum(r.per_target / fl for r, fl in zip(ref, f))
+                assert np.allclose(res.per_target, per, rtol=1e-12, atol=0)
+            if scheme == "qwc":
+                n_g = sc.qwc_grouping(ops).n_groups
+                assert res.n_settings == len(states) * n_g
+            assert np.abs(res.expectation - est).max() <= 1e-13
+            assert res.info["route"] == "aux" and res.info["route_method"] == method
+            assert res.info["kind"] == kind and res.info["scheme"] == scheme and res.info["delta"] == d
+            assert res.info["order"] == "blocked" and res.info["n_states"] == len(states)
+            assert res.info["n_leaves"] == n_leaves
+        again = rt.aux_residual_variance(act, ci, d, method, el, kind, "matchgate_shadow", states=states)
+        assert np.isclose(again.total, rt.aux_residual_variance(act, ci, d, method, el, kind,
+                                                                "matchgate_shadow").total, rtol=1e-13, atol=0)
+
+
+def test_aux_variance_scales_as_one_over_delta_squared(h4):
+    """Every auxiliary state carries the variance of Psi ("Shot cost" in the module docstring): for the
+    "exact" route, delta^2 times the per-shot variance of A_hat_e = -Q_hat_e/delta equals the variance of
+    Q_e on Psi up to O(delta^2), for every scheme and both qubit orders: |delta^2 V(delta) / V_Q(Psi) - 1|
+    <= 0.05 delta^2 for the total and max_e |delta^2 v_e(delta) - v_e^Q(Psi)| <= 0.1 delta^2 max_e v_e^Q
+    (delta = 1e-3, 1e-2, 0.1; observed normalized deviations <= 0.0045 and <= 0.023)."""
+    act, ci = h4
+    for order in ("blocked", "interleaved"):
+        m = QubitMapping(act.norb, order)
+        psi = QubitState.from_ci(act.norb, act.nelec, ci, m)
+        for kind in tg.KINDS:
+            q = tg.aux_targets(tg.element_set(act.norb, kind), m, kind)
+            for scheme in sc.SCHEMES:
+                ref = sc.scheme_variance(q, psi, scheme)
+                for d in (1e-3, 1e-2, 0.1):
+                    res = rt.aux_residual_variance(act, ci, d, "exact", None, kind, scheme, mapping=m)
+                    assert res.info["order"] == order
+                    assert abs(res.total * d * d / ref.total - 1) <= 0.05 * d * d, (order, kind, scheme, d)
+                    dev = np.abs(res.per_target * d * d - ref.per_target).max()
+                    assert dev <= 0.1 * d * d * ref.per_target.max(), (order, kind, scheme, d)
+
+
+def test_df_fragments_cost_about_L_plus_1_squared_times_one_state(h4):
+    """With the schemes' exact variances on H4 (L = 10): total(df-fragments) / ((L + 1)^2 total(exact)) and
+    total(df-trotter) / total(exact) are 1 within 0.03 delta^2 at delta = 0.1 and 0.6, for every scheme
+    and both element sets (observed: fragments 0.9948-1.0000, Trotter 1.0000-1.0056). A truncated
+    factorization (5 leaves) is passed through: 6 states, n_leaves = 5, and the expectation is the
+    truncated route's aux_residual (1e-13)."""
+    act, ci = h4
+    n_leaves = double_factorize(act.eri).n_leaves
+    assert n_leaves == 10
+    for kind in tg.KINDS:
+        for d in (0.1, 0.6):
+            for scheme in sc.SCHEMES:
+                tot = {m: rt.aux_residual_variance(act, ci, d, m, None, kind, scheme).total for m in rt.METHODS}
+                ratio = tot["df-fragments"] / ((n_leaves + 1) ** 2 * tot["exact"])
+                assert abs(ratio - 1) <= 0.03 * d * d, (kind, d, scheme, ratio)
+                assert abs(tot["df-trotter"] / tot["exact"] - 1) <= 0.03 * d * d, (kind, d, scheme)
+    df5 = double_factorize(act.eri, n_leaves=5)
+    res = rt.aux_residual_variance(act, ci, 0.3, "df-fragments", None, "spin_free", "pauli_shadow", df=df5)
+    assert res.info["n_leaves"] == 5 and res.info["n_states"] == 6 and len(res.allocation) == 6
+    est = rt.aux_residual(act, ci, 0.3, "df-fragments", kind="spin_free", df=df5)
+    assert np.abs(res.expectation - est).max() <= 1e-13
+
+
+def test_aux_variance_monte_carlo_end_to_end(h4):
+    """scheme_method="mc" simulates the measurements of the folded targets -Q_e/delta on the auxiliary
+    states (delta = 0.3): the sampled per-shot totals agree with the exact ones within 4 standard
+    errors (QWC on "exact" and "df-fragments", matchgate shadows on "exact"), and the sampled
+    estimates of A_hat_e (QWC, a uniform-shot campaign) agree with aux_residual within 4.5 standard
+    errors for every element. With several states an integer seed becomes one shared Generator: the
+    first fragment's draws equal a single-state call with default_rng(seed), the second's differ
+    from a fresh default_rng(seed), and the call is reproducible."""
+    act, ci = h4
+    d = 0.3
+    for kind in tg.KINDS:
+        exact = rt.aux_residual_variance(act, ci, d, "exact", None, kind, "qwc")
+        mc = rt.aux_residual_variance(act, ci, d, "exact", None, kind, "qwc", scheme_method="mc",
+                                      n_shots=4000, seed=11)
+        assert mc.method == "mc" and abs(mc.total - exact.total) <= 4 * mc.stderr
+        z = (np.asarray(mc.info["sample_mean"]) - exact.expectation) / np.asarray(mc.info["sample_mean_stderr"])
+        assert np.abs(z).max() <= 4.5
+        assert np.abs(exact.expectation - rt.aux_residual(act, ci, d, "exact", kind=kind)).max() <= 1e-13
+    exact = rt.aux_residual_variance(act, ci, d, "exact", None, "spin_orbital", "matchgate_shadow")
+    mc = rt.aux_residual_variance(act, ci, d, "exact", None, "spin_orbital", "matchgate_shadow",
+                                  scheme_method="mc", n_snapshots=5000, seed=12)
+    assert mc.method == "mc" and abs(mc.total - exact.total) <= 4 * mc.stderr
+    exact = rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc")
+    kw = dict(scheme_method="mc", n_shots=500, seed=7)
+    mc = rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc", **kw)
+    assert mc.method == "mc" and abs(mc.total - exact.total) <= 4 * mc.stderr
+    assert rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc", **kw).total == mc.total
+    states = rt.aux_states(act, ci, d, "df-fragments")
+    ops = [(-q) / d for q in tg.aux_targets(tg.element_set(act.norb), QubitMapping(act.norb))]
+    grouping = sc.qwc_grouping(ops)
+    single = [sc.qwc_variance(ops, QubitState.from_ci(act.norb, act.nelec, states[l], QubitMapping(act.norb)),
+                              grouping=grouping, method="mc", n_shots=500, seed=np.random.default_rng(7))
+              for l in (0, 1)]
+    parts = mc.info["parts"]
+    assert parts[0].total == single[0].total and parts[1].total != single[1].total
+
+
+def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
+    """direct_residual_variance = schemes.scheme_variance of targets.direct_targets on Psi (rtol 1e-12),
+    with expectation = exact_residual (1e-12), for every scheme and both element sets (subsets of about
+    20 elements, and the full spin-free set with Pauli shadows); reused ``targets`` and a prebuilt
+    ``hamiltonian`` (with its mapping) give the same result, and a model Hamiltonian (5 of the 10 DF
+    leaves) gives the model's residual (1e-12); matchgate shadows do not depend on the qubit order
+    (rtol 1e-12); scheme_method="rb" passes through (seeded, n_settings settings, within 4 standard
+    errors of the exact value)."""
+    act, ci = h4
+    m = QubitMapping(act.norb)
+    psi = QubitState.from_ci(act.norb, act.nelec, ci, m)
+    for kind in tg.KINDS:
+        full = tg.element_set(act.norb, kind)
+        for scheme in sc.SCHEMES:
+            el = full if (kind, scheme) == ("spin_free", "pauli_shadow") else full[::len(full) // 20]
+            xs = tg.direct_targets(el, act, m, kind)
+            ref = sc.scheme_variance(xs, psi, scheme)
+            res = rt.direct_residual_variance(act, ci, None if el is full else el, kind, scheme)
+            assert np.isclose(res.total, ref.total, rtol=1e-12, atol=0)
+            assert np.allclose(res.per_target, ref.per_target, rtol=1e-12, atol=0)
+            assert np.abs(res.expectation - rt.exact_residual(act, ci, el, kind)).max() <= 1e-12
+            assert res.info["route"] == "direct" and res.info["kind"] == kind and res.info["scheme"] == scheme
+        el = full[:12]
+        xs = tg.direct_targets(el, act, m, kind)
+        res = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow")
+        reuse = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", targets=xs)
+        prebuilt = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", mapping=m,
+                                               hamiltonian=tg.energy_target(act, m))
+        il = QubitMapping(act.norb, "interleaved")
+        other = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", mapping=il)
+        assert other.info["order"] == "interleaved"
+        for r in (reuse, prebuilt, other):
+            assert np.isclose(r.total, res.total, rtol=1e-12, atol=0)
+            assert np.allclose(r.per_target, res.per_target, rtol=1e-12, atol=0)
+        model = act.with_eri(double_factorize(act.eri, n_leaves=5).to_eri())
+        res_model = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", mapping=m,
+                                                hamiltonian=tg.energy_target(model, m))
+        a_model = rt.exact_residual(model, ci, el, kind)
+        assert np.abs(res_model.expectation - a_model).max() <= 1e-12
+        assert np.abs(a_model - res.expectation).max() > 1e-3
+        rb = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", scheme_method="rb",
+                                         n_settings=1000, seed=3)
+        assert rb.method == "rb" and rb.n_samples == 1000
+        assert abs(rb.total - res.total) <= 4 * rb.stderr
+        assert rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", method="rb",
+                                           n_settings=1000, seed=3).total == rb.total
+
+
+def test_variance_wiring_validation(h4):
+    """Unknown or energy-only schemes, a mapping of another size, inconsistent reused states, a scheme
+    method given twice, a hamiltonian without its mapping, reused targets of the wrong number, empty
+    element sets and genuinely complex states raise."""
+    act, ci = h4
+    so = tg.element_set(act.norb)
+    with pytest.raises(ValueError, match="residual routes"):         # before any state is prepared
+        rt.aux_residual_variance(act, ci, 0.1, "exact", None, "spin_orbital", "df")
+    with pytest.raises(ValueError, match="scheme"):
+        rt.direct_residual_variance(act, ci, None, "spin_orbital", "classical")
+    with pytest.raises(ValueError, match="norb"):
+        rt.aux_residual_variance(act, ci, 0.1, "exact", None, "spin_orbital", "qwc", mapping=QubitMapping(3))
+    with pytest.raises(TypeError, match="QubitMapping"):
+        rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", mapping="blocked")
+    frag = rt.aux_states(act, ci, 0.1, "df-fragments")
+    with pytest.raises(ValueError, match="1 auxiliary state"):
+        rt.aux_residual_variance(act, ci, 0.1, "exact", so[:3], "spin_orbital", "qwc", states=frag[:2])
+    with pytest.raises(ValueError, match="11 auxiliary state"):
+        rt.aux_residual_variance(act, ci, 0.1, "df-fragments", so[:3], "spin_orbital", "qwc",
+                                 states=frag[:5], df=double_factorize(act.eri))
+    short = rt.aux_residual_variance(act, ci, 0.1, "df-fragments", so[:3], "spin_orbital", "qwc", states=frag[:5])
+    assert short.info["n_states"] == 5 and short.info["n_leaves"] == 4
+    with pytest.raises(TypeError, match="once"):
+        rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", method="exact", scheme_method="mc")
+    with pytest.raises(ValueError, match="mapping"):
+        rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", hamiltonian=tg.energy_target(act))
+    xs = tg.direct_targets(so[:3], act)
+    with pytest.raises(ValueError, match="targets"):
+        rt.direct_residual_variance(act, ci, so[:4], "spin_orbital", "qwc", targets=xs)
+    for fn, args in ((rt.aux_residual_variance, (act, ci, 0.1, "exact")), (rt.direct_residual_variance, (act, ci))):
+        with pytest.raises(ValueError, match="element"):
+            fn(*args, so[:0], "spin_orbital", "qwc")
+        with pytest.raises(ValueError, match="real"):
+            fn(act, ci + 0.1j * np.roll(ci, 1), *args[2:], so[:3], "spin_orbital", "qwc")

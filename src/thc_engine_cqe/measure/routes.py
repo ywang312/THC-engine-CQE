@@ -81,10 +81,11 @@ Hence:
   alone in its eigenbasis. With the same proxy, observed for H6 at 1.0 A (CQE
   iterate 2, L = 20): (sum_l sqrt V_l)^2 / V_exact = 441.0 at delta = 0.01 and
   438-441 up to delta = 0.6, against (L + 1)^2 = 441, for both element sets.
-  Observed with the exact variances of ``measure/schemes.py``:
-  (sum_l sqrt V_l)^2 / ((L + 1)^2 V_exact) = 0.994-1.000 on H4 (QWC, Pauli and
-  matchgate shadows; delta = 0.1 and 0.6; both element sets) and 0.9999 for H6 at
-  1.0 A (QWC, delta = 0.1). The first-order terms of single fragments are larger
+  With the exact variances of ``measure/schemes.py`` (:func:`aux_residual_variance`),
+  (sum_l sqrt V_l)^2 / ((L + 1)^2 V_exact) is 1 within 0.03 delta^2 on H4 (tested
+  for QWC, Pauli and matchgate shadows, delta = 0.1 and 0.6, both element sets;
+  observed 0.9948-1.0000), and 0.9999 for H6 at 1.0 A (QWC, delta = 0.1;
+  observed). The first-order terms of single fragments are larger
   than A and cancel in the sum (observed ||a_1|| = 14 ||A|| for the largest leaf,
   H6 spin-orbital set).
 * Truncating the factorization removes leaves that add variance and almost no
@@ -116,12 +117,14 @@ sum_e Var(A_hat_e) and whose ``expectation`` is the infinite-shot estimate.
 * Direct route: the vector target X_e of ``targets.direct_targets`` on
   ``QubitState.from_ci`` of Psi; the expectation is the exact residual (tested).
 
-The scheme options pass through (``method="mc"`` simulates the actual
-measurements, which validates the wiring end to end on H4; tested). The scheme
-code builds a dense table of <P(x, z)> for every z once per state whenever it
-fits (``measure.schemes``, "Expectation values"); for the 840 H6 Q_e this table
-takes 0.25-0.5 s per call against 2-20 ms for the pair sums themselves
-(observed), so df-fragments calls cost about (L + 1) times that.
+The scheme options pass through; the scheme's ``method`` is passed as
+``scheme_method`` (``scheme_method="mc"`` simulates the actual measurements, which
+validates the wiring end to end on H4; tested). The scheme code builds a dense
+table of <P(x, z)> for every z once per call whenever it fits (``measure.schemes``,
+"Expectation values"); for the 840 spin-orbital and 315 spin-free H6 Q_e this table
+(1024 x 4096 entries) takes 0.4-0.8 s per call, against 4-16 ms for the pair sums
+themselves (observed, one thread, any of the three schemes), so a df-fragments
+call costs about L + 1 times one state.
 
 Shots (:func:`shots_for_relative_error`)
 ----------------------------------------
@@ -457,6 +460,21 @@ def _shared_rng(opts: dict, n_states: int) -> dict:
     return opts
 
 
+def _scheme_options(opts: dict) -> dict:
+    """The scheme's keywords, with ``scheme_method`` renamed to the scheme's ``method``.
+
+    ``aux_residual_variance`` has a positional ``method`` (the route method), so the
+    scheme's method reaches it only as ``scheme_method``; ``direct_residual_variance``
+    has no route method and also accepts ``method``.
+    """
+    opts = dict(opts)
+    if "scheme_method" in opts:
+        if "method" in opts:
+            raise TypeError("pass the scheme's method once (scheme_method or method)")
+        opts["method"] = opts.pop("scheme_method")
+    return opts
+
+
 def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **opts):
     """Per-shot variance of the aux-route estimator A_hat_e = -Q_hat_e / delta under a scheme.
 
@@ -487,20 +505,25 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
         active, ci, delta, method, elements, kind: as for :func:`aux_residual`
             (``elements=None``: ``targets.element_set(N, kind)``). Real Psi only, up to
             a global phase (the parity argument and the estimator assume it).
+            ``method`` is the route method (``METHODS``).
         scheme: one of ``schemes.SCHEMES`` ("qwc", "pauli_shadow", "matchgate_shadow").
         **opts: the route options ``mapping`` (QubitMapping, default blocked; QWC and
             Pauli shadows depend on the order), ``df`` and ``states`` (as for
-            :func:`aux_residual`). Every other keyword goes to the scheme, e.g.
-            ``method`` ("exact"/"auto" by default; "mc" simulates the measurements,
-            n <= 14 for the shadows), ``n_shots``/``n_snapshots``/``n_settings`` and
-            ``seed``. For QWC the grouping of the targets is computed once (unless a
-            ``grouping`` is passed) and used for every state. With several states a
-            ``seed`` that is not a Generator becomes one Generator shared by the
-            states, so their Monte Carlo draws are independent.
+            :func:`aux_residual`; ``states`` must hold one state for "exact" and
+            "df-trotter", and L + 1 for "df-fragments" when ``df`` is given).
+            ``scheme_method`` is the scheme's ``method`` ("exact"/"auto" by default;
+            "mc" simulates the measurements, n <= 14 for the shadows, n <= 20 for
+            QWC). Every other keyword goes to the scheme unchanged, e.g.
+            ``n_shots``/``n_snapshots``/``n_settings`` and ``seed``. For QWC the
+            grouping of the targets is computed once (unless a ``grouping`` is
+            passed) and used for every state. With several states a ``seed`` that
+            is not a Generator becomes one Generator shared by the states, so their
+            Monte Carlo draws are independent.
 
     ``info`` additions: ``route`` ("aux"), ``route_method``, ``delta``, ``kind``,
     ``scheme``, ``order`` (of the mapping), ``n_states`` and ``n_leaves`` (L of the
-    factorization; None for "exact").
+    factorization; None for "exact", and for "df-trotter" with reused ``states``
+    and no ``df``).
     """
     space = FCISpace(active.norb, active.nelec)
     ci = _real_ci(ci, space)
@@ -515,6 +538,7 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
     mapping = _check_mapping(opts.pop("mapping", None), norb)
     df = opts.pop("df", None)
     states = opts.pop("states", None)
+    opts = _scheme_options(opts)
     n_leaves = None
     if method != "exact":
         if states is None and df is None:
@@ -529,6 +553,9 @@ def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **o
         states = aux_states(active, ci, delta, method, df=df)
     else:
         states = _check_states(states, space)
+        want = 1 if method != "df-fragments" else (None if df is None else n_leaves + 1)
+        if want is not None and len(states) != want:
+            raise ValueError(f"method {method!r} needs {want} auxiliary state(s), got {len(states)}")
     ops = [(-q) / delta for q in aux_targets(el, mapping, kind)]
     if scheme == "qwc" and opts.get("grouping") is None:
         opts["grouping"] = schemes.qwc_grouping(ops)
@@ -566,11 +593,13 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
             ``targets.element_set(N, kind)``).
         scheme: one of ``schemes.SCHEMES``.
         **opts: the route options ``mapping`` (QubitMapping, default blocked),
-            ``hamiltonian`` (a prebuilt qubit Hamiltonian of ``mapping``, passed to
-            ``direct_targets``) and ``targets`` (the X_e of ``direct_targets(elements,
-            active, mapping, kind)``, to reuse them for several states; only their
-            number and qubit count are checked). Every other keyword goes to the
-            scheme (``method``, ``n_settings``, ``rel_stderr``, ``seed``, ``max_pairs``, ...).
+            ``hamiltonian`` (a prebuilt qubit Hamiltonian, passed to ``direct_targets``;
+            it needs the ``mapping`` it was built with) and ``targets`` (the X_e of
+            ``direct_targets(elements, active, mapping, kind)``, to reuse them for
+            several states; only their number and qubit count are checked).
+            ``scheme_method`` (or ``method``) is the scheme's method; every other
+            keyword goes to the scheme unchanged (``n_settings``, ``rel_stderr``,
+            ``seed``, ``max_pairs``, ...).
 
     ``info`` additions: ``route`` ("direct"), ``kind``, ``scheme`` and ``order``.
     """
@@ -582,9 +611,13 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
     el = element_set(norb, kind) if elements is None else _as_elements(elements, kind, norb)
     if el.shape[0] == 0:
         raise ValueError("need at least one element")
+    if opts.get("hamiltonian") is not None and opts.get("mapping") is None:
+        raise ValueError("pass the mapping the hamiltonian was built with (a PauliSum does not "
+                         "record its qubit order)")
     mapping = _check_mapping(opts.pop("mapping", None), norb)
     hamiltonian = opts.pop("hamiltonian", None)
     ops = opts.pop("targets", None)
+    opts = _scheme_options(opts)
     if ops is None:
         ops = direct_targets(el, active, mapping, kind, hamiltonian=hamiltonian)
     else:
