@@ -11,31 +11,69 @@ Noise models (all frozen at the FCI ground state, the linearization point of the
 * Residual: the direct route A_e = <X_e> with matchgate shadows on the 840 (N = 6) or 150 (H4)
   independent spin-orbital elements (``sampling.ResidualNoise``, route "direct"), in two Gaussian forms:
   - "corr": correlated Gaussian with the per-shot element covariance C of real snapshots,
-    ``SnapshotResidual.element_covariance(c_fci, n, mean=0)`` (n = 2e5 snapshots for H4, 2e4 for N = 6,
-    ``--cov-snapshots``); this is the model of E2, E3 and E5;
+    ``SnapshotResidual.element_covariance(c_fci, n, mean=0)`` (n = 2e5 snapshots for H4, 2e4 for N = 6);
+    this is the model of E2, E3, E5 and E6;
   - "indep": independent elements with the exact (H4) or Rao-Blackwellized (N = 6, 2e4 matchings, seeded)
     per-element variances of ``sampling.element_variances``.
   The sampling build observed that real snapshots give 1.32-1.41 times the independent-element floor on
   H4 and that the correlated Gaussian reproduces the snapshot floors; E4 repeats that test.
   The aux route (E1 only) uses independent elements with ``element_variances(route="aux")``.
+  The variances are invariant under rotations of degenerate orbitals (matchgate shadows), the N2 orbitals
+  are the axis-aligned D2h orbitals of ``systems.n2`` (reproducible), and the cache keys hold the system.
 * Energy (E3): DF basis rotations with shifted leaves (``EnergyNoise`` scheme "df", ``shift=True``);
   untruncated pivoted-Cholesky leaves, except N2, which uses the leaves of the supermatrix
-  eigendecomposition (``first="eigh"``) because RHF returns its degenerate pi orbitals in an arbitrary
-  orientation and the Cholesky pivots, hence the Cholesky DF variance, depend on it (workflow B; the
-  eigh-leaf variance, the matchgate variances and all physical quantities do not). The per-shot variance
-  V(Psi) is evaluated once per CQE iteration at the current state and reused for that iteration's
-  candidates (``IterationEnergyNoise``; the library's ``variance="exact"`` evaluates it at every
-  candidate state, which costs 12-23 variance evaluations per iteration). E3 checks this approximation
-  against ``variance="exact"`` on paired runs (identical random streams).
-* Shots: S_res per residual estimate (one per iteration, all elements), S_E per energy estimate (the
-  current state once per iteration, plus every nonzero candidate; a zero candidate reuses the current
-  estimate and is free). One ``ShotLedger`` per run; "shots to reach and stay below 1.6 mHa" is
-  ``ledger.cumulative()`` at the first iteration after which every exact error stays below 1.6 mHa
-  until the end of the run.
+  eigendecomposition (``first="eigh"``; invariant under rotations of the degenerate pi orbitals, workflow
+  B). The per-shot variance V(Psi) is evaluated once per CQE iteration at the current state and reused for
+  that iteration's candidates (``IterationEnergyNoise``; the library's ``variance="exact"`` evaluates it at
+  every candidate). E3 checks this on one run per optimizer and candidate set at (S_res, S_E) = (1e6, 1e5):
+  the run uses the variance at every estimate and records, with the same normals, what the per-iteration
+  variance would have given; if no choice differs, the per-iteration run is the same run.
+* Symmetry projection (E6): ``grading_mask`` finds the Z2 symmetries (gradings) of the integrals, the
+  abelian point-group operations under which every orbital is even or odd (g/u for the H chains, C2v for
+  LiH, D2h for N2), and the pair-order entries (p,q,r,s) on which the residual of a symmetric state can be
+  nonzero. ``ProjectedResidual`` multiplies A_est by that mask: unbiased (the exact A of HF and of every
+  iterate of a projected run lies in the allowed entries; checked at HF), no extra shots, and the noise that
+  drives other irreps is removed.
+* Shots: S_res per residual estimate (one per iteration, all elements), S_E per energy estimate. Charged
+  energy estimates per iteration: the nonzero candidates, plus the current state if zero is a candidate
+  (its estimate is the zero candidate's). run_cqe also requests a current-state estimate when the set has no
+  zero; with e_tol = 0 it is never used, so it is drawn (common random numbers) but charged 0 shots. Per
+  iteration: pos11 11, pos11+0 12, pos5+0 6, eq11 11, dbl23 23 estimates. One ``ShotLedger`` per run.
+* L-BFGS: every noisy run passes ``curvature_tol=1e-2`` (``LBFGS_TOL``): a pair (s, y) is stored only if
+  <s, y> > 1e-2 ||s|| ||y||. With the library default 1e-12, noise-dominated, nearly orthogonal pairs drive
+  the initial scaling gamma to 1e-5..1e-8 and the direction to hundreds of times |g|, and single steps
+  raise E by up to Ha (E3 ablation, which reruns L-BFGS with 1e-12 on the same streams). Exact runs are
+  unchanged by the option on these systems (observed: iteration counts and errors after 40 and 60 steps
+  of the exact line search and of pos11).
 * Seeds: every run draws from ``SeedSequence([--seed, crc32(key)])``; the key holds the experiment, the
   system and the seed index but not the shots, the optimizer or the candidate set (common random
-  numbers: paired comparisons). Statistics over seeds: median and the 16-84% band (linear
-  interpolation of the order statistics; failures count as +inf).
+  numbers: paired comparisons). Validation runs use the seed indices after the screening seeds (fresh).
+
+Convergence criterion and statistics
+------------------------------------
+* "Reach and stay" of a single run (the first iteration after which every error stays below 1.6 mHa to
+  the end) grows with the horizon H under noise: a stationary state with any probability of exceeding
+  1.6 mHa eventually exceeds it. It is still reported ("stay", with H), but cells are compared by j*: for
+  the runs of a cell (seeds pooled), p_t is the fraction of seeds with E - E_FCI >= 1.6 mHa at iteration t,
+  and j* is the smallest j <= H - w + 1 with p_j <= 5% such that every window [t, t + w - 1] with
+  j <= t <= H - w + 1 (w = ``--conv-window``, 20) has a mean p of at most 5% ("strict": 1% for both). So
+  the 1.6 mHa target is held with at least 95% probability from j* on, over at least w iterations of
+  evidence; the condition on p_j keeps j* from preceding the convergence front (a 20-iteration window at
+  5% alone tolerates one iteration in which every seed is above). A cell converging later than H - w + 1
+  is not converged at that horizon. Shots to converge: j* times the (constant) shots per
+  iteration. P_late: the exceedance fraction over the second half of the runs (seeds pooled).
+  Intervals of P_late and of the shots: percentile bootstrap over seeds (2000 resamples).
+* Medians and the 16-84% band over seeds (linear interpolation; failures count as +inf) describe single
+  cells. Comparisons of candidate sets use one statistic: the geometric mean over paired runs (same system,
+  optimizer, grid point, seed) of the ratio of late-mean errors (the mean error over the second half of
+  each run), with a 95% percentile bootstrap over (system, seed) clusters, because a seed's runs share its
+  random streams across optimizers, grid points and sets; four systems and five seeds give 20 clusters.
+* The cheapest configuration: on the screening grid (5 seeds, H = 40) the argmin of the shots to converge
+  over all cells is bootstrapped over the shared seed indices (selection frequency of each cell, interval of
+  the minimum). The cheapest converged cell, the cheapest per optimizer and the cells the bootstrap selects
+  most often (up to ``--e3-validate-cells``, 5) are rerun with 10 fresh seeds and H = 120; the summary
+  reports the validated cell with the fewest shots (a minimum over at most five validated cells, a small
+  residual selection effect).
 
 Experiments
 -----------
@@ -52,54 +90,61 @@ E1  Floor versus residual shots: fixed-step SD from FCI (eps = 0.03 for H4, 0.02
     Aux route: "exact" exp(-i delta H) at the delta that minimizes the bias-aware shots in workflow B's
     tables (0.6), S = 1e6. Its residual is sum_k d_k w_k sinc(delta w_k) M_k (sampling.py), so the
     SD map becomes y <- (I - (eps/2) K D) y + noise, D = diag(sinc(delta w)); the prediction solves that
-    Lyapunov equation (stationary and the same window), and the plain noise_floor (D = 1) is shown for
-    comparison. If the map is unstable (sinc < 0 for strongly coupled high excitations), delta = 0.3 is
-    run as well. "df-trotter" and "df-fragments" at delta = 0.1, S = inf: the energy after
-    ``--e1-bias-steps`` steps against ``LinearizedCQE.bias_offset`` (stationary) and its transient
-    sum_m (y*_m (1 - p_m^n))^2.
+    Lyapunov equation (stationary and the same window). The undamped prediction is given both stationary
+    and for the window, so the damping (damped / plain window) and the unrelaxed soft modes (plain
+    stationary / plain window) are separated. If the map is unstable (sinc < 0 for strongly coupled high
+    excitations), delta = 0.3 is run as well. "df-trotter" and "df-fragments" at delta = 0.1, S = inf: the
+    energy after ``--e1-bias-steps`` steps against ``LinearizedCQE.bias_offset`` (stationary) and its
+    transient sum_m (y*_m (1 - p_m^n))^2.
 E2  Optimizers with noisy residuals and exact energies (the oracle Krylov line search along the noisy
     direction): SD, CG (PR+), L-BFGS (memory 10) from HF, 60 iterations, S_res in {1e5, 1e6, 1e7, 1e8}
-    and the exact run (S = inf). Final and best error, first iteration below 1.6 mHa, reach-and-stay
-    iteration, CG restarts, L-BFGS resets and skipped pairs, uphill steps (exact slope >= 0, for which
-    the oracle search returns a void step) and void steps (eps < 1e-6).
+    and the exact run (S = inf). Final, late-mean and best error, first iteration below 1.6 mHa, stay, j*
+    at H = 60 and at H = 40 (the E3 horizon), CG restarts, L-BFGS resets and skipped pairs, uphill steps
+    (exact slope >= 0, for which the oracle search returns a void step) and void steps (eps < 1e-6);
+    paired-seed rankings of the optimizers per cell. The final energy split by the HF symmetry block.
 E3  Hardware-like runs: noisy residual (corr) plus noisy DF energies, fixed step candidates multiplying
-    the direction, 40 iterations from HF, SD, CG, L-BFGS, at six (S_res, S_E) points: the cross through
-    (1e6, 1e6) with S_res in {1e5, 1e7} and S_E in {1e5, 1e7}, and the corner (1e5, 1e7), where the
-    residual noise dominates and the energies resolve uphill directions best. Candidate sets ("pos"
-    means eps > 0):
-      pos11    0.00625 * 2^k, k = 0..10 (11 energy estimates per iteration; workflow A's default);
-      pos11+0  pos11 and 0 (11 estimates: the zero candidate is free);
-      eq11     0, +-{0.0125, 0.05, 0.2, 0.8, 3.2} (10 estimates: the same cost as pos11, a factor-4 grid);
-      dbl23    0, +-pos11 (22 estimates: twice the cost).
+    the direction, from HF, SD, CG, L-BFGS. Screening grid (5 seeds, 40 iterations): the cross through
+    (1e6, 1e6) with S_res in {1e5, 1e7} and S_E in {1e5, 1e7}, and the corner (1e5, 1e7), where the residual
+    noise dominates and the energies resolve uphill directions best. Search point (1e6, 3e5) for pos11,
+    pos11+0 and pos5+0. Candidate sets ("pos" means eps > 0):
+      pos11    0.00625 * 2^k, k = 0..10 (workflow A's default);
+      pos11+0  pos11 and 0;
+      pos5+0   0 and {0.0125, 0.05, 0.2, 0.8, 3.2}: the positive magnitudes of eq11 (control for negatives);
+      eq11     0, +-{0.0125, 0.05, 0.2, 0.8, 3.2}: negatives and a factor-4 grid at the cost of pos11;
+      dbl23    0, +-pos11 (twice the cost).
     For every iteration the exact energies and the estimates of all candidates are recorded (a wrapper
     of the energy estimator), which gives how often zero and negative candidates are chosen, how often
     the noisy direction is uphill for the exact energy, how often the exact-best candidate is negative,
     and the gain of each zero or negative choice: E_exact(chosen) - E_exact(the positive candidate the
     same estimates would have chosen), i.e. what that step gained over a positive-only set in the same
-    state (negative = it helped).
+    state (negative = it helped), split by uphill and downhill directions.
+    Ablation: L-BFGS with curvature_tol 1e-12 for pos11 and pos11+0 at (1e5, 1e6), (1e6, 1e5), (1e6, 1e6).
+    Selection and validation of the cheapest cells as described above.
 E4  H4: real matchgate snapshots (``SnapshotResidual``) against the correlated and independent Gaussian
     models at the same shots: the fixed-step SD floor from FCI (eps = 0.03, 2000 snapshots per
     iteration) and convergence from HF with the oracle line search (SD and L-BFGS, 5000 snapshots).
 E5  N2: the energy of the noisy runs split by mode class of the linearized CQE at FCI: the HF symmetry
-    sector (the block of K that contains the HF determinant; K is block diagonal by symmetry) and the
-    other coupled states, each split into null (lambda <= 1e-10 lambda_max), soft (< 1e-3 lambda_max)
-    and stiff modes, plus "outside" (E - E_FCI minus the sum of y_m^2: the energy outside the coupled
-    singlets, zero up to round-off, because E - E_0 = sum_k w_k d_k^2 exactly). Runs: E2's N2
-    runs and long (150-iteration) SD and L-BFGS runs with the oracle line search at S_res = 1e6, 1e7.
-Summary: per system, the cheapest E3 configuration (optimizer, candidate set, S_res, S_E) whose median
-    shots to reach and stay below 1.6 mHa is lowest among the configurations in which every seed got
-    there, with the exact-CQE iteration counts of the same optimizers (exact line search, and the pos11
-    candidates without noise).
+    block of K (``LinearizedCQE.block_of``; K is block diagonal by symmetry) and the other coupled
+    states, each split into null (lambda <= 1e-10 lambda_max), soft (< 1e-3 lambda_max) and stiff modes,
+    plus "outside" (E - E_FCI minus the sum of y_m^2: the energy outside the coupled singlets, zero up to
+    round-off, because E - E_0 = sum_k w_k d_k^2 exactly). Runs: E2's N2 runs and long (150-iteration) SD
+    and L-BFGS runs with the oracle line search at S_res = 1e6, 1e7.
+E6  (supplementary) The symmetry projection: the linear-theory floor with and without it (and the floor of
+    the HF block alone, what a projection onto the full point group of the HF state would leave), the
+    fixed-step floor at S = 1e6 (E1's streams), the oracle runs of E2 at S_res = 1e6 (E2's streams) and the
+    cheapest validated E3 cell (its fresh seeds), each with the projected estimate.
+Summary: per system, the cheapest validated E3 configuration (optimizer, candidate set, S_res, S_E) with
+    its shots to converge, P_late and the exact-CQE iteration counts of the same optimizers.
 
-Reductions (full run within about 90 minutes on one thread): 5 seeds; E1 burn-in 150 + window 400
-steps (aux "exact" 150 + 250, bias runs 200 steps); E1 independent model only at 1e4 and 1e6; E3 on six
-grid points and 40 iterations (with noisy directions every iteration builds a Krylov space for the
-largest candidate, 6.4: observed 40 / 52-56 / 23 ms per SD / CG / L-BFGS iteration for H6 at 1.0 A, so
-the 3 x 3 grid with 60 iterations would take about 85 minutes alone); E4 burn-in 100 + window 200 steps;
-the residual variances and covariances are frozen at FCI (along the exact SD trajectory the matchgate
-totals change by <= 0.4%, sampling.py). ``--quick`` runs h4 and n2 with 2 seeds, short runs and small
-grids (< 3 min) and only checks the plumbing. ``--e1-shots``, ``--e2-shots``, ``--e3-grid``,
-``--e3-iter`` and similar options override the preset.
+Reductions (full run within 90 minutes on one thread): 5 seeds (10 fresh seeds for at most 5 validated
+cells per system); E1 burn-in 150 + window 400 steps (aux "exact" 150 + 250, bias runs 200 steps); E1
+independent model only at 1e4 and 1e6; E3 screening on 7 grid points and 40 iterations (observed 18-35
+ms per iteration for H6 at 1.0 A, most at S_res = 1e5, set by the Krylov space of the largest candidate
+along a noisy direction), validation at H = 120; the variance check 15 iterations per run; E4 burn-in
+100 + window 200 steps; the residual variances and covariances are frozen at FCI (along the
+exact SD trajectory the matchgate totals change by <= 0.4%, sampling.py). ``--quick`` runs h4 and n2 with
+2 seeds, short runs, small grids and a 5-iteration window (< 3 min) and only checks the plumbing.
+``--e1-shots``, ``--e2-shots``, ``--e3-grid``, ``--e3-iter`` and similar options override the preset.
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS /
 MKL_NUM_THREADS, numpy's BLAS threads; numpy is imported only after the arguments are parsed (as in
@@ -111,8 +156,7 @@ the JSON files of ``--systems`` (its runtime total is the sum of the per-system 
 stream is keyed by the experiment, the system and the seed index, so a system run on its own
 (``--systems lih``) gives exactly the runs of the same system inside a full run, and the systems can be
 run in separate invocations into one ``--out`` and summarized together. ``--e3-sets`` restricts E3 to
-some candidate sets (e.g. a finer (S_res, S_E) grid for pos11 and pos11+0 with ``--e3-grid``); a cell of
-such a run equals the same cell of the full grid.
+some candidate sets; a cell of such a run equals the same cell of the full grid.
 
 Usage:
     python benchmarks/run_sampled_cqe.py --threads 1 --out results/
@@ -135,7 +179,7 @@ import time
 import zlib
 
 THREAD_VARS = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
-EXPERIMENTS = ("e1", "e2", "e3", "e4", "e5")
+EXPERIMENTS = ("e1", "e2", "e3", "e4", "e5", "e6")
 DEFAULT_SYSTEMS = "h4,h6a,lih,n2"
 TARGET = 1.6e-3                 # Ha, chemical accuracy
 FINE = 1e-4                     # Ha, the second floor target of E1
@@ -144,13 +188,21 @@ MAG5 = (0.0125, 0.05, 0.2, 0.8, 3.2)
 CANDIDATE_SETS = {
     "pos11": POS11,
     "pos11+0": (0.0,) + POS11,
+    "pos5+0": (0.0,) + MAG5,
     "eq11": (0.0,) + MAG5 + tuple(-x for x in MAG5),
     "dbl23": (0.0,) + POS11 + tuple(-x for x in POS11),
 }
 OPTIMIZERS = ("sd", "cg", "lbfgs")
+LBFGS_TOL = 1e-2                # L-BFGS curvature_tol of every noisy run (the library default 1e-12 is the ablation)
+LBFGS_TOL_ABLATION = 1e-12
 NULL_RTOL = 1e-10               # null modes: lambda <= NULL_RTOL * lambda_max (LinearizedCQE.null_modes)
 SOFT_RTOL = 1e-3                # soft modes: lambda < SOFT_RTOL * lambda_max (docs/m2-results.md)
 FAST_P = 0.98                   # fast modes: |1 - eps lambda / 2| < FAST_P
+CONV_WINDOW = 20                # convergence criterion: windows of 20 iterations, pooled over seeds ...
+CONV_LEVEL = 0.05               # ... with at most 5% of the (seed, iteration) errors >= 1.6 mHa
+STRICT_LEVEL = 0.01             # strict variant (1%)
+RISE_BIG = 1e-2                 # Ha: a single step that raises E by more than 10 mHa
+N_BOOT = 2000                   # bootstrap resamples
 
 SYSTEMS = {
     "h4": {"builder": ("hydrogen_chain", (4, 1.8, "bohr")), "eps": 0.03, "df_first": "cholesky"},
@@ -169,10 +221,16 @@ FULL = {
     "e1_bias_delta": 0.1, "e1_bias_steps": 200,
     "e2_shots": (1e5, 1e6, 1e7, 1e8), "e2_iter": 60,
     "e3_grid": ((1e5, 1e6), (1e5, 1e7), (1e6, 1e5), (1e6, 1e6), (1e6, 1e7), (1e7, 1e6)), "e3_iter": 40,
-    "e3_check_seeds": 3,
+    "e3_dbl_grid": ((1e5, 1e6), (1e5, 1e7), (1e6, 1e5), (1e6, 1e6), (1e6, 1e7), (1e7, 1e6)),
+    "e3_search_grid": ((1e6, 3e5),), "e3_search_sets": ("pos11", "pos11+0", "pos5+0"),
+    "e3_ablation_grid": ((1e5, 1e6), (1e6, 1e5), (1e6, 1e6)), "e3_ablation_sets": ("pos11", "pos11+0"),
+    "e3_validate_cells": 5, "e3_validate_seeds": 10, "e3_validate_iter": 120,
+    "e3_check_iter": 15,
     "e4_floor_shots": 2000, "e4_eps": 0.03, "e4_burn": 100, "e4_window": 200,
     "e4_conv_shots": 5000, "e4_conv_iter": 15,
     "e5_shots": (1e6, 1e7), "e5_iter": 150,
+    "e6_floor_shots": 1e6, "e6_shots": (1e6,), "e6_iter": 60,
+    "conv_window": CONV_WINDOW,
 }
 QUICK = {
     "seeds": 2,
@@ -182,10 +240,16 @@ QUICK = {
     "e1_aux_delta": 0.6, "e1_aux_fallback": 0.3, "e1_aux_shots": 1e6, "e1_aux_burn": 30, "e1_aux_window": 40,
     "e1_bias_delta": 0.1, "e1_bias_steps": 40,
     "e2_shots": (1e6,), "e2_iter": 15,
-    "e3_grid": ((1e6, 1e6),), "e3_iter": 15, "e3_check_seeds": 1,
+    "e3_grid": ((1e6, 1e6),), "e3_iter": 15, "e3_dbl_grid": ((1e6, 1e6),),
+    "e3_search_grid": ((1e6, 3e5),), "e3_search_sets": ("pos5+0",),
+    "e3_ablation_grid": ((1e6, 1e6),), "e3_ablation_sets": ("pos11", "pos11+0"),
+    "e3_validate_cells": 2, "e3_validate_seeds": 2, "e3_validate_iter": 20,
+    "e3_check_iter": 6,
     "e4_floor_shots": 500, "e4_eps": 0.03, "e4_burn": 20, "e4_window": 40,
     "e4_conv_shots": 1000, "e4_conv_iter": 6,
     "e5_shots": (1e6,), "e5_iter": 30,
+    "e6_floor_shots": 1e6, "e6_shots": (1e6,), "e6_iter": 15,
+    "conv_window": 5,
 }
 QUICK_SYSTEMS = "h4,n2"
 
@@ -293,6 +357,94 @@ def shots_at(cum, j):
     return 0.0 if j == 0 else float(cum[j - 1])
 
 
+def opt_options(opt: str, curvature_tol: float | None = None) -> dict | None:
+    """optimizer_options of run_cqe: L-BFGS gets an explicit curvature_tol (LBFGS_TOL unless given)."""
+    if opt == "lbfgs":
+        return {"curvature_tol": LBFGS_TOL if curvature_tol is None else float(curvature_tol)}
+    return None
+
+
+def window_conv(x, w: int, level: float):
+    """Convergence iterations of exceedance matrices (module docstring, "Convergence criterion").
+
+    x: boolean array (..., n_seeds, T), True where E - E_FCI >= 1.6 mHa at iteration t (t = 0..T-1).
+    p_t is the fraction of seeds above the target at t; the window rate of t is the mean of p over
+    [t, t + w - 1]. Returns j* (int array over the leading axes, -1 if none): the smallest j <= T - w
+    such that p_j <= level and every window starting at t >= j (up to the last full window, t = T - w)
+    has a rate <= level. The condition on p_j keeps j* from preceding the convergence front: a window
+    of w = 1 / level iterations alone would tolerate one iteration in which every seed is above.
+    """
+    x = np.asarray(x, dtype=float)
+    p = x.mean(axis=-2)
+    T = p.shape[-1]
+    if T < w:
+        return np.full(p.shape[:-1], -1, dtype=int)
+    cs = np.concatenate([np.zeros(p.shape[:-1] + (1,)), np.cumsum(p, axis=-1)], axis=-1)
+    rate = (cs[..., w:] - cs[..., :-w]) / w                       # (..., T - w + 1)
+    ok = rate <= level + 1e-12
+    allok = np.flip(np.cumprod(np.flip(ok, -1), -1), -1).astype(bool)   # ok from t to the end
+    cand = allok & (p[..., :T - w + 1] <= level + 1e-12)
+    j = np.argmax(cand, axis=-1)
+    return np.where(cand.any(axis=-1), j, -1)
+
+
+def err_matrix(runs, n_iter: int | None = None):
+    """(n_runs, T) errors of runs of equal length (optionally the first n_iter + 1 entries)."""
+    e = np.array([r["errors"] for r in runs], dtype=float)
+    return e if n_iter is None else e[:, :n_iter + 1]
+
+
+def seed_boot(rng, n: int, n_boot: int = N_BOOT):
+    """(n_boot, n) indices: resampled seeds (with replacement)."""
+    return rng.integers(0, n, size=(n_boot, n))
+
+
+def conv_stats(runs, cost_it: float, w: int, rng) -> dict:
+    """Cell-level convergence statistics of runs that share their per-iteration cost (E2, E3)."""
+    e = err_matrix(runs)
+    x = e >= TARGET
+    n, T = x.shape
+    H = T - 1
+    out = {"horizon": H, "window": w, "n_seeds": n, "cost_per_iteration": cost_it}
+    for label, level in (("", CONV_LEVEL), ("strict_", STRICT_LEVEL)):
+        j = int(window_conv(x, w, level))
+        out[f"{label}j"] = None if j < 0 else j
+        out[f"{label}shots"] = None if j < 0 else j * cost_it
+    late = x[:, H // 2 + 1:]
+    out["p_late"] = float(late.mean()) if late.size else math.nan
+    out["late_from"] = H // 2 + 1
+    if n > 1 and late.size:
+        idx = seed_boot(rng, n)
+        pb = late[idx].mean(axis=(1, 2))
+        jb = window_conv(x[idx], w, CONV_LEVEL)
+        sb = np.where(jb >= 0, jb * cost_it, np.inf)
+        out["p_late_ci"] = [float(np.quantile(pb, 0.025)), float(np.quantile(pb, 0.975))]
+        out["shots_ci"] = [float(np.quantile(sb, q, method="inverted_cdf")) for q in (0.025, 0.975)]
+        out["boot_converged"] = float(np.mean(jb >= 0))
+    return out
+
+
+def cluster_gm(logs, clusters, rng, n_boot: int = N_BOOT) -> dict:
+    """Geometric mean of paired ratios exp(mean log) with a 95% cluster-bootstrap interval.
+
+    logs: paired log ratios; clusters: their cluster labels ((system, seed): the runs of one seed share
+    its random streams across optimizers, grid points and candidate sets). Resamples clusters with
+    replacement and recomputes the mean over all pairs of the resampled clusters.
+    """
+    logs = np.asarray(logs, dtype=float)
+    if logs.size == 0:
+        return {"gm": None, "lo": None, "hi": None, "n": 0, "n_clusters": 0, "lower": 0, "tie": 0, "higher": 0}
+    labels, inv = np.unique(np.asarray(clusters), return_inverse=True)
+    k = labels.size
+    sums = np.bincount(inv, weights=logs, minlength=k)
+    cnts = np.bincount(inv, minlength=k).astype(float)
+    idx = rng.integers(0, k, size=(n_boot, k))
+    bm = sums[idx].sum(1) / np.maximum(cnts[idx].sum(1), 1)
+    return {"gm": float(math.exp(logs.mean())), "lo": float(math.exp(np.quantile(bm, 0.025))),
+            "hi": float(math.exp(np.quantile(bm, 0.975))), "n": int(logs.size), "n_clusters": int(k),
+            "lower": int((logs < 0).sum()), "tie": int((logs == 0).sum()), "higher": int((logs > 0).sum())}
+
+
 def _cache_path(args, name: str) -> str | None:
     if args.no_cache:
         return None
@@ -337,23 +489,39 @@ def make_iteration_energy_noise():
 
     class IterationEnergyNoise(L.sampling.EnergyNoise):
         """DF energy noise whose per-shot variance V is evaluated at the current state of each iteration
-        and reused for that iteration's candidates. One standard normal per call, as EnergyNoise."""
+        and reused for that iteration's candidates. One standard normal per call, as EnergyNoise.
 
-        def __init__(self, active, **kw):
+        ``charge_current=False`` (candidate sets without zero, e_tol = 0): the "current" estimate that
+        run_cqe requests is never used, so it is charged 0 shots; its normal is still drawn, so a set
+        and the same set plus zero share every random draw. ``check=True`` evaluates V at every call
+        (EnergyNoise variance="exact", the returned estimate) and records, per call, the estimate the
+        per-iteration variance would have given with the same normal (``shadow``).
+        """
+
+        def __init__(self, active, charge_current: bool = True, check: bool = False, **kw):
             super().__init__(active, scheme="df", variance="exact", **kw)
+            self.charge_current = bool(charge_current)
+            self.check = bool(check)
             self.current_variance = None
             self.n_variance_evals = 0
+            self.shadow: list[tuple[str, float]] = []
 
         def __call__(self, e_exact, ci, context):
             if context not in ("current", "candidate"):
                 raise ValueError(f"unknown context {context!r}")
-            self.ledger.charge_energy(self.shots, context)
+            charge = self.shots if (context == "candidate" or self.charge_current) else 0.0
+            self.ledger.charge_energy(charge, context)
             if math.isinf(self.shots):
                 return float(e_exact)
             if context == "current" or self.current_variance is None:
                 self.current_variance = self.variance_of(ci)
                 self.n_variance_evals += 1
-            return float(e_exact) + math.sqrt(self.current_variance / self.shots) * float(self.rng.standard_normal())
+            z = float(self.rng.standard_normal())
+            if not self.check:
+                return float(e_exact) + math.sqrt(self.current_variance / self.shots) * z
+            v = self.current_variance if context == "current" else self.variance_of(ci)
+            self.shadow.append((context, float(e_exact) + math.sqrt(self.current_variance / self.shots) * z))
+            return float(e_exact) + math.sqrt(v / self.shots) * z
 
     return IterationEnergyNoise
 
@@ -584,7 +752,19 @@ def setup_system(name: str, args) -> Ctx:
         info[f"df_{f}_shift_hf"] = vh
     info["df_first"] = c.df_first
     info["n_leaves"] = int(len(c.df[c.df_first].eigenvalues))
-    # mode classes for E1 (global modes) and the HF symmetry sector (E5)
+    # sigma_E per estimate at FCI for the S_E values of E3 (the variance is evaluated per state in the runs)
+    vdf = info[f"df_{c.df_first}_shift_fci"]
+    info["sigma_E_fci_mHa"] = {_S(s): 1e3 * math.sqrt(vdf / s) for s in
+                               sorted({se for _, se in tuple(args.e3_grid) + tuple(args.e3_search_grid)})}
+    # the per-iteration energy noise in check mode returns exactly what EnergyNoise(variance="exact") returns
+    IEN = make_iteration_energy_noise()
+    st = L.FCISpace.of(act).hf()
+    a_ = IEN(act, check=True, shots=1e5, factorization=c.df[c.df_first], shift=True, rng=np.random.default_rng(11))
+    b_ = L.sampling.EnergyNoise(act, scheme="df", shots=1e5, variance="exact", factorization=c.df[c.df_first],
+                                shift=True, rng=np.random.default_rng(11))
+    info["energy_check_max_abs_diff"] = float(max(abs(a_(c.e_hf, x, ctx) - b_(c.e_hf, x, ctx)) for x, ctx in
+                                                  ((st, "current"), (c.ci_fci, "candidate"), (st, "candidate"))))
+    # mode classes for E1 (global modes) and the HF symmetry sector (E5, E6)
     p = 1.0 - 0.5 * c.eps * lam
     c.p = p
     c.fast = (np.abs(p) < FAST_P) & ~c.null
@@ -593,23 +773,73 @@ def setup_system(name: str, args) -> Ctx:
     c.basis_e1 = ModeBasis(lin, lin.e0, lin.modes, {"fast": c.fast, "slow": c.slow, "null": c.null})
     c.gm = lin.modes.T @ (np.sqrt(lin.gaps)[:, None] * lin.coupling)      # (modes, N^4) for LinearTwin
     c.basis_sector, sector_info = sector_basis(lin, c.hf)
+    c.hf_block = lin.block_of(c.hf)
     info["sector"] = sector_info
+    # abelian symmetry (gradings of the integrals) and the projection of residual estimates (E6)
+    c.sym_mask, sym_info = grading_mask(act)
+    A_hf = np.asarray(rd.A).real
+    sym_info["exact_A_outside_mask_rel_hf"] = float(np.linalg.norm(A_hf * ~c.sym_mask) / np.linalg.norm(A_hf))
+    Mn = np.linalg.norm(lin.coupling, axis=1)
+    Mp = np.linalg.norm(lin.coupling * c.sym_mask.ravel()[None, :], axis=1)
+    sym_info.update(n_coupled_symmetric=int((Mp > 0.999 * Mn).sum()), n_coupled_odd=int((Mp < 1e-8 * Mn).sum()),
+                    hf_block_symmetric=bool(np.all(Mp[c.hf_block] > 0.999 * Mn[c.hf_block])))
+    info["symmetry"] = sym_info
     info["seconds_setup"] = time.perf_counter() - t0
     c.info = info
     return c
 
 
-def sector_basis(lin, hf):
-    """Mode basis split by the HF symmetry sector: the K block (coupling-graph component) holding the HF weight."""
-    from scipy.sparse.csgraph import connected_components
+def grading_mask(act, tol: float = 1e-10):
+    """Mask of the pair-order entries (p,q,r,s) allowed by the Z2 symmetries (gradings) of the integrals.
 
-    S_ = lin.coupling @ lin.coupling.T
-    adj = np.abs(S_) > 1e-10 * np.abs(S_).max()
-    ncomp, lab = connected_components(adj, directed=False)
+    A grading x in GF(2)^N (orbital p has parity x_p) is a symmetry of H iff x_p + x_q = 0 for every
+    h_pq != 0 and x_p + x_q + x_r + x_s = 0 for every (pq|rs) != 0 (|.| > tol max|.|); these are the
+    abelian point-group operations under which the orbitals are even or odd (parity g/u for the H
+    chains, the C2v gradings for LiH, D2h for N2, whose degenerate pi orbitals are axis-aligned). For a
+    state that is even under every grading (HF, and every CQE iterate from HF whose generators obey
+    the rule), A[p,q,r,s] = 0 unless e_p + e_q + e_r + e_s lies in the GF(2) span of the integral
+    constraints, because e_{pq,rs} has parity x_p + x_q + x_r + x_s. The mask is constant on the orbit
+    {(p,q,r,s), (r,s,p,q), (q,p,s,r), (s,r,q,p)}, so mask * A_est keeps the structure of A exactly.
+    """
+    n = act.norb
+    h, eri = np.asarray(act.h1), np.asarray(act.eri)
+    big_h = np.abs(h) > tol * np.abs(h).max()
+    big_e = np.abs(eri) > tol * np.abs(eri).max()
+    vecs = {(1 << int(p)) ^ (1 << int(q)) for p, q in np.argwhere(big_h)}
+    vecs |= {(1 << int(p)) ^ (1 << int(q)) ^ (1 << int(r)) ^ (1 << int(s)) for p, q, r, s in np.argwhere(big_e)}
+    basis: dict[int, int] = {}
+
+    def reduce(v: int) -> int:
+        for bit in sorted(basis, reverse=True):
+            if v >> bit & 1:
+                v ^= basis[bit]
+        return v
+
+    for v in vecs:
+        v = reduce(v)
+        if v:
+            basis[v.bit_length() - 1] = v
+    idx = np.indices((n,) * 4).reshape(4, -1).T
+    mask = np.array([reduce((1 << int(p)) ^ (1 << int(q)) ^ (1 << int(r)) ^ (1 << int(s))) == 0
+                     for p, q, r, s in idx]).reshape((n,) * 4)
+    forb_h = [abs(h[p, q]) for p in range(n) for q in range(n) if reduce((1 << p) ^ (1 << q))]
+    allowed_e = np.abs(eri[mask])
+    allowed_e = allowed_e[allowed_e > tol * np.abs(eri).max()]
+    info = {"n_gradings": n - len(basis) - 1,      # nontrivial ones (the all-ones grading is particle parity)
+            "fraction_allowed": float(mask.mean()),
+            "max_forbidden_h_rel": float(max(forb_h, default=0.0) / np.abs(h).max()),
+            "max_forbidden_eri_rel": float(np.abs(eri[~mask]).max(initial=0.0) / np.abs(eri).max()),
+            "min_allowed_eri_rel": float(allowed_e.min() / np.abs(eri).max())}
+    return mask, info
+
+
+def sector_basis(lin, hf):
+    """Mode basis split by the HF symmetry block of K (``LinearizedCQE.block_of``; coupling-graph component)."""
+    lab = lin.blocks()
+    ins = lin.block_of(hf)
+    ncomp = int(lab.max()) + 1 if lab.size else 0
     w = (lin.states @ (hf.ravel() / np.linalg.norm(hf))) ** 2
     comp_w = np.array([w[lab == k].sum() for k in range(ncomp)])
-    in_comp = np.flatnonzero(comp_w > 1e-12 * comp_w.max())
-    ins = np.isin(lab, in_comp)
     K = lin.kmatrix()
     lmax = float(lin.stiffness.max())
     n = lin.n_states
@@ -737,10 +967,12 @@ def e1_aux_exact(c, args, delta: float) -> dict:
     P0 = np.eye(n) - 0.5 * eps * Kmat
     _, stat0, _ = lyapunov_window((U.T @ P0 @ U)[live], Qm, 0, 1)
     plain = lin.noise_floor(eps, F1)
+    plain_win = plain["per_mode"] * window_factor(c.p, start, length)
     eig = np.linalg.eigvals(Kmat * s[None, :])
     out = {"method": "exact", "delta": delta, "shots": args.e1_aux_shots, "burn": start, "window": length,
            "var_total": float(v.sum()), "sinc_min": float(s.min()), "rho": rho,
            "min_eig_KD": float(eig.real.min()), "plain_stationary_S1": float(plain["total"]),
+           "plain_window_S1": float(plain_win.sum()), "plain_window_fast_S1": float(plain_win[c.fast].sum()),
            "plain_check_rel": (float(stat0.sum() / plain["total"] - 1) if stat0 is not None else None),
            "damped_stationary_S1": None if stat is None else float(stat.sum()),
            "damped_window_S1": float(win.sum()) if rho < 1.0 + 1e-12 else None,
@@ -844,8 +1076,11 @@ def opt_counts(res) -> dict:
 def run_metrics(res, cum=None) -> dict:
     err = np.asarray(res.errors)
     j_reach, j_stay = reach_index(err, TARGET), stay_index(err, TARGET)
+    rise = np.diff(err)
     out = {"errors": [float(x) for x in err], "eps": [float(s.eps) for s in res.steps],
            "final": float(err[-1]), "best": float(err.min()), "reach": j_reach, "stay": j_stay,
+           "late_mean": float(err[err.size // 2 + 1:].mean()) if err.size > 2 else float(err[-1]),
+           "max_rise": float(rise.max()) if rise.size else 0.0, "n_big_rises": int((rise > RISE_BIG).sum()),
            "reach_fine": reach_index(err, FINE),
            "uphill": int(sum(1 for s in res.steps if not s.slope < 0.0)),
            "void": int(sum(1 for s in res.steps if abs(s.eps) < 1e-6)), "n_steps": len(res.steps),
@@ -858,8 +1093,8 @@ def run_metrics(res, cum=None) -> dict:
 
 
 def summarize_runs(runs: list[dict]) -> dict:
-    keys = ("final", "best", "reach", "stay", "shots_reach", "shots_stay", "uphill", "void", "cg_restarts",
-            "lbfgs_resets", "lbfgs_skips")
+    keys = ("final", "best", "late_mean", "reach", "stay", "shots_reach", "shots_stay", "uphill", "void",
+            "cg_restarts", "lbfgs_resets", "lbfgs_skips", "max_rise", "n_big_rises")
     return {k: band([r.get(k) for r in runs]) for k in keys if k in runs[0]}
 
 
@@ -879,8 +1114,9 @@ def run_e2(c, args, tracker_basis=None) -> dict:
                                          led)
                 tr = None if tracker_basis is None else Trajectory(tracker_basis, c.hf, c.e_hf)
                 res = L.run_cqe(c.act, max_iter=args.e2_iter, e_exact=c.e_fci, optimizer=opt, r_tol=0.0, e_tol=0.0,
-                                residual_estimator=est, callback=tr)
+                                optimizer_options=opt_options(opt), residual_estimator=est, callback=tr)
                 m = run_metrics(res)
+                m["sector_final"] = c.basis_sector.energies(res.ci, res.energies[-1])
                 if not math.isinf(S_):
                     m["shots_reach"] = None if m["reach"] is None else S_ * m["reach"]
                     m["shots_stay"] = None if m["stay"] is None else S_ * m["stay"]
@@ -890,6 +1126,12 @@ def run_e2(c, args, tracker_basis=None) -> dict:
                     out["trajectories"].setdefault(f"{opt}/{S_:g}", []).append(tr.rows)
             row = {"optimizer": opt, "shots": S_, "runs": runs, "stats": summarize_runs(runs),
                    "seconds": time.perf_counter() - t}
+            crng = np.random.default_rng(seed_seq(args.seed, "boot-e2", c.name, opt, S_))
+            cost = S_ if math.isfinite(S_) else 0.0
+            row["conv"] = conv_stats(runs, cost, args.conv_window, crng)
+            if args.e3_iter < args.e2_iter:     # the same criterion at the E3 horizon (equal horizons)
+                short = [dict(r, errors=r["errors"][:args.e3_iter + 1]) for r in runs]
+                row["conv_e3_horizon"] = conv_stats(short, cost, args.conv_window, crng)
             out["rows"].append(row)
             st = row["stats"]
             print(f"[{c.name}] E2 {opt:5s} S={S_:.0e}: final {st['final']['median']:.2e} best "
@@ -951,83 +1193,238 @@ def candidate_analysis(cands, rec: RecordingEnergy, res) -> dict:
     return out
 
 
-def e3_one(c, args, opt, set_name, S_res, S_E, i, energy_mode="iteration") -> dict:
+class ProjectedResidual:
+    """Residual estimator wrapper: A_est -> mask * A_est (the abelian-symmetry projection of E6; grading_mask)."""
+
+    def __init__(self, model, mask):
+        self.model = model
+        self.mask = np.asarray(mask, dtype=float)
+        self.ledger = getattr(model, "ledger", None)
+
+    def __call__(self, rd, ci, it):
+        return np.asarray(self.model(rd, ci, it)) * self.mask
+
+
+def e3_one(c, args, opt, set_name, S_res, S_E, i, energy_mode="iteration", n_iter=None, curvature_tol=None,
+           projected=False) -> dict:
+    """One E3 run (seed index i). energy_mode "iteration" (the benchmark's model) or "check" (variance at
+    every estimate, with the per-iteration-variance estimates recorded as a shadow; module docstring)."""
     S = L.sampling
     cands = CANDIDATE_SETS[set_name]
+    n_iter = args.e3_iter if n_iter is None else int(n_iter)
+    oo = opt_options(opt, curvature_tol)
     t = time.perf_counter()
     led = S.ShotLedger()
     if math.isinf(S_res) and math.isinf(S_E):
-        res = L.run_cqe(c.act, max_iter=args.e3_iter, e_exact=c.e_fci, optimizer=opt, eps_candidates=cands,
-                        r_tol=0.0, e_tol=0.0)
+        res = L.run_cqe(c.act, max_iter=n_iter, e_exact=c.e_fci, optimizer=opt, optimizer_options=oo,
+                        eps_candidates=cands, r_tol=0.0, e_tol=0.0)
         m = run_metrics(res)
         m["seconds"] = time.perf_counter() - t
         return m
     ss = seed_seq(args.seed, "e3", c.name, i).spawn(2)
     est = clone_residual(c.tmpl["corr"], S_res, np.random.default_rng(ss[0]), led)
+    if projected:
+        est = ProjectedResidual(est, c.sym_mask)
     fac = c.df[c.df_first]
-    if energy_mode == "iteration":
-        en = c.IterationEnergyNoise(c.act, shots=S_E, factorization=fac, shift=True,
-                                    rng=np.random.default_rng(ss[1]), ledger=led)
-    else:
-        en = S.EnergyNoise(c.act, scheme="df", shots=S_E, variance="exact", factorization=fac, shift=True,
-                           rng=np.random.default_rng(ss[1]), ledger=led)
+    en = c.IterationEnergyNoise(c.act, charge_current=0.0 in cands, check=(energy_mode == "check"), shots=S_E,
+                                factorization=fac, shift=True, rng=np.random.default_rng(ss[1]), ledger=led)
     rec = RecordingEnergy(en)
-    res = L.run_cqe(c.act, max_iter=args.e3_iter, e_exact=c.e_fci, optimizer=opt, eps_candidates=cands,
-                    r_tol=0.0, e_tol=0.0, residual_estimator=est, energy_estimator=rec)
+    res = L.run_cqe(c.act, max_iter=n_iter, e_exact=c.e_fci, optimizer=opt, optimizer_options=oo,
+                    eps_candidates=cands, r_tol=0.0, e_tol=0.0, residual_estimator=est, energy_estimator=rec)
     m = run_metrics(res, led.cumulative())
     m["candidates"] = candidate_analysis(cands, rec, res)
     m["ledger"] = led.summary()
+    tot = led.total_shots
+    if not np.all(tot == tot[0]):
+        raise RuntimeError("E3 shots per iteration are not constant")
+    m["cost_per_iteration"] = float(tot[0])
+    if energy_mode == "check":
+        m["shadow"] = shadow_check(cands, en.shadow, rec, res)
     m["seed"] = i
     m["seconds"] = time.perf_counter() - t
     return m
 
 
+def shadow_check(cands, shadow, rec, res) -> dict:
+    """Per iteration: the candidate the per-iteration variance would have chosen with the same normals."""
+    cands = np.asarray(cands, dtype=float)
+    nz = cands != 0.0
+    k = 0
+    differ = 0
+    max_rel = 0.0
+    for it, step in enumerate(res.steps):
+        n_c = int(nz.sum())
+        cur = shadow[k]
+        cand = shadow[k + 1:k + 1 + n_c]
+        k += 1 + n_c
+        if cur[0] != "current" or any(x[0] != "candidate" for x in cand):
+            raise RuntimeError("unexpected estimator call order")
+        es = np.empty(cands.size)
+        es[~nz] = cur[1]
+        es[nz] = [x[1] for x in cand]
+        if cands[int(np.argmin(es))] != step.eps:
+            differ += 1
+        r = rec.records[it]
+        got = np.array([e for _, e in r["cand"]])
+        ex = np.array([e for e, _ in r["cand"]])
+        dev = np.abs(got - ex)
+        if dev.size and dev.max() > 0:
+            max_rel = max(max_rel, float(np.max(np.abs(es[nz] - got) / np.maximum(dev, 1e-300))))
+    return {"iterations": len(res.steps), "choices_differ": differ, "max_rel_estimate_change": max_rel}
+
+
+def e3_cell(c, args, opt, set_name, S_res, S_E, seeds, n_iter=None, curvature_tol=None, tag="main",
+            projected=False) -> dict:
+    """A cell of E3: runs over seeds with convergence statistics and candidate usage."""
+    t = time.perf_counter()
+    n_iter = args.e3_iter if n_iter is None else int(n_iter)
+    runs = [e3_one(c, args, opt, set_name, S_res, S_E, i, n_iter=n_iter, curvature_tol=curvature_tol,
+                   projected=projected) for i in seeds]
+    costs = {r["cost_per_iteration"] for r in runs}
+    if len(costs) != 1:
+        raise RuntimeError("runs of one cell differ in their cost per iteration")
+    cell = {"optimizer": opt, "set": set_name, "S_res": S_res, "S_E": S_E, "tag": tag, "iterations": n_iter,
+            "projected": bool(projected),
+            "curvature_tol": (LBFGS_TOL if curvature_tol is None else float(curvature_tol)) if opt == "lbfgs"
+            else None, "seeds": list(seeds), "runs": runs, "stats": summarize_runs(runs)}
+    crng = np.random.default_rng(seed_seq(args.seed, "boot-e3", c.name, tag, opt, set_name, S_res, S_E))
+    cell["conv"] = conv_stats(runs, costs.pop(), args.conv_window, crng)
+    for label in ("all", "late"):
+        cell[f"usage_{label}"] = {
+            k: float(np.mean([r["candidates"][label][k] for r in runs]))
+            for k in ("zero", "neg", "uphill", "best_neg", "best_zero", "uphill_and_nonpos", "regret_mean")}
+        cell[f"usage_{label}"].update({
+            k: int(sum(r["candidates"][label][k] for r in runs)) for k in ("n_nonpos", "n_helped", "n_hurt")})
+        cell[f"usage_{label}"]["gain_sum"] = float(sum(r["candidates"][label]["gain_sum"] for r in runs))
+    cell["seconds"] = time.perf_counter() - t
+    return cell
+
+
+def _cell_line(x) -> str:
+    cv = x["conv"]
+    return (f"{x['optimizer']}/{x['set']} j* {_it(cv['j'])} S {_short(cv['shots'])} P_late {cv['p_late']:.3f} "
+            f"fin {x['stats']['final']['median']:.1e}")
+
+
+def screen_cells(e3: dict) -> list[dict]:
+    """The cells of the screening grid (main and search points; not the ablation)."""
+    return [x for x in e3["cells"] if x["tag"] in ("main", "search")]
+
+
+def screen_bootstrap(cells, w: int, rng, n_boot: int = N_BOOT) -> dict:
+    """Argmin of the shots to converge over the screening cells, bootstrapped over the shared seeds.
+
+    All cells of a system use the same seed indices (common random numbers), so one resample of the
+    seed indices is applied to every cell; the argmin (cheapest converged cell) is recomputed per
+    resample. Returns the selection frequency per cell index and the interval of the minimum.
+    """
+    if not cells:
+        return {"freq": [], "min_shots_ci": None, "none_converged": 1.0}
+    n = len(cells[0]["runs"])
+    idx = seed_boot(rng, n, n_boot)
+    S = np.full((len(cells), n_boot), np.inf)
+    for k, x in enumerate(cells):
+        xm = err_matrix(x["runs"]) >= TARGET
+        j = window_conv(xm[idx], w, CONV_LEVEL)
+        S[k] = np.where(j >= 0, j * x["conv"]["cost_per_iteration"], np.inf)
+    best = np.argmin(S, axis=0)
+    mins = S[best, np.arange(n_boot)]
+    ok = np.isfinite(mins)
+    freq = np.bincount(best[ok], minlength=len(cells)) / n_boot
+    return {"freq": [float(f) for f in freq], "none_converged": float(1.0 - ok.mean()),
+            "min_shots_ci": [float(np.quantile(mins, q, method="inverted_cdf")) for q in (0.025, 0.975)]}
+
+
+def select_for_validation(cells, boot: dict, n_max: int) -> list[int]:
+    """Indices of the screening cells to validate: the cheapest converged cell, the cheapest per optimizer,
+    then the cells the bootstrap selects most often, then the next cheapest (or the lowest late exceedance)."""
+    def key(k):
+        cv = cells[k]["conv"]
+        return (math.inf if cv["shots"] is None else cv["shots"], cv["p_late"])
+
+    order = sorted(range(len(cells)), key=key)
+    chosen: list[int] = [order[0]] if order and cells[order[0]]["conv"]["shots"] is not None else []
+    for opt in OPTIMIZERS:
+        ks = [k for k in order if cells[k]["optimizer"] == opt and cells[k]["conv"]["shots"] is not None]
+        if ks and ks[0] not in chosen:
+            chosen.append(ks[0])
+    freq = boot.get("freq") or []
+    for k in sorted(range(len(freq)), key=lambda k: -freq[k]):
+        if freq[k] > 0 and k not in chosen:
+            chosen.append(k)
+    for k in order:
+        if k not in chosen:
+            chosen.append(k)
+    return sorted(chosen[:n_max], key=key)
+
+
 def run_e3(c, args) -> dict:
     t0 = time.perf_counter()
     c.IterationEnergyNoise = make_iteration_energy_noise()
-    out = {"iterations": args.e3_iter, "exact": [], "cells": []}
+    out = {"iterations": args.e3_iter, "exact": [], "cells": [], "ablation": [], "validation": None}
+    sets_all = [s for s in CANDIDATE_SETS if s in args.e3_sets or s in args.e3_search_sets]
     for opt in OPTIMIZERS:
-        for set_name in args.e3_sets:
+        for set_name in sets_all:
             m = e3_one(c, args, opt, set_name, math.inf, math.inf, 0)
             m.update(optimizer=opt, set=set_name)
             out["exact"].append(m)
     print(f"[{c.name}] E3 exact references: " + ", ".join(
         f"{m['optimizer']}/{m['set']}:{m['reach']}" for m in out["exact"]), flush=True)
-    for S_res, S_E in args.e3_grid:
+    seeds = range(args.seeds)
+    grids = [("main", args.e3_grid, args.e3_sets),
+             ("search", args.e3_search_grid, [s for s in args.e3_search_sets if s in args.e3_sets])]
+    dbl_pts = {tuple(x) for x in args.e3_dbl_grid}
+    for tag, grid, sets in grids:
+        for S_res, S_E in grid:
+            t = time.perf_counter()
+            new = [e3_cell(c, args, opt, set_name, S_res, S_E, seeds, tag=tag)
+                   for opt in OPTIMIZERS for set_name in sets
+                   if set_name != "dbl23" or (S_res, S_E) in dbl_pts]
+            out["cells"] += new
+            print(f"[{c.name}] E3 {tag} S_res={S_res:.0e} S_E={S_E:.0e} [{time.perf_counter() - t:.1f} s]: "
+                  + "; ".join(_cell_line(x) for x in new), flush=True)
+    # L-BFGS with the library's default curvature_tol (ablation; same seeds, paired with the main cells)
+    for S_res, S_E in args.e3_ablation_grid:
         t = time.perf_counter()
-        for opt in OPTIMIZERS:
-            for set_name in args.e3_sets:
-                runs = [e3_one(c, args, opt, set_name, S_res, S_E, i) for i in range(args.seeds)]
-                cell = {"optimizer": opt, "set": set_name, "S_res": S_res, "S_E": S_E, "runs": runs,
-                        "stats": summarize_runs(runs)}
-                for label in ("all", "late"):
-                    cell[f"usage_{label}"] = {
-                        k: float(np.mean([r["candidates"][label][k] for r in runs]))
-                        for k in ("zero", "neg", "uphill", "best_neg", "best_zero", "uphill_and_nonpos",
-                                  "regret_mean")}
-                    cell[f"usage_{label}"].update({
-                        k: int(sum(r["candidates"][label][k] for r in runs))
-                        for k in ("n_nonpos", "n_helped", "n_hurt")})
-                    cell[f"usage_{label}"]["gain_sum"] = float(sum(r["candidates"][label]["gain_sum"]
-                                                                   for r in runs))
-                out["cells"].append(cell)
-        print(f"[{c.name}] E3 S_res={S_res:.0e} S_E={S_E:.0e} done [{time.perf_counter() - t:.1f} s]: " + "; ".join(
-            f"{x['optimizer']}/{x['set']} stay {_short(x['stats']['shots_stay']['median'])} "
-            f"({x['stats']['shots_stay']['n_ok']}) fin {x['stats']['final']['median']:.1e}"
-            for x in out["cells"] if x["S_res"] == S_res and x["S_E"] == S_E), flush=True)
-    # check of the per-iteration energy variance against EnergyNoise(variance="exact")
+        new = [e3_cell(c, args, "lbfgs", set_name, S_res, S_E, seeds, curvature_tol=LBFGS_TOL_ABLATION,
+                       tag="ablation") for set_name in args.e3_ablation_sets if set_name in args.e3_sets]
+        out["ablation"] += new
+        print(f"[{c.name}] E3 ablation (curvature_tol {LBFGS_TOL_ABLATION:g}) S_res={S_res:.0e} S_E={S_E:.0e} "
+              f"[{time.perf_counter() - t:.1f} s]: " + "; ".join(_cell_line(x) for x in new), flush=True)
+    # selection on the screening seeds, validation on fresh seeds and a longer horizon
+    cells = screen_cells(out)
+    boot = screen_bootstrap(cells, args.conv_window, np.random.default_rng(seed_seq(args.seed, "boot-sel", c.name)))
+    for k, x in enumerate(cells):
+        x["selection_freq"] = boot["freq"][k] if boot["freq"] else 0.0
+    out["selection"] = {"none_converged": boot["none_converged"], "min_shots_ci": boot["min_shots_ci"]}
+    chosen = select_for_validation(cells, boot, args.e3_validate_cells) if args.e3_validate_cells > 0 else []
+    fresh = range(args.seeds, args.seeds + args.e3_validate_seeds)
+    val = []
+    for k in chosen:
+        x = cells[k]
+        t = time.perf_counter()
+        v = e3_cell(c, args, x["optimizer"], x["set"], x["S_res"], x["S_E"], fresh, n_iter=args.e3_validate_iter,
+                    tag="validation")
+        v["screen"] = {"conv": x["conv"], "selection_freq": x["selection_freq"]}
+        val.append(v)
+        print(f"[{c.name}] E3 validation {_cell_line(v)} (screen: j* {_it(x['conv']['j'])}, S "
+              f"{_short(x['conv']['shots'])}, selected {x['selection_freq']:.2f}) [{time.perf_counter() - t:.1f} s]",
+              flush=True)
+    out["validation"] = val
+    # check of the per-iteration energy variance: every optimizer and set, variance at every estimate
     t = time.perf_counter()
     chk = []
     S_res, S_E = args.e3_check_shots
-    for i in range(args.e3_check_seeds):
-        a = e3_one(c, args, "lbfgs", "pos11", S_res, S_E, i, "iteration")
-        b = e3_one(c, args, "lbfgs", "pos11", S_res, S_E, i, "exact")
-        chk.append({"seed": i, "final_iteration": a["final"], "final_exact": b["final"],
-                    "stay_iteration": a["stay"], "stay_exact": b["stay"],
-                    "max_abs_error_diff": float(np.max(np.abs(np.subtract(a["errors"], b["errors"])))),
-                    "seconds_iteration": a["seconds"], "seconds_exact": b["seconds"]})
-    out["variance_check"] = {"optimizer": "lbfgs", "set": "pos11", "S_res": S_res, "S_E": S_E, "runs": chk,
+    for opt in OPTIMIZERS:
+        for set_name in args.e3_sets:
+            m = e3_one(c, args, opt, set_name, S_res, S_E, 0, energy_mode="check", n_iter=args.e3_check_iter)
+            chk.append({"optimizer": opt, "set": set_name, **m["shadow"], "final": m["final"],
+                        "seconds": m["seconds"]})
+    out["variance_check"] = {"S_res": S_res, "S_E": S_E, "iterations": args.e3_check_iter, "runs": chk,
                              "seconds": time.perf_counter() - t}
+    print(f"[{c.name}] E3 variance check: choices differing in "
+          f"{sum(x['choices_differ'] for x in chk)} of {sum(x['iterations'] for x in chk)} iterations "
+          f"[{time.perf_counter() - t:.1f} s]", flush=True)
     out["seconds"] = time.perf_counter() - t0
     return out
 
@@ -1095,7 +1492,7 @@ def run_e4(c, args) -> dict:
                 else:
                     m = clone_residual(c.tmpl[model], S_, rng, led)
                 res = L.run_cqe(act, max_iter=args.e4_conv_iter, e_exact=c.e_fci, optimizer=opt, r_tol=0.0,
-                                e_tol=0.0, residual_estimator=m)
+                                e_tol=0.0, optimizer_options=opt_options(opt), residual_estimator=m)
                 r = run_metrics(res)
                 r["seed"] = i
                 runs.append(r)
@@ -1127,13 +1524,96 @@ def run_e5(c, args, e2: dict | None) -> dict:
                                          L.sampling.ShotLedger())
                 tr = Trajectory(c.basis_sector, c.hf, c.e_hf)
                 L.run_cqe(c.act, max_iter=args.e5_iter, e_exact=c.e_fci, optimizer=opt, r_tol=0.0, e_tol=0.0,
-                          residual_estimator=est, callback=tr)
+                          optimizer_options=opt_options(opt), residual_estimator=est, callback=tr)
                 rows.append(tr.rows)
             out["long"][f"{opt}/{S_:g}"] = rows
             print(f"[{c.name}] E5 {opt} S={S_:.0e}: final total {np.median([r[-1]['total'] for r in rows]):.2e}, "
                   f"in-null {np.median([r[-1]['in_null'] for r in rows]):.2e}, out "
                   f"{np.median([r[-1]['out_null'] + r[-1]['out_soft'] + r[-1]['out_stiff'] for r in rows]):.2e} "
                   f"[{time.perf_counter() - t:.1f} s]", flush=True)
+    out["seconds"] = time.perf_counter() - t0
+    return out
+
+
+# ====================================================================== E6
+def run_e6(c, args, e3: dict | None) -> dict:
+    """Symmetry-projected residual estimates (grading_mask): theory, fixed-step floor, oracle runs, E3 cell."""
+    S = L.sampling
+    t0 = time.perf_counter()
+    lin, mask = c.lin, c.sym_mask
+    out = {"symmetry": c.info["symmetry"], "theory": {}, "floor": None, "oracle": [], "e3": []}
+    sub = lin.subset(c.hf_block)
+    for model in ("corr", "indep"):
+        F = c.F1[model]
+        Fp = mask.reshape(-1, 1) * F
+        d = {}
+        for label, f in (("plain", F), ("projected", Fp)):
+            pr = lin.noise_floor(c.eps, f)
+            win = pr["per_mode"] * window_factor(c.p, args.e1_burn, args.e1_window)
+            d[label] = {"stationary": float(pr["total"]), "stationary_fast": float(pr["per_mode"][c.fast].sum()),
+                        "window": float(win.sum()), "window_fast": float(win[c.fast].sum())}
+        d["hf_block_stationary"] = float(sub.noise_floor(c.eps, F)["total"])
+        out["theory"][model] = d
+    # fixed-step SD from FCI with the projected correlated model (streams of E1's corr runs: paired)
+    S_ = float(args.e6_floor_shots)
+    start, length = args.e1_burn, args.e1_window
+    th = out["theory"]["corr"]["projected"]
+    t = time.perf_counter()
+    per_seed = []
+    gm_p = c.gm * mask.ravel()[None, :]
+    for i in range(args.seeds):
+        rng = np.random.default_rng(seed_seq(args.seed, "e1", c.name, "corr", i))
+        m = ProjectedResidual(clone_residual(c.tmpl["corr"], S_, rng, S.ShotLedger()), mask)
+        twin = LinearTwin(m, gm_p, c.p, c.eps)
+        acc = WindowMean(c.basis_e1, start, twin)
+        L.run_cqe(c.act, ci0=lin.psi0, max_iter=start + length, eps_candidates=(c.eps,), r_tol=0.0, e_tol=0.0,
+                  residual_estimator=twin, callback=acc)
+        per_seed.append(acc.means())
+    fl = {"shots": S_, "burn": start, "window": length, "per_seed": per_seed,
+          "expected_total": th["window"] / S_, "expected_fast": th["window_fast"] / S_,
+          "seconds": time.perf_counter() - t}
+    for k in ("total", "fast", "slow", "twin_total"):
+        fl[k] = band([d[k] for d in per_seed])
+    fl["ratio_total"] = band([d["total"] / fl["expected_total"] for d in per_seed])
+    fl["ratio_fast"] = band([d["fast"] / fl["expected_fast"] for d in per_seed])
+    fl["twin_ratio_total"] = band([d["total"] / d["twin_total"] for d in per_seed])
+    out["floor"] = fl
+    print(f"[{c.name}] E6 floor S={S_:.0e}: sim {fl['total']['median']:.3e} / expected {fl['expected_total']:.3e} "
+          f"(plain window {out['theory']['corr']['plain']['window'] / S_:.3e}) [{fl['seconds']:.1f} s]", flush=True)
+    # oracle line search from HF with the projected estimate (streams of E2: paired with E2's runs)
+    for opt in OPTIMIZERS:
+        for S_ in args.e6_shots:
+            t = time.perf_counter()
+            runs = []
+            for i in range(args.seeds):
+                est = ProjectedResidual(clone_residual(c.tmpl["corr"], S_, np.random.default_rng(
+                    seed_seq(args.seed, "e2", c.name, i)), S.ShotLedger()), mask)
+                res = L.run_cqe(c.act, max_iter=args.e6_iter, e_exact=c.e_fci, optimizer=opt, r_tol=0.0, e_tol=0.0,
+                                optimizer_options=opt_options(opt), residual_estimator=est)
+                m = run_metrics(res)
+                m["sector_final"] = c.basis_sector.energies(res.ci, res.energies[-1])
+                m["seed"] = i
+                runs.append(m)
+            crng = np.random.default_rng(seed_seq(args.seed, "boot-e6", c.name, opt, S_))
+            row = {"optimizer": opt, "shots": S_, "iterations": args.e6_iter, "runs": runs,
+                   "stats": summarize_runs(runs), "conv": conv_stats(runs, S_, args.conv_window, crng),
+                   "seconds": time.perf_counter() - t}
+            out["oracle"].append(row)
+            print(f"[{c.name}] E6 oracle {opt:5s} S={S_:.0e}: final {row['stats']['final']['median']:.2e} late "
+                  f"{row['stats']['late_mean']['median']:.2e} j* {_it(row['conv']['j'])} [{row['seconds']:.1f} s]",
+                  flush=True)
+    # the cheapest validated E3 cell with the projected estimate (same fresh seeds and horizon)
+    if e3 and e3.get("validation"):
+        val = [v for v in e3["validation"] if v["conv"]["shots"] is not None] or e3["validation"]
+        v = min(val, key=lambda x: (math.inf if x["conv"]["shots"] is None else x["conv"]["shots"],
+                                    x["conv"]["p_late"]))
+        t = time.perf_counter()
+        x = e3_cell(c, args, v["optimizer"], v["set"], v["S_res"], v["S_E"], v["seeds"], n_iter=v["iterations"],
+                    tag="projected", projected=True)
+        x["unprojected"] = {"conv": v["conv"], "stats": v["stats"]}
+        out["e3"].append(x)
+        print(f"[{c.name}] E6 E3 cell projected: {_cell_line(x)} (unprojected j* {_it(v['conv']['j'])}, S "
+              f"{_short(v['conv']['shots'])}) [{time.perf_counter() - t:.1f} s]", flush=True)
     out["seconds"] = time.perf_counter() - t0
     return out
 
@@ -1215,6 +1695,26 @@ def md_setup(results: dict) -> list[str]:
             f"{_g(s['cov_trace'])} ({_g(float(s['cov_snapshots']))}) | {ratio} | {f} | {_g(s[f'df_{f}_shift_fci'])} | "
             f"{_g(s[f'df_{f}_shift_hf'] / s[f'df_{f}_shift_fci'])} | {_g(s['clone_check_max_abs_diff'])} | "
             f"{_g(s['seconds_setup'])} |")
+    lines += ["", "Symmetry and energy noise. gradings: nontrivial Z2 symmetries of the integrals (abelian point-group "
+              "operations, ``grading_mask``) and the fraction of the N^4 pair-order entries they allow; margin: the "
+              "largest symmetry-forbidden |(pq|rs)| and the smallest allowed one above 1e-10 (relative to max); exact "
+              "A at HF outside the allowed entries (relative norm); coupled singlets that are symmetric / odd under "
+              "every grading (the rest are degenerate pairs mixed by the eigensolver); the HF symmetry block of K "
+              "(``LinearizedCQE.block_of``); sigma_E per energy estimate at FCI (shifted DF), mHa; energy check: max "
+              "|difference| between the check mode of the per-iteration energy noise and EnergyNoise(variance="
+              "'exact') on the same stream.", "",
+              "| system | gradings | allowed entries | margin: forbidden / allowed eri | exact A at HF outside | coupled: "
+              "symmetric / odd | HF block | sigma_E at FCI (mHa) by S_E | energy check |", "|" + "---|" * 9]
+    for name, r in results.items():
+        s = r["setup"]
+        y = s.get("symmetry")
+        if not y:
+            continue
+        sig = ", ".join(f"{k}: {_g(v)}" for k, v in s.get("sigma_E_fci_mHa", {}).items())
+        lines.append(f"| {name} | {y['n_gradings']} | {_pct(y['fraction_allowed'])} | "
+                     f"{_g(y['max_forbidden_eri_rel'])} / {_g(y['min_allowed_eri_rel'])} | "
+                     f"{_g(y['exact_A_outside_mask_rel_hf'])} | {y['n_coupled_symmetric']} / {y['n_coupled_odd']} | "
+                     f"{s['sector']['n_in']} of {s['n_coupled']} | {sig} | {_g(s.get('energy_check_max_abs_diff'))} |")
     lines.append("")
     return lines
 
@@ -1280,23 +1780,30 @@ def md_e1(results: dict) -> list[str]:
               "Exact exp(-i delta H), independent elements (matchgate shadows), S per iteration as given: the "
               "residual of excitation k is damped by sinc(delta w_k), so the SD map is I - (eps/2) K diag(sinc). "
               "rho: spectral radius of that map (> 1: unstable); min eig: smallest eigenvalue of K diag(sinc). "
-              "'plain' is noise_floor without the damping (stationary); 'damped' solves the Lyapunov equation of "
-              "the damped map (stationary, and the window expectation). max error: the largest E - E_FCI of the run.",
+              "'plain' is the undamped theory (noise_floor; stationary, and the window expectation from FCI); "
+              "'damped' solves the Lyapunov equation of the damped map (stationary, and the window). Two effects "
+              "are separated: damped / plain window is the sinc damping alone (same window), plain stationary / "
+              "plain window the unrelaxed soft modes alone. max error: the largest E - E_FCI of the run.",
               "",
-              "| system | delta | S | sum v | min sinc | min eig K D | rho | plain stationary | damped stationary | "
-              "damped window | simulated | ratio total | ratio fast | max error | s |",
-              "|" + "---|" * 15]
+              "| system | delta | S | sum v | min sinc | min eig K D | rho | plain stationary | plain window | "
+              "damped stationary | damped window | damping: damped / plain window | transient: plain stationary / "
+              "plain window | simulated | ratio total | ratio fast | max error | s |",
+              "|" + "---|" * 18]
     for name, r in results.items():
         e1 = r.get("e1")
         if not e1:
             continue
         for a in e1["aux_exact"]:
             S_ = a["shots"]
+            pw = a.get("plain_window_S1")
+            dw = a["damped_window_S1"]
             lines.append(
                 f"| {name} | {a['delta']} | {_S(S_)} | {_g(a['var_total'])} | {_g(a['sinc_min'])} | "
                 f"{_g(a['min_eig_KD'])} | {_g(a['rho'], 6)} | {_g(a['plain_stationary_S1'] / S_)} | "
+                f"{_g(None if pw is None else pw / S_)} | "
                 f"{_g(None if a['damped_stationary_S1'] is None else a['damped_stationary_S1'] / S_)} | "
-                f"{_g(None if a['damped_window_S1'] is None else a['damped_window_S1'] / S_)} | {_b(a['total'])} | "
+                f"{_g(None if dw is None else dw / S_)} | {_g(None if (dw is None or not pw) else dw / pw)} | "
+                f"{_g(None if not pw else a['plain_stationary_S1'] / pw)} | {_b(a['total'])} | "
                 f"{_b(a.get('ratio_total'))} | {_b(a.get('ratio_fast'))} | {_b(a['max_error'])} | {_g(a['seconds'])} |")
     lines += ["", "DF methods at S = inf (bias only): ||b|| is the Frobenius norm of the filled bias tensor at FCI; "
               "the stationary offset is bias_offset (||B^+ b||^2) with the share of its soft modes; the transient is "
@@ -1317,33 +1824,78 @@ def md_e1(results: dict) -> list[str]:
     return lines
 
 
+def _conv_txt(cv: dict | None, shots: bool = True) -> str:
+    """'j* (S)' of a conv_stats dict ('–' if not converged)."""
+    if not cv or cv.get("j") is None:
+        return "–"
+    if shots and cv.get("shots") is not None and cv["cost_per_iteration"] > 0:
+        return f"{cv['j']} ({_g(cv['shots'])})"
+    return str(cv["j"])
+
+
 def md_e2(results: dict) -> list[str]:
     lines = ["## E2: optimizers with noisy residuals and exact energies (oracle line search)", ""]
     first = next((r["e2"] for r in results.values() if r.get("e2")), None)
     if first is None:
         return []
+    h3 = next((r["settings"].get("e3_iter") for r in results.values() if r.get("settings")), None)
+    w = next((r["settings"].get("conv_window") for r in results.values() if r.get("settings")), CONV_WINDOW)
     lines += [f"From HF, {first['iterations']} iterations, correlated Gaussian residual noise, exact Krylov line "
-              "search along the noisy direction. Iterations count CQE steps (0 = HF); 'stay' is the first iteration "
-              "after which E - E_FCI stays below 1.6 mHa to the end; residual shots = S x iterations. uphill: steps "
-              "whose noisy direction has exact slope >= 0 (the oracle then returns a void step); void: |eps| < 1e-6. "
+              "search along the noisy direction; L-BFGS with curvature_tol "
+              f"{LBFGS_TOL:g}. Iterations count CQE steps (0 = HF). 'stay' is the per-seed first iteration after "
+              f"which E - E_FCI stays below 1.6 mHa to the end of the run (H = {first['iterations']}; it depends on "
+              f"H). j* is the convergence iteration of the cell (seeds pooled: at most {100 * CONV_LEVEL:g}% of the "
+              f"seeds >= 1.6 mHa at j*, and in every window of {w} iterations from j* on; module docstring) at "
+              f"H = {first['iterations']} "
+              f"and, for the comparison with E3, at H = {h3} (the first {h3} iterations); in parentheses the "
+              "residual shots S x j*. late mean: mean error over the second half of the run. uphill: steps whose "
+              "noisy direction has exact slope >= 0 (the oracle then returns a void step); void: |eps| < 1e-6. "
               "Restarts/resets/skips: median per run. S = inf is the exact CQE (one run).", "",
-              "| system | optimizer | S_res | final error | best error | first < 1.6 mHa (n ok) | stay (n ok) | "
-              "residual shots to stay | uphill | void | CG restarts | L-BFGS resets / skips | s |",
-              "|" + "---|" * 13]
+              "| system | optimizer | S_res | final error | late mean | best error | first < 1.6 mHa (n ok) | stay "
+              f"(n ok; H = {first['iterations']}) | j* (shots) | j* at H = {h3} | uphill | void | CG restarts | "
+              "L-BFGS resets / skips | s |",
+              "|" + "---|" * 15]
     for name, r in results.items():
         e2 = r.get("e2")
         if not e2:
             continue
         for row in e2["rows"]:
             st = row["stats"]
-            sh = st.get("shots_stay")
             lines.append(
-                f"| {name} | {row['optimizer']} | {_S(row['shots'])} | {_b(st['final'])} | {_b(st['best'])} | "
-                f"{_b(st['reach'], kind='it')} ({_ok(st['reach'])}) | {_b(st['stay'], kind='it')} ({_ok(st['stay'])}) | "
-                f"{_b(sh) if sh else '–'} | {_g(st['uphill']['median'])} | {_g(st['void']['median'])} | "
+                f"| {name} | {row['optimizer']} | {_S(row['shots'])} | {_b(st['final'])} | {_b(st.get('late_mean'))} | "
+                f"{_b(st['best'])} | {_b(st['reach'], kind='it')} ({_ok(st['reach'])}) | "
+                f"{_b(st['stay'], kind='it')} ({_ok(st['stay'])}) | {_conv_txt(row.get('conv'))} | "
+                f"{_conv_txt(row.get('conv_e3_horizon'), shots=False)} | {_g(st['uphill']['median'])} | "
+                f"{_g(st['void']['median'])} | "
                 f"{_g(st['cg_restarts']['median']) if row['optimizer'] == 'cg' else '–'} | "
                 + (f"{_g(st['lbfgs_resets']['median'])} / {_g(st['lbfgs_skips']['median'])}"
                    if row["optimizer"] == "lbfgs" else "–") + f" | {_g(row['seconds'])} |")
+    lines += ["", "Ranking per cell with paired seeds (the three optimizers of a seed draw from the same random "
+              "stream, used along their own trajectories). For each pair, the number of seeds in which the first "
+              "has the lower final error; 'resolved' when the optimizer with the lowest median final error beats "
+              "both others in every seed.", "",
+              "| system | S_res | median final SD / CG / L-BFGS | CG < SD | CG < L-BFGS | L-BFGS < SD | lowest median | "
+              "resolved |", "|---|---|---|---|---|---|---|---|"]
+    for name, r in results.items():
+        e2 = r.get("e2")
+        if not e2:
+            continue
+        for S_ in sorted({row["shots"] for row in e2["rows"] if math.isfinite(row["shots"])}):
+            rows = {row["optimizer"]: row for row in e2["rows"] if row["shots"] == S_}
+            if set(rows) != set(OPTIMIZERS):
+                continue
+            fin = {o: {run["seed"]: run["final"] for run in rows[o]["runs"]} for o in OPTIMIZERS}
+            seeds = sorted(set.intersection(*(set(f) for f in fin.values())))
+
+            def wins(a_, b_):
+                return sum(fin[a_][i] < fin[b_][i] for i in seeds)
+
+            med = {o: rows[o]["stats"]["final"]["median"] for o in OPTIMIZERS}
+            best = min(OPTIMIZERS, key=lambda o: med[o])
+            res_ = all(wins(best, o) == len(seeds) for o in OPTIMIZERS if o != best)
+            lines.append(f"| {name} | {_S(S_)} | {_g(med['sd'])} / {_g(med['cg'])} / {_g(med['lbfgs'])} | "
+                         f"{wins('cg', 'sd')}/{len(seeds)} | {wins('cg', 'lbfgs')}/{len(seeds)} | "
+                         f"{wins('lbfgs', 'sd')}/{len(seeds)} | {best} | {'yes' if res_ else 'no'} |")
     lines.append("")
     return lines
 
@@ -1354,11 +1906,70 @@ def _sets_present(results) -> list[str]:
     return [s for s in CANDIDATE_SETS if s in have] or list(CANDIDATE_SETS)
 
 
-def _cell(results, name, opt, set_name, S_res, S_E):
+def _cell(results, name, opt, set_name, S_res, S_E, tag="main"):
     for x in results[name]["e3"]["cells"]:
-        if x["optimizer"] == opt and x["set"] == set_name and x["S_res"] == S_res and x["S_E"] == S_E:
+        if (x["optimizer"] == opt and x["set"] == set_name and x["S_res"] == S_res and x["S_E"] == S_E
+                and x.get("tag", "main") == tag):
             return x
     return None
+
+
+def _n_est(set_name: str) -> int:
+    """Energy estimates charged per iteration: the nonzero candidates, plus the current state if zero is a candidate."""
+    c = CANDIDATE_SETS[set_name]
+    return sum(1 for x in c if x != 0.0) + (1 if 0.0 in c else 0)
+
+
+def _boot_rng(*key):
+    return np.random.default_rng(zlib.crc32("/".join(str(k) for k in key).encode()))
+
+
+def paired_records(results, a: str, b: str, tag: str = "main", cells_a=None, cells_b=None) -> list[dict]:
+    """Paired runs (same system, optimizer, grid point and seed) of sets a and b (or of two cell lists)."""
+    recs = []
+    for name, r in results.items():
+        e3 = r.get("e3")
+        if not e3:
+            continue
+        xs = cells_a(e3) if cells_a else [x for x in e3["cells"] if x["set"] == a and x.get("tag", "main") == tag]
+        for x in xs:
+            if cells_b:
+                ys = [y for y in cells_b(e3) if (y["optimizer"], y["set"], y["S_res"], y["S_E"]) ==
+                      (x["optimizer"], b, x["S_res"], x["S_E"])]
+                y = ys[0] if ys else None
+            else:
+                y = _cell(results, name, x["optimizer"], b, x["S_res"], x["S_E"], tag)
+            if y is None:
+                continue
+            yb = {ry["seed"]: ry for ry in y["runs"]}
+            for rx in x["runs"]:
+                ry = yb.get(rx["seed"])
+                if ry is None:
+                    continue
+                ea, eb = np.asarray(rx["errors"]), np.asarray(ry["errors"])
+                h = ea.size // 2 + 1
+                recs.append({"system": name, "opt": x["optimizer"], "S_res": x["S_res"], "S_E": x["S_E"],
+                             "seed": rx["seed"], "cluster": f"{name}/{rx['seed']}",
+                             "log": math.log(max(rx["late_mean"], 1e-12) / max(ry["late_mean"], 1e-12)),
+                             "xa": int((ea[h:] >= TARGET).sum()), "xb": int((eb[h:] >= TARGET).sum()),
+                             "n_late": int(ea.size - h), "ja": x["conv"]["j"], "jb": y["conv"]["j"],
+                             "cell": (name, x["optimizer"], x["S_res"], x["S_E"])})
+    return recs
+
+
+def _gm_txt(g: dict) -> str:
+    if not g or g["gm"] is None:
+        return "–"
+    return f"{_g(g['gm'])} [{_g(g['lo'])}, {_g(g['hi'])}] ({g['lower']}/{g['tie']}/{g['higher']})"
+
+
+def _strata():
+    return (("all", lambda q: True), ("S_res 1e5", lambda q: q["S_res"] <= 1e5),
+            ("S_res >= 1e6", lambda q: q["S_res"] >= 1e6))
+
+
+COMPARISONS = (("pos11+0", "pos11"), ("pos5+0", "pos11+0"), ("eq11", "pos5+0"), ("eq11", "pos11"),
+               ("dbl23", "pos11+0"))
 
 
 def md_e3(results: dict) -> list[str]:
@@ -1366,13 +1977,29 @@ def md_e3(results: dict) -> list[str]:
     if first is None:
         return []
     sets = _sets_present(results)
+    st0 = next(r["settings"] for r in results.values() if r.get("settings"))
+    H = first["iterations"]
+    w = st0.get("conv_window", CONV_WINDOW)
+    costs = "; ".join(f"{s_} {_n_est(s_)}" for s_ in sets)
     lines = ["## E3: noisy residuals and noisy DF energies with fixed step candidates", "",
-             f"From HF, {first['iterations']} iterations. Candidate sets: pos11 = 0.00625 * 2^k (k = 0..10); "
-             "pos11+0 = pos11 and 0; eq11 = 0, +-{0.0125, 0.05, 0.2, 0.8, 3.2} (equal energy cost: 10 estimates "
-             "against 11); dbl23 = 0, +-pos11 (22 estimates). Shots per iteration: S_res + (1 + nonzero candidates) "
-             "S_E. Total shots to reach and stay below 1.6 mHa (median [16-84%], failures = inf; n ok of n seeds).", ""]
+             f"From HF, {H} iterations on the screening grid; L-BFGS with curvature_tol {LBFGS_TOL:g} (the library "
+             f"default {LBFGS_TOL_ABLATION:g} is the ablation below). Candidate sets: pos11 = 0.00625 * 2^k "
+             "(k = 0..10); pos11+0 = pos11 and 0; pos5+0 = 0 and {0.0125, 0.05, 0.2, 0.8, 3.2} (the positive "
+             "magnitudes of eq11: the control for adding negatives); eq11 = 0, +-{0.0125, 0.05, 0.2, 0.8, 3.2} "
+             "(negatives and a factor-4 grid, the cost of pos11); dbl23 = 0, +-pos11. Energy estimates charged per "
+             f"iteration (S_E shots each): {costs} (the nonzero candidates, plus the current state when zero is a "
+             "candidate; a set without zero never uses the current estimate run_cqe requests, which is drawn but "
+             "not charged). Shots per iteration: S_res + n_est S_E.", "",
+             f"Convergence criterion (module docstring): j* is the first iteration at which at most "
+             f"{100 * CONV_LEVEL:g}% of the seeds are >= 1.6 mHa and from which every window of {w} iterations, "
+             f"pooled over the seeds of the cell, has at most {100 * CONV_LEVEL:g}% of its errors >= 1.6 mHa "
+             f"(strict: {100 * STRICT_LEVEL:g}%); it needs j* <= H - {w - 1}, so a cell converging later "
+             f"than iteration {H - w + 1} is not converged at this horizon. Shots to converge: j* x shots per "
+             "iteration. P_late: the fraction of errors >= 1.6 mHa over the second half of the runs, pooled over "
+             "seeds. 'stay' (the earlier metric) is the per-seed first iteration after which every error stays "
+             f"below 1.6 mHa until H = {H}; it grows with H.", ""]
     lines += ["### Exact references (no noise, same candidate sets)", "",
-              "| system | optimizer | " + " | ".join(f"{s}: first < 1.6 mHa / final" for s in sets) + " |",
+              "| system | optimizer | " + " | ".join(f"{s_}: first < 1.6 mHa / final" for s_ in sets) + " |",
               "|---|---|" + "---|" * len(sets)]
     for name, r in results.items():
         e3 = r.get("e3")
@@ -1380,76 +2007,76 @@ def md_e3(results: dict) -> list[str]:
             continue
         for opt in OPTIMIZERS:
             cells = []
-            for s in sets:
-                m = next((x for x in e3["exact"] if x["optimizer"] == opt and x["set"] == s), None)
+            for s_ in sets:
+                m = next((x for x in e3["exact"] if x["optimizer"] == opt and x["set"] == s_), None)
                 cells.append("–" if m is None else f"{_it(m['reach'])} / {_g(m['final'])}")
             lines.append(f"| {name} | {opt} | " + " | ".join(cells) + " |")
-    lines += ["", "### Candidate sets compared", "",
-              "Pairs of sets over all cells (system, optimizer, S_res, S_E): cells where the first set needs fewer "
-              "/ the same / more median shots to reach and stay (both reached), where only one reached, and the "
-              "geometric mean of the ratio of median final errors (first / second). Seeds: the same seed of the "
-              "two cells (common random numbers; pos11 and pos11+0 share every draw, so their runs are identical "
-              "until zero is first chosen), counted by which set ends with the lower final error.", "",
-              "| comparison | fewer shots | same | more shots | only first reached | only second reached | neither | "
-              "final error ratio (geo. mean) | seeds: first lower / equal / higher final | cells |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
-    for a, b in (("pos11+0", "pos11"), ("eq11", "pos11"), ("dbl23", "pos11+0"), ("dbl23", "pos11"),
-                 ("eq11", "pos11+0")):
-        cnt = {"fewer": 0, "tie": 0, "more": 0, "only_a": 0, "only_b": 0, "neither": 0}
-        seeds = {"lower": 0, "equal": 0, "higher": 0}
-        logs = []
-        n = 0
-        for name, r in results.items():
-            e3 = r.get("e3")
-            if not e3:
-                continue
-            for x in e3["cells"]:
-                if x["set"] != a:
-                    continue
-                y = _cell(results, name, x["optimizer"], b, x["S_res"], x["S_E"])
-                if y is None:
-                    continue
-                n += 1
-                sa, sb = x["stats"]["shots_stay"]["median"], y["stats"]["shots_stay"]["median"]
-                fa, fb = math.isfinite(sa), math.isfinite(sb)
-                if fa and fb:
-                    cnt["fewer" if sa < sb else ("tie" if sa == sb else "more")] += 1
-                elif fa:
-                    cnt["only_a"] += 1
-                elif fb:
-                    cnt["only_b"] += 1
-                else:
-                    cnt["neither"] += 1
-                ea, eb = x["stats"]["final"]["median"], y["stats"]["final"]["median"]
-                if ea > 0 and eb > 0:
-                    logs.append(math.log(ea / eb))
-                fy = {ry["seed"]: ry["final"] for ry in y["runs"]}
-                for rx in x["runs"]:
-                    if rx["seed"] in fy:
-                        d = rx["final"] - fy[rx["seed"]]
-                        seeds["lower" if d < 0 else ("equal" if d == 0 else "higher")] += 1
-        if n == 0:
+    # ---------------------------------------------------------------- paired comparisons
+    lines += ["", "### Candidate sets compared (paired runs, cluster bootstrap)", "",
+              "One statistic for every comparison: the geometric mean over paired runs (same system, optimizer, "
+              "grid point and seed; common random numbers) of the ratio of late-mean errors (mean E - E_FCI over "
+              "the second half of each run), first set / second set, with a 95% bootstrap interval over the "
+              "(system, seed) clusters (a seed's runs share its random streams across optimizers, grid points and "
+              "sets, so they are not independent; 20 clusters for four systems and five seeds). In parentheses: "
+              "pairs with the first lower / equal / higher (equal: identical runs, e.g. pos11 and pos11+0 until "
+              "zero is first chosen). Screening grid only.", "",
+              "| comparison | stratum | all optimizers | SD | CG | L-BFGS | P_late first / second | cells "
+              "converged: both / first only / second only / neither |", "|---|---|---|---|---|---|---|---|"]
+    for a_, b_ in COMPARISONS:
+        if a_ not in sets or b_ not in sets:
             continue
-        gm = math.exp(sum(logs) / len(logs)) if logs else None
-        lines.append(f"| {a} vs {b} | {cnt['fewer']} | {cnt['tie']} | {cnt['more']} | {cnt['only_a']} | "
-                     f"{cnt['only_b']} | {cnt['neither']} | {_g(gm)} | {seeds['lower']} / {seeds['equal']} / "
-                     f"{seeds['higher']} | {n} |")
+        recs = paired_records(results, a_, b_)
+        if not recs:
+            continue
+        for sname, f in _strata():
+            rr = [q for q in recs if f(q)]
+            if not rr:
+                continue
+            cols = []
+            for opt in (None,) + OPTIMIZERS:
+                q = [x for x in rr if opt is None or x["opt"] == opt]
+                cols.append(_gm_txt(cluster_gm([x["log"] for x in q], [x["cluster"] for x in q],
+                                               _boot_rng("cmp", a_, b_, sname, opt))))
+            na = sum(x["n_late"] for x in rr)
+            pa, pb = sum(x["xa"] for x in rr) / na, sum(x["xb"] for x in rr) / na
+            cells = {x["cell"]: (x["ja"] is not None, x["jb"] is not None) for x in rr}
+            cc = [sum(1 for v in cells.values() if v == k) for k in ((True, True), (True, False), (False, True),
+                                                                      (False, False))]
+            lines.append(f"| {a_} vs {b_} | {sname} | " + " | ".join(cols) +
+                         f" | {_pct(pa)} / {_pct(pb)} | {cc[0]} / {cc[1]} / {cc[2]} / {cc[3]} |")
+    lines += ["", "Per system (all grid points; 5 clusters each, so the intervals are wide):", "",
+              "| comparison | system | all optimizers | SD | CG | L-BFGS |", "|---|---|---|---|---|---|"]
+    for a_, b_ in (("pos11+0", "pos11"), ("eq11", "pos5+0"), ("dbl23", "pos11+0")):
+        if a_ not in sets or b_ not in sets:
+            continue
+        recs = paired_records(results, a_, b_)
+        for name in results:
+            rr = [q for q in recs if q["system"] == name]
+            if not rr:
+                continue
+            cols = []
+            for opt in (None,) + OPTIMIZERS:
+                q = [x for x in rr if opt is None or x["opt"] == opt]
+                cols.append(_gm_txt(cluster_gm([x["log"] for x in q], [x["cluster"] for x in q],
+                                               _boot_rng("sys", a_, b_, name, opt))))
+            lines.append(f"| {a_} vs {b_} | {name} | " + " | ".join(cols) + " |")
+    lines += _md_ablation(results)
+    # ---------------------------------------------------------------- usage
     lines += ["", "### How often zero and negative candidates are chosen, and what they gain", "",
               "Fractions of iterations (all, and in the second half of the runs, 'late'), averaged over seeds, "
-              "systems and the (S_res, S_E) grid. uphill: the noisy direction has exact slope >= 0. best neg / best "
+              "systems and the screening grid. uphill: the noisy direction has exact slope >= 0. best neg / best "
               "zero: the exact-best candidate of the set is negative / zero. gain: E_exact(chosen) - E_exact(the "
               "positive candidate the same estimates would have picked), summed over the zero or negative choices "
               "of the late half (negative = the choice helped), as mean per such choice (mHa) and the counts that "
-              "helped / hurt. The means are dominated by rare large events (a noise-corrupted L-BFGS direction can "
-              "make every positive candidate raise the energy by up to Ha; the zero candidate refuses such steps), "
-              "so the counts and the split below are the robust statistics.", "",
+              "helped / hurt. The means are dominated by rare large events, so the counts and the split below are "
+              "the robust statistics.", "",
               "| optimizer | set | zero chosen | neg chosen | uphill | best neg | best zero | late: zero | late: neg | "
               "late: uphill | late: best neg | late gain per choice (mHa) | late helped / hurt | late regret (mHa) |",
               "|" + "---|" * 14]
+    main_cells = [x for r in results.values() if r.get("e3") for x in r["e3"]["cells"] if x.get("tag", "main") == "main"]
     for opt in OPTIMIZERS:
-        for s in sets:
-            cs = [x for r in results.values() if r.get("e3") for x in r["e3"]["cells"]
-                  if x["optimizer"] == opt and x["set"] == s]
+        for s_ in sets:
+            cs = [x for x in main_cells if x["optimizer"] == opt and x["set"] == s_]
             if not cs:
                 continue
 
@@ -1461,108 +2088,160 @@ def md_e3(results: dict) -> list[str]:
             helped = sum(x["usage_late"]["n_helped"] for x in cs)
             hurt = sum(x["usage_late"]["n_hurt"] for x in cs)
             lines.append(
-                f"| {opt} | {s} | {_pct(avg('zero'))} | {_pct(avg('neg'))} | {_pct(avg('uphill'))} | "
+                f"| {opt} | {s_} | {_pct(avg('zero'))} | {_pct(avg('neg'))} | {_pct(avg('uphill'))} | "
                 f"{_pct(avg('best_neg'))} | {_pct(avg('best_zero'))} | {_pct(avg('zero', 'late'))} | "
                 f"{_pct(avg('neg', 'late'))} | {_pct(avg('uphill', 'late'))} | {_pct(avg('best_neg', 'late'))} | "
                 f"{_g(1e3 * gsum / npos) if npos else '–'} | {helped} / {hurt} | {_g(1e3 * avg('regret_mean', 'late'))} |")
-    lines += ["", "Usage by shots (sets with zero and negative candidates; averaged over systems and optimizers):", "",
-              "| set | S_res | S_E | zero chosen | neg chosen | uphill | best neg | best zero | late gain per choice (mHa) | "
-              "late helped / hurt |", "|" + "---|" * 10]
-    grid = sorted({(x["S_res"], x["S_E"]) for r in results.values() if r.get("e3") for x in r["e3"]["cells"]})
-    for s in sets[1:]:
-        for sr, se in grid:
-            cs = [x for r in results.values() if r.get("e3") for x in r["e3"]["cells"]
-                  if x["set"] == s and x["S_res"] == sr and x["S_E"] == se]
-            if not cs:
-                continue
-            u = {k: float(np.mean([x["usage_all"][k] for x in cs])) for k in ("zero", "neg", "uphill", "best_neg",
-                                                                               "best_zero")}
-            npos = sum(x["usage_late"]["n_nonpos"] for x in cs)
-            gsum = sum(x["usage_late"]["gain_sum"] for x in cs)
-            lines.append(f"| {s} | {_S(sr)} | {_S(se)} | {_pct(u['zero'])} | {_pct(u['neg'])} | {_pct(u['uphill'])} | "
-                         f"{_pct(u['best_neg'])} | {_pct(u['best_zero'])} | {_g(1e3 * gsum / npos) if npos else '–'} | "
-                         f"{sum(x['usage_late']['n_helped'] for x in cs)} / {sum(x['usage_late']['n_hurt'] for x in cs)} |")
+    lines += ["", "Uphill directions by optimizer and S_res (pos11 cells, all iterations): the share of noisy "
+              "directions with exact slope >= 0, which is what a zero or negative candidate can exploit.", "",
+              "| optimizer | " + " | ".join(f"S_res {_S(x)}" for x in sorted({x['S_res'] for x in main_cells})) + " |",
+              "|---|" + "---|" * len({x['S_res'] for x in main_cells})]
+    for opt in OPTIMIZERS:
+        vals = []
+        for sr in sorted({x["S_res"] for x in main_cells}):
+            cs = [x for x in main_cells if x["optimizer"] == opt and x["set"] == "pos11" and x["S_res"] == sr]
+            vals.append(_pct(float(np.mean([x["usage_all"]["uphill"] for x in cs]))) if cs else "–")
+        lines.append(f"| {opt} | " + " | ".join(vals) + " |")
     lines += _md_split(results, sets)
+    # ---------------------------------------------------------------- all cells
     lines += ["", "### All cells", "",
-              "Per cell: total shots to reach and stay below 1.6 mHa, median (n ok), and the median final error.", "",
-              "| system | optimizer | S_res | S_E | " + " | ".join(f"{s}: shots (n ok) / final" for s in sets) + " |",
-              "|---|---|---|---|" + "---|" * len(sets)]
+              f"Per cell (screening seeds, H = {H}): shots to converge S(j*) and j* (– if not converged at this "
+              "horizon), P_late, and the median final error.", "",
+              "| system | optimizer | S_res | S_E | " + " | ".join(f"{s_}: S(j*) (j*) / P_late / final" for s_ in sets)
+              + " |", "|---|---|---|---|" + "---|" * len(sets)]
     for name, r in results.items():
         e3 = r.get("e3")
         if not e3:
             continue
-        keys = sorted({(x["optimizer"], x["S_res"], x["S_E"]) for x in e3["cells"]},
+        keys = sorted({(x["optimizer"], x["S_res"], x["S_E"]) for x in screen_cells(e3)},
                       key=lambda k: (OPTIMIZERS.index(k[0]), k[1], k[2]))
         for opt, sr, se in keys:
             cells = []
-            for s in sets:
-                x = _cell(results, name, opt, s, sr, se)
+            for s_ in sets:
+                x = _cell(results, name, opt, s_, sr, se) or _cell(results, name, opt, s_, sr, se, "search")
                 if x is None:
                     cells.append("–")
                     continue
-                st = x["stats"]
-                cells.append(f"{_g(st['shots_stay']['median'])} ({st['shots_stay']['n_ok']}) / {_g(st['final']['median'])}")
+                cv = x["conv"]
+                cells.append(f"{_g(cv['shots'])} ({_it(cv['j'])}) / {_pct(cv['p_late'])} / "
+                             f"{_g(x['stats']['final']['median'])}")
             lines.append(f"| {name} | {opt} | {_S(sr)} | {_S(se)} | " + " | ".join(cells) + " |")
     lines += ["", "### Check of the per-iteration energy variance", "",
-              "Paired runs (same random streams) with the variance evaluated once per iteration (this benchmark) and "
-              "at every candidate state (EnergyNoise variance='exact').", "",
-              "| system | optimizer / set | S_res | S_E | seed | final (iteration) | final (exact) | stay (iteration / exact) | "
-              "max abs error difference | s (iteration / exact) |", "|" + "---|" * 10]
+              "One run per optimizer and set (seed 0) with the variance evaluated at every estimate (EnergyNoise "
+              "variance='exact', the run's own choices) and, with the same normals, the estimates of the "
+              "per-iteration variance (this benchmark's model). If no choice differs, the per-iteration run is "
+              "identical (same draws, same choices, same states). max change: the largest relative change of an "
+              "estimate's noise term, |sqrt(V_current / V_candidate) - 1|.", "",
+              "| system | S_res | S_E | iterations per run | runs | iterations with a different choice | "
+              "max change | s |", "|---|---|---|---|---|---|---|---|"]
     for name, r in results.items():
         e3 = r.get("e3")
-        if not e3:
+        if not e3 or "variance_check" not in e3:
             continue
         vc = e3["variance_check"]
-        for x in vc["runs"]:
-            lines.append(f"| {name} | {vc['optimizer']} / {vc['set']} | {_S(vc['S_res'])} | {_S(vc['S_E'])} | {x['seed']} | "
-                         f"{_g(x['final_iteration'])} | {_g(x['final_exact'])} | {_it(x['stay_iteration'])} / "
-                         f"{_it(x['stay_exact'])} | {_g(x['max_abs_error_diff'])} | {_g(x['seconds_iteration'])} / "
-                         f"{_g(x['seconds_exact'])} |")
+        runs = vc["runs"]
+        if runs and "choices_differ" not in runs[0]:
+            continue
+        lines.append(f"| {name} | {_S(vc['S_res'])} | {_S(vc['S_E'])} | {vc['iterations']} | {len(runs)} | "
+                     f"{sum(x['choices_differ'] for x in runs)} of {sum(x['iterations'] for x in runs)} | "
+                     f"{_g(max(x['max_rel_estimate_change'] for x in runs))} | {_g(vc['seconds'])} |")
     lines.append("")
     return lines
 
 
+def _md_ablation(results: dict) -> list[str]:
+    """L-BFGS with curvature_tol 1e-12 (library default) against the main runs (LBFGS_TOL), paired."""
+    have = [(name, x) for name, r in results.items() if r.get("e3") for x in r["e3"].get("ablation", [])]
+    if not have:
+        return []
+    lines = ["", "### L-BFGS curvature_tol ablation", "",
+             f"The same L-BFGS runs (same seeds and draws) with curvature_tol {LBFGS_TOL_ABLATION:g} (library default) "
+             f"and {LBFGS_TOL:g} (this benchmark), at the ablation grid points. A pair (s, y) is stored only if "
+             "<s, y> > tol ||s|| ||y||. big rises: single steps that raise E - E_FCI by more than 10 mHa (runs with "
+             "one / total); final > 10 mHa: runs ending above 10 mHa; ratios: geometric mean of paired late-mean "
+             "ratios [95% cluster interval] (lower/equal/higher).", "",
+             "| system | set | tol | runs with a big rise / total big rises | largest rise (mHa) | final > 10 mHa | "
+             "late mean (median) | tol 1e-12 / 1e-2 |", "|---|---|---|---|---|---|---|---|"]
+    pairs = []
+    for name, x in have:
+        y = _cell(results, name, "lbfgs", x["set"], x["S_res"], x["S_E"])
+        if y is None:
+            continue
+        pairs.append((name, x, y))
+    for name in results:
+        for set_name in ("pos11", "pos11+0"):
+            pp = [(x, y) for n_, x, y in pairs if n_ == name and x["set"] == set_name]
+            if not pp:
+                continue
+            for label, which in (("1e-12", 0), (f"{LBFGS_TOL:g}", 1)):
+                runs = [r_ for xy in pp for r_ in xy[which]["runs"]]
+                nb = sum(1 for r_ in runs if r_["n_big_rises"] > 0)
+                tb = sum(r_["n_big_rises"] for r_ in runs)
+                mr = max(r_["max_rise"] for r_ in runs)
+                f10 = sum(1 for r_ in runs if r_["final"] > 1e-2)
+                lm = float(np.median([r_["late_mean"] for r_ in runs]))
+                ratio = "–"
+                if which == 0:
+                    logs, cl = [], []
+                    for x, y in pp:
+                        yb = {r_["seed"]: r_ for r_ in y["runs"]}
+                        for r_ in x["runs"]:
+                            logs.append(math.log(max(r_["late_mean"], 1e-12) / max(yb[r_["seed"]]["late_mean"], 1e-12)))
+                            cl.append(r_["seed"])
+                    ratio = _gm_txt(cluster_gm(logs, cl, _boot_rng("abl", name, set_name)))
+                lines.append(f"| {name} | {set_name} | {label} | {nb} / {tb} | {_g(1e3 * mr)} | {f10} of {len(runs)} | "
+                             f"{_g(lm)} | {ratio} |")
+    # zero's effect under each tol, pooled over systems
+    lines += ["", "Zero's effect for L-BFGS under each curvature_tol (pos11+0 / pos11, ablation grid points, all "
+              "systems; clusters (system, seed)):", "", "| tol | pos11+0 / pos11 |", "|---|---|"]
+    for label, getter in (("1e-12", lambda e3: e3.get("ablation", [])),
+                          (f"{LBFGS_TOL:g}", lambda e3: [x for x in e3["cells"] if x.get("tag", "main") == "main"
+                                                          and x["optimizer"] == "lbfgs"])):
+        pts = {(x["S_res"], x["S_E"]) for r in results.values() if r.get("e3") for x in r["e3"].get("ablation", [])}
+        recs = paired_records(results, "pos11+0", "pos11",
+                              cells_a=lambda e3, g=getter: [x for x in g(e3) if x["set"] == "pos11+0"
+                                                            and (x["S_res"], x["S_E"]) in pts],
+                              cells_b=lambda e3, g=getter: [x for x in g(e3) if x["set"] == "pos11"])
+        g_ = cluster_gm([q["log"] for q in recs], [q["cluster"] for q in recs], _boot_rng("ablzero", label))
+        lines.append(f"| {label} | {_gm_txt(g_)} |")
+    return lines
+
+
 def _md_split(results: dict, sets) -> list[str]:
-    """Zero and negative choices split (all iterations; needs the per-iteration gains of candidate_analysis)."""
+    """Zero and negative choices split by the direction (uphill / downhill for the exact energy)."""
     rows = []
     for opt in OPTIMIZERS:
-        for s in sets:
-            acc = {"zero": [], "neg": [], "zero_up": 0, "neg_up": 0, "n": 0}
+        for s_ in sets:
+            acc: dict = {}
+            n = 0
             for r in results.values():
                 for x in (r.get("e3") or {}).get("cells", []):
-                    if x["optimizer"] != opt or x["set"] != s:
+                    if x["optimizer"] != opt or x["set"] != s_ or x.get("tag", "main") != "main":
                         continue
                     for run in x["runs"]:
                         ca = run["candidates"]
-                        if "gain" not in ca:
-                            continue
                         for sg, g, up in zip(ca["chosen_sign"], ca["gain"], ca["uphill"]):
-                            acc["n"] += 1
-                            if sg == 0:
-                                acc["zero"].append(g)
-                                acc["zero_up"] += up
-                            elif sg < 0:
-                                acc["neg"].append(g)
-                                acc["neg_up"] += up
-            if acc["n"] and (acc["zero"] or acc["neg"]):
-                rows.append((opt, s, acc))
+                            n += 1
+                            if sg > 0:
+                                continue
+                            acc.setdefault(("zero" if sg == 0 else "neg", "uphill" if up else "downhill"), []).append(g)
+            if acc:
+                rows.append((opt, s_, n, acc))
     if not rows:
         return []
-    lines = ["", "Zero and negative choices split (all iterations, all systems and grid points): n chosen (share of "
-             "iterations), helped / hurt (gain < 0 / > 0), median and mean gain per choice (mHa), and how many of "
-             "the choices were made on uphill directions.", "",
-             "| optimizer | set | iterations | zero: n | helped / hurt | median / mean gain | on uphill | negative: n | "
-             "helped / hurt | median / mean gain | on uphill |", "|" + "---|" * 11]
-    for opt, s, a in rows:
-        cells = []
-        for k in ("zero", "neg"):
-            g = np.asarray(a[k], dtype=float)
+    lines = ["", "Zero and negative choices split by the direction (screening grid, all iterations): n chosen, "
+             "helped / hurt (gain < 0 / > 0, against the positive candidate the same estimates would have picked), "
+             "median and mean gain per choice (mHa), and the choices with |gain| > 10 mHa (helped / hurt).", "",
+             "| optimizer | set | iterations | choice | direction | n | helped / hurt | median / mean gain (mHa) | "
+             "> 10 mHa helped / hurt |", "|" + "---|" * 9]
+    for opt, s_, n, acc in rows:
+        for key in (("zero", "uphill"), ("zero", "downhill"), ("neg", "uphill"), ("neg", "downhill")):
+            g = np.asarray(acc.get(key, []), dtype=float)
             if g.size == 0:
-                cells.append("0 | – | – | –")
                 continue
-            cells.append(f"{g.size} ({_pct(g.size / a['n'])}) | {int((g < 0).sum())} / {int((g > 0).sum())} | "
-                         f"{_g(1e3 * float(np.median(g)))} / {_g(1e3 * float(g.mean()))} | {a[k + '_up']}")
-        lines.append(f"| {opt} | {s} | {a['n']} | " + " | ".join(cells) + " |")
+            lines.append(f"| {opt} | {s_} | {n} | {key[0]} | {key[1]} | {g.size} | {int((g < 0).sum())} / "
+                         f"{int((g > 0).sum())} | {_g(1e3 * float(np.median(g)))} / {_g(1e3 * float(g.mean()))} | "
+                         f"{int((g < -RISE_BIG).sum())} / {int((g > RISE_BIG).sum())} |")
     return lines
 
 
@@ -1642,49 +2321,156 @@ def md_e5(results: dict) -> list[str]:
     return lines
 
 
+def md_e6(results: dict) -> list[str]:
+    have = {n: r["e6"] for n, r in results.items() if r.get("e6")}
+    if not have:
+        return []
+    lines = ["## E6 (supplementary): symmetry-projected residual estimates", "",
+             "The exact residual of a state that is even under every grading of the integrals vanishes on the "
+             "forbidden pair-order entries (``grading_mask``; Systems table), so A_est -> mask * A_est is unbiased "
+             "and removes the noise components that drive other irreps (and the round-off leak out of the HF "
+             "block). It costs no shots. Theory: floor x S (Ha x shots) of fixed-step SD from FCI at E1's eps "
+             "(stationary noise_floor and the E1 window), plain and projected, and the stationary floor of the HF "
+             "block alone (``LinearizedCQE.subset``; what a projection onto the full point group of the HF state "
+             "would leave near FCI, e.g. D_inf_h for N2, whose D2h gradings keep the Ag component of Delta_g "
+             "states).", "",
+             "| system | model | gradings | stationary plain / projected (ratio) | window plain / projected (ratio) | "
+             "HF block only (ratio to plain) |", "|---|---|---|---|---|---|"]
+    for name, e in have.items():
+        for model in ("corr", "indep"):
+            t = e["theory"][model]
+            sp, sq = t["plain"]["stationary"], t["projected"]["stationary"]
+            wp, wq = t["plain"]["window"], t["projected"]["window"]
+            lines.append(f"| {name} | {model} | {e['symmetry']['n_gradings']} | {_g(sp)} / {_g(sq)} ({_g(sq / sp)}) | "
+                         f"{_g(wp)} / {_g(wq)} ({_g(wq / wp)}) | {_g(t['hf_block_stationary'])} "
+                         f"({_g(t['hf_block_stationary'] / sp)}) |")
+    lines += ["", "Simulated floor with the projected correlated model (fixed-step SD from FCI, the random streams "
+              "of E1's correlated runs, so the seeds are paired with E1 at the same S): expected is the projected "
+              "window prediction; E1 plain: the unprojected simulated floor of E1 at the same S.", "",
+              "| system | S | expected (projected) | simulated (projected) | ratio | twin | E1 plain simulated | "
+              "simulated projected / plain | s |", "|---|---|---|---|---|---|---|---|---|"]
+    for name, e in have.items():
+        fl = e["floor"]
+        e1 = results[name].get("e1")
+        plain = None
+        if e1:
+            row = next((x for x in e1["direct"]["corr"]["rows"] if x["shots"] == fl["shots"]), None)
+            if row:
+                plain = row
+        ratio = "–"
+        if plain:
+            ps = {i: d["total"] for i, d in enumerate(plain["per_seed"])}
+            rr = [d["total"] / ps[i] for i, d in enumerate(fl["per_seed"]) if i in ps]
+            ratio = _b(band(rr))
+        lines.append(f"| {name} | {_S(fl['shots'])} | {_g(fl['expected_total'])} | {_b(fl['total'])} | "
+                     f"{_b(fl['ratio_total'])} | {_b(fl['twin_ratio_total'], 4)} | "
+                     f"{_b(plain['total']) if plain else '–'} | {ratio} | {_g(fl['seconds'])} |")
+    lines += ["", "Oracle line search from HF with the projected estimate (E2's random streams and seeds: paired "
+              "with E2's unprojected runs). late ratio: geometric mean of paired late-mean ratios, projected / "
+              "plain [95% bootstrap over seeds] (lower/equal/higher); outside HF block: final energy in the coupled "
+              "states outside the HF symmetry block (median).", "",
+              "| system | optimizer | S_res | final: plain / projected | late mean: plain / projected | late ratio | "
+              "j* (residual shots): plain / projected | outside HF block: plain / projected | s |",
+              "|---|---|---|---|---|---|---|---|---|"]
+    for name, e in have.items():
+        e2 = results[name].get("e2")
+        for row in e["oracle"]:
+            base = None
+            if e2:
+                base = next((x for x in e2["rows"] if x["optimizer"] == row["optimizer"] and x["shots"] == row["shots"]),
+                            None)
+            if base is not None and base["runs"] and len(base["runs"][0]["errors"]) != len(row["runs"][0]["errors"]):
+                base = None
+            lr, op, oq = "–", "–", "–"
+            if base:
+                bb = {x["seed"]: x for x in base["runs"]}
+                logs = [math.log(max(x["late_mean"], 1e-12) / max(bb[x["seed"]]["late_mean"], 1e-12))
+                        for x in row["runs"] if x["seed"] in bb]
+                lr = _gm_txt(cluster_gm(logs, list(range(len(logs))), _boot_rng("e6", name, row["optimizer"],
+                                                                                 row["shots"])))
+
+                def outside(runs):
+                    v = [sum(x["sector_final"][k] for k in ("out_null", "out_soft", "out_stiff")) for x in runs
+                         if x.get("sector_final")]
+                    return _g(float(np.median(v))) if v else "–"
+
+                op, oq = outside(base["runs"]), outside(row["runs"])
+            lines.append(
+                f"| {name} | {row['optimizer']} | {_S(row['shots'])} | "
+                f"{_b(base['stats']['final']) if base else '–'} / {_b(row['stats']['final'])} | "
+                f"{_b(base['stats'].get('late_mean')) if base else '–'} / {_b(row['stats']['late_mean'])} | {lr} | "
+                f"{_conv_txt(base.get('conv')) if base else '–'} / {_conv_txt(row['conv'])} | {op} / {oq} | "
+                f"{_g(row['seconds'])} |")
+    rows = [(n, x) for n, e in have.items() for x in e.get("e3", [])]
+    if rows:
+        lines += ["", "The cheapest validated E3 cell with the projected residual (the same fresh seeds, horizon and "
+                  "energy streams).", "",
+                  "| system | cell | j* (shots): plain / projected | P_late: plain / projected | final: plain / "
+                  "projected | s |", "|---|---|---|---|---|---|"]
+        for n, x in rows:
+            u = x["unprojected"]
+            lines.append(f"| {n} | {x['optimizer']}, {x['set']}, ({_S(x['S_res'])}, {_S(x['S_E'])}) | "
+                         f"{_conv_txt(u['conv'])} / {_conv_txt(x['conv'])} | {_pct(u['conv']['p_late'])} / "
+                         f"{_pct(x['conv']['p_late'])} | {_g(u['stats']['final']['median'])} / "
+                         f"{_g(x['stats']['final']['median'])} | {_g(x['seconds'])} |")
+    lines.append("")
+    return lines
+
+
 def cheapest(results: dict) -> dict:
-    """Per system: the E3 cell with the lowest median shots to reach and stay below 1.6 mHa (all seeds ok)."""
+    """Per system: the screening winner (seeds 0..n-1) and the validated cells (fresh seeds, long horizon)."""
     out = {}
     for name, r in results.items():
         e3 = r.get("e3")
         if not e3:
             continue
-        best, by_set, by_opt = None, {}, {}
-        for x in e3["cells"]:
-            st = x["stats"]["shots_stay"]
-            if st["n_ok"] < st["n"]:
-                continue
-            v = st["median"]
-            if best is None or v < best["stats"]["shots_stay"]["median"]:
-                best = x
-            if x["set"] not in by_set or v < by_set[x["set"]]["stats"]["shots_stay"]["median"]:
-                by_set[x["set"]] = x
-            if x["optimizer"] not in by_opt or v < by_opt[x["optimizer"]]["stats"]["shots_stay"]["median"]:
-                by_opt[x["optimizer"]] = x
-        out[name] = {"best": best, "by_set": by_set, "by_opt": by_opt}
+        cells = screen_cells(e3)
+        conv = [x for x in cells if x["conv"]["shots"] is not None]
+        screen = min(conv, key=lambda x: x["conv"]["shots"]) if conv else None
+        val = e3.get("validation") or []
+        vconv = [v for v in val if v["conv"]["shots"] is not None]
+        best = min(vconv, key=lambda v: v["conv"]["shots"]) if vconv else None
+        vstrict = [v for v in val if v["conv"]["strict_shots"] is not None]
+        strict = min(vstrict, key=lambda v: v["conv"]["strict_shots"]) if vstrict else None
+        out[name] = {"screen": screen, "validated": best, "strict": strict, "validation": val,
+                     "selection": e3.get("selection")}
     return out
 
 
-def _cfg(x) -> str:
+def _cfg(x, key: str = "shots") -> str:
     if x is None:
-        return "none reached in all seeds"
-    st = x["stats"]
-    return (f"{x['optimizer']}, {x['set']}, S_res {_S(x['S_res'])}, S_E {_S(x['S_E'])}: "
-            f"{_b(st['shots_stay'])} shots, stay at iteration {_b(st['stay'], kind='it')}")
+        return "none converged"
+    cv = x["conv"]
+    j = cv["j"] if key == "shots" else cv["strict_j"]
+    ci = cv.get("shots_ci") if key == "shots" else None
+    ci_txt = f" [{_g(ci[0])}, {_g(ci[1])}]" if ci else ""
+    return (f"{x['optimizer']}, {x['set']}, ({_S(x['S_res'])}, {_S(x['S_E'])}): {_g(cv[key])}{ci_txt} shots, "
+            f"j* = {j}")
 
 
 def md_summary(results: dict) -> list[str]:
     ch = cheapest(results)
     if not ch:
         return []
-    lines = ["## Summary: the cheapest configuration to reach and stay below 1.6 mHa", "",
+    st0 = next(r["settings"] for r in results.values() if r.get("settings"))
+    w = st0.get("conv_window", CONV_WINDOW)
+    H, Hv, nv = st0.get("e3_iter"), st0.get("e3_validate_iter"), st0.get("e3_validate_seeds")
+    ns = st0.get("seeds")
+    lines = ["## Summary: the cheapest configuration to reach 1.6 mHa and stay there", "",
              "Route and scheme: direct route with matchgate shadows (correlated Gaussian of real snapshots, "
-             "spin-orbital elements) and shifted-DF energies, as in E3. Among the E3 cells in which every seed "
-             "reached and stayed below 1.6 mHa, the one with the lowest median total shots; per candidate set and "
-             "per optimizer the best cell as well. Exact CQE iterations to < 1.6 mHa: exact line search (E2, S = inf) "
-             "and the pos11 candidates without noise (E3), SD / CG / L-BFGS.", "",
-             "| system | exact LS: SD / CG / L-BFGS | pos11 no noise: SD / CG / L-BFGS | cheapest | residual share | "
-             "best per candidate set | best per optimizer |", "|---|---|---|---|---|---|---|"]
+             "spin-orbital elements) and shifted-DF energies, as in E3. Criterion: j*, the first iteration at "
+             f"which at most {100 * CONV_LEVEL:g}% of the seeds are >= 1.6 mHa and from which every window of {w} "
+             f"iterations, pooled over seeds, has at most {100 * CONV_LEVEL:g}% of its errors >= 1.6 mHa (strict: "
+             f"{100 * STRICT_LEVEL:g}%); shots = j* x shots per iteration. Selection: on "
+             f"the screening grid ({ns} seeds, H = {H}); the seed bootstrap of that argmin gives how often each "
+             f"cell is selected. Validation: the selected cells rerun with {nv} fresh seeds and H = {Hv}; the "
+             "reported configuration is the validated cell with the fewest shots (its interval: bootstrap over the "
+             "fresh seeds). Exact CQE iterations to < 1.6 mHa: exact line search (E2, S = inf) and the pos11 "
+             "candidates without noise (E3), SD / CG / L-BFGS.", "",
+             f"| system | exact LS: SD / CG / L-BFGS | pos11 no noise | cheapest validated (H = {Hv}, {nv} fresh "
+             f"seeds) | P_late (iterations {Hv // 2 + 1 if Hv else '–'}-{Hv}) | residual share | strict "
+             f"({100 * STRICT_LEVEL:g}%) | screening winner (H = {H}): selected in | bootstrap 95% of the "
+             "screening minimum |", "|---|---|---|---|---|---|---|---|---|"]
     for name, x in ch.items():
         r = results[name]
         ex = "–"
@@ -1693,26 +2479,50 @@ def md_summary(results: dict) -> list[str]:
                                      not math.isfinite(row["shots"]))["runs"][0]["reach"]) for o in OPTIMIZERS)
         pc = " / ".join(_it(next(m for m in r["e3"]["exact"] if m["optimizer"] == o and m["set"] == "pos11")["reach"])
                         for o in OPTIMIZERS)
-        b = x["best"]
-        share = "–"
-        if b is not None:
-            fr = [run["ledger"]["residual_shots"] / run["ledger"]["total_shots"] for run in b["runs"]]
-            share = _pct(float(np.median(fr)))
-        sets = "<br>".join(f"{s}: {_cfg(x['by_set'].get(s))}" for s in _sets_present(results))
-        opts = "<br>".join(f"{o}: {_cfg(x['by_opt'].get(o))}" for o in OPTIMIZERS)
-        lines.append(f"| {name} | {ex} | {pc} | {_cfg(b)} | {share} | {sets} | {opts} |")
+        v = x["validated"]
+        pl, share = "–", "–"
+        if v is not None:
+            cv = v["conv"]
+            ci = cv.get("p_late_ci")
+            pl = _pct(cv["p_late"]) + (f" [{_pct(ci[0])}, {_pct(ci[1])}]" if ci else "")
+            share = _pct(v["S_res"] / cv["cost_per_iteration"])
+        sc = x["screen"]
+        sel = x["selection"] or {}
+        sc_txt = "none converged" if sc is None else (_cfg(sc) + f"; {_pct(sc.get('selection_freq', 0.0))}")
+        mci = sel.get("min_shots_ci")
+        lines.append(f"| {name} | {ex} | {pc} | {_cfg(v)} | {pl} | {share} | {_cfg(x['strict'], 'strict_shots')} | "
+                     f"{sc_txt} | {('–' if not mci else f'{_g(mci[0])} – {_g(mci[1])}')} |")
+    lines += ["", f"Validated cells (fresh seeds, H = {Hv}; screening values in the last columns). stay: the "
+              "earlier per-seed metric at this horizon (n ok: seeds whose last error is below 1.6 mHa).", "",
+              "| system | optimizer | set | S_res | S_E | shots per iteration | j* | shots to converge [95%] | strict j* "
+              "(shots) | P_late [95%] | final (median) | stay (n ok) | screening j* (shots) | selected in |",
+              "|" + "---|" * 14]
+    for name, x in ch.items():
+        for v in x["validation"]:
+            cv = v["conv"]
+            ci = cv.get("shots_ci")
+            pci = cv.get("p_late_ci")
+            st = v["stats"]
+            sc = v.get("screen", {})
+            lines.append(
+                f"| {name} | {v['optimizer']} | {v['set']} | {_S(v['S_res'])} | {_S(v['S_E'])} | "
+                f"{_g(cv['cost_per_iteration'])} | {_it(cv['j'])} | {_g(cv['shots'])}"
+                + (f" [{_g(ci[0])}, {_g(ci[1])}]" if ci else "") + f" | {_conv_txt({**cv, 'j': cv['strict_j'], 'shots': cv['strict_shots']})} | "
+                f"{_pct(cv['p_late'])}" + (f" [{_pct(pci[0])}, {_pct(pci[1])}]" if pci else "") +
+                f" | {_g(st['final']['median'])} | {_b(st['stay'], kind='it')} ({_ok(st['stay'])}) | "
+                f"{_conv_txt(sc.get('conv'))} | {_pct(sc.get('selection_freq'))} |")
     lines.append("")
     return lines
 
 
 def md_timing(results: dict, total: float) -> list[str]:
-    lines = ["## Runtime (s, one thread)", "", "| system | setup | e1 | e2 | e3 | e4 | e5 | total |",
-             "|---|---|---|---|---|---|---|---|"]
+    lines = ["## Runtime (s, one thread)", "", "| system | setup | e1 | e2 | e3 | e4 | e5 | e6 | total |",
+             "|---|---|---|---|---|---|---|---|---|"]
     for name, r in results.items():
         t = r.get("timing", {})
-        lines.append(f"| {name} | " + " | ".join(_g(t.get(k)) for k in ("setup", "e1", "e2", "e3", "e4", "e5", "total"))
-                     + " |")
-    lines.append(f"| all | | | | | | | {_g(total)} |")
+        lines.append(f"| {name} | " + " | ".join(_g(t.get(k)) for k in ("setup", "e1", "e2", "e3", "e4", "e5", "e6",
+                                                                          "total")) + " |")
+    lines.append(f"| all | | | | | | | | {_g(total)} |")
     lines.append("")
     return lines
 
@@ -1730,6 +2540,7 @@ def markdown(results: dict, settings: dict, total: float) -> str:
     lines += md_e3(results)
     lines += md_e4(results)
     lines += md_e5(results)
+    lines += md_e6(results)
     lines += md_timing(results, total)
     return "\n".join(lines)
 
@@ -1800,6 +2611,9 @@ def run_system(name: str, args) -> dict:
         out["timing"]["e5"] = out["e5"]["seconds"]
         if out.get("e2"):
             out["e2"].pop("trajectories", None)     # stored under e5
+    if "e6" in args.experiments:
+        out["e6"] = run_e6(c, args, out.get("e3"))
+        out["timing"]["e6"] = out["e6"]["seconds"]
     out["timing"]["total"] = time.perf_counter() - t0
     return out
 
@@ -1810,8 +2624,10 @@ def write_outputs(results: dict, args, settings: dict, total: float) -> None:
         fh.write(md + "\n")
     summ = {"settings": settings, "seconds": total,
             "timing": {k: v.get("timing") for k, v in results.items()},
-            "cheapest": {k: {kk: (None if vv is None else {q: vv[q] for q in ("optimizer", "set", "S_res", "S_E", "stats")})
-                             for kk, vv in (("best", v["best"]),)} for k, v in cheapest(results).items()}}
+            "cheapest": {k: {kk: (None if v[kk] is None else
+                                  {q: v[kk][q] for q in ("optimizer", "set", "S_res", "S_E", "iterations", "conv",
+                                                         "stats")})
+                             for kk in ("screen", "validated", "strict")} for k, v in cheapest(results).items()}}
     with open(os.path.join(args.out, "sampled_summary.json"), "w") as fh:
         json.dump(_sanitize(summ), fh, indent=1, default=_json_default)
     print(f"wrote {os.path.join(args.out, 'sampled_summary.md')} ({total:.1f} s)", flush=True)
@@ -1838,19 +2654,23 @@ def summary_only(args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--systems", default=DEFAULT_SYSTEMS, help="comma-separated subset of " + ",".join(SYSTEMS))
-    ap.add_argument("--experiments", default=",".join(EXPERIMENTS), help="comma-separated subset of e1..e5")
+    ap.add_argument("--experiments", default=",".join(EXPERIMENTS), help="comma-separated subset of e1..e6")
     ap.add_argument("--seeds", type=int, default=None, help="seeds per setting (default 5; --quick: 2)")
     ap.add_argument("--seed", type=int, default=2026, help="base seed of every random stream")
     ap.add_argument("--quick", action="store_true", help=f"systems {QUICK_SYSTEMS}, 2 seeds, short runs (< 3 min)")
-    ap.add_argument("--e3-check-shots", default="1e6,1e6", help="S_res,S_E of the E3 energy-variance check")
+    ap.add_argument("--e3-check-shots", default="1e6,1e5", help="S_res,S_E of the E3 energy-variance check")
     ap.add_argument("--e3-sets", default=",".join(CANDIDATE_SETS),
                     help="E3 candidate sets, comma-separated subset of " + ",".join(CANDIDATE_SETS))
-    ap.add_argument("--e3-grid", default=None,
-                    help="E3 (S_res:S_E) points, comma-separated, e.g. 1e6:1e6,1e5:1e7 (default: the preset)")
+    for opt_name, help_ in (("e3-grid", "E3 screening (S_res:S_E) points, e.g. 1e6:1e6,1e5:1e7"),
+                            ("e3-search-grid", "E3 search points (sets of the preset's e3_search_sets)"),
+                            ("e3-ablation-grid", "E3 points of the L-BFGS curvature_tol ablation"),
+                            ("e3-dbl-grid", "E3 screening points at which dbl23 runs")):
+        ap.add_argument(f"--{opt_name}", default=None, help=f"{help_} (default: the preset; 'none' for no points)")
     for opt_name, help_ in (("e1-shots", "E1 shots (correlated model)"), ("e2-shots", "E2 residual shots"),
-                            ("e5-shots", "E5 residual shots")):
+                            ("e5-shots", "E5 residual shots"), ("e6-shots", "E6 residual shots (oracle runs)")):
         ap.add_argument(f"--{opt_name}", default=None, help=f"{help_} (comma-separated; default: the preset)")
-    for opt_name in ("e1-window", "e1-burn", "e2-iter", "e3-iter", "e5-iter"):
+    for opt_name in ("e1-window", "e1-burn", "e2-iter", "e3-iter", "e5-iter", "e6-iter", "e3-validate-cells",
+                     "e3-validate-seeds", "e3-validate-iter", "e3-check-iter", "conv-window"):
         ap.add_argument(f"--{opt_name}", type=int, default=None, help="override the preset")
     ap.add_argument("--no-cache", action="store_true", help="do not read or write <out>/cache")
     ap.add_argument("--summary-only", action="store_true", help="rebuild the markdown from the JSON files in --out")
@@ -1859,18 +2679,25 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     preset = QUICK if args.quick else FULL
     user_seeds = args.seeds
-    overrides = {k: getattr(args, k) for k in ("e1_shots", "e2_shots", "e5_shots",
-                                                "e1_window", "e1_burn", "e2_iter", "e3_iter", "e5_iter")}
-    grid_override = args.e3_grid
+    overrides = {k: getattr(args, k) for k in ("e1_shots", "e2_shots", "e5_shots", "e6_shots", "e1_window",
+                                                "e1_burn", "e2_iter", "e3_iter", "e5_iter", "e6_iter",
+                                                "e3_validate_cells", "e3_validate_seeds", "e3_validate_iter",
+                                                "e3_check_iter", "conv_window")}
+    grids = {k: getattr(args, k) for k in ("e3_grid", "e3_search_grid", "e3_ablation_grid", "e3_dbl_grid")}
     for k, v in preset.items():
         setattr(args, k, v)
     for k, v in overrides.items():
         if v is not None:
             setattr(args, k, tuple(float(x) for x in _names(v)) if isinstance(v, str) else v)
-    if grid_override is not None:
-        args.e3_grid = tuple(tuple(float(y) for y in x.split(":")) for x in _names(grid_override))
-        overrides["e3_grid"] = args.e3_grid
+    for k, v in grids.items():
+        if v is not None:
+            g = () if v.strip().lower() == "none" else tuple(tuple(float(y) for y in x.split(":")) for x in _names(v))
+            setattr(args, k, g)
+            overrides[k] = g
     args.overrides = {k: v for k, v in overrides.items() if v is not None}
+    args.constants = {"lbfgs_curvature_tol": LBFGS_TOL, "lbfgs_curvature_tol_ablation": LBFGS_TOL_ABLATION,
+                      "conv_level": CONV_LEVEL, "strict_level": STRICT_LEVEL, "rise_big": RISE_BIG,
+                      "n_boot": N_BOOT, "candidate_sets": CANDIDATE_SETS}
     args.seeds = preset["seeds"] if user_seeds is None else int(user_seeds)
     if args.quick and args.systems == DEFAULT_SYSTEMS:
         args.systems = QUICK_SYSTEMS
