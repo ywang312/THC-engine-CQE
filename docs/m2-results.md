@@ -118,7 +118,127 @@ block that holds the HF determinant's weight (`linearize(..., sector="hf_block")
 
 ## 3. Measurement cost of the energy and the residual
 
-(workflow B: in progress)
+`benchmarks/run_measurement.py` computes exact per-shot variances along exact CQE
+trajectories, from the qubit layer in `measure/`:
+
+- **Qubit layer.** Jordan–Wigner in two orders, blocked (qubit p + σN) and
+  interleaved (2p + σ, OpenFermion's) (`measure/pauli.py`).
+- **Element sets** (`measure/targets.py`). The residual is measured element by
+  element over 840 spin-orbital or 315 spin-free independent elements at N = 6.
+- **Residual routes** (`measure/routes.py`).
+  - *Aux route.* Â_e = −⟨Q_e⟩/δ on Λ = exp(−iδH)Ψ, with Q_e = (Γ_e − Γ_e†)/(2i).
+    Its bias is (δ²/6)⟨ad³_H Γ_e⟩ + O(δ⁴). Λ is exact, a DF-Trotter product, or
+    a sum over the L + 1 DF fragments (L + 1 states).
+  - *Direct route.* X_e = [Γ_e − Γ_e†, H]/2, unbiased.
+- **Schemes** (`measure/schemes.py`).
+  - QWC: sorted insertion with the optimal shot allocation.
+  - DF basis rotation: L + 1 settings, leaves from pivoted Cholesky or from the
+    eigendecomposition of the ERI supermatrix (eigh), optionally shifted to
+    E_pq − δ_pq.
+  - Pauli shadows and matchgate (fermionic Gaussian) shadows, from exact pair
+    sums, or Rao–Blackwellized where those are too large.
+- **Shots for a relative Frobenius error r:** S = Σ_e m_e v_e / (r²‖A‖² − ‖b‖²),
+  with element multiplicities m_e and route bias b.
+
+**Energy.** Per-shot variance (Ha²) at FCI. The last column is the shots for a
+±1.6 mHa estimate with the best scheme.
+
+| system | QWC blocked / interleaved | DF eigh | DF shifted, Cholesky / eigh | matchgate | Pauli blocked | shots, best |
+|---|---|---|---|---|---|---|
+| H4 | 2.80 / 4.02 | 1.61 | 0.614 / **0.597** | 33.1 | 31.8 | 2.3e5 |
+| H6 (1.0 Å) | 16.2 / 28.1 | 3.06 | 1.23 / **1.19** | 122 | 1015 | 4.7e5 |
+| H6 (1.5 Å) | 15.2 / 25.1 | 1.29 | 0.794 / **0.731** | 72.5 | 1302 | 2.9e5 |
+| H6 | 16.6 / 28.3 | 3.30 | 1.27 / **1.23** | 131 | 996 | 4.8e5 |
+| LiH | 1.05 / 0.852 | 1.40 | **0.606** / 0.905 | 155 | 269 | 2.4e5 |
+| N2 | 4.13 / 3.00 | 0.928 | **0.844** / 0.906 | 224 | 462 | 3.3e5 |
+| H8 | 61.6 / 115 | 5.33 | 2.30 / **2.13** | 337 | 4.5e4 | 8.3e5 |
+
+- **Shifted DF grouping is the cheapest energy measurement** on every system.
+- **QWC needs more.** Its best order costs 1.4× (LiH) to 29× (H8) more. The
+  Jordan–Wigner order alone changes QWC by up to 1.9×.
+- **Shadows cost far more.** Matchgate shadows need 55–270× more; Pauli shadows
+  53× (H4) to 2×10⁴× (H8).
+- **The DF split is not unique.** Cholesky and eigh leaves differ by up to 1.8×.
+  The shift lowers the variance 1.8–2.7× on the hydrogen chains.
+
+**Residual.** Shots for 30% relative error over the full tensor. The aux route
+uses the best δ of {0.01, 0.03, 0.1, 0.3, 0.6} for the bias-aware count; values
+are spin-orbital elements unless marked sf.
+
+| system | M1 SD iterate (E − E_FCI, mHa) | direct, matchgate, sf / spin-orbital | aux exact, matchgate [δ] | aux exact, QWC interleaved | aux DF-Trotter, matchgate | direct, Pauli shadows |
+|---|---|---|---|---|---|---|
+| H4 | 2 (9.19) | 2.9e5 / 5.2e5 | 1.3e6 [0.6] | 2.8e6 | 3.5e7 | 4.8e6 |
+| H4 | 7 (0.373) | 5.7e6 / 1.3e7 | 3.4e7 [0.6] | 7.2e7 | 1.4e9 | 1.2e8 |
+| H6 (1.0 Å) | 2 (19.6) | 2.9e6 / 6.1e6 | 9.4e6 [0.6] | 3.9e7 | 8.7e7 | 3.3e8 |
+| H6 (1.0 Å) | 7 (3.81) | 1.7e7 / 3.6e7 | 5.0e7 [0.6] | 2.1e8 | 1.7e9 | – |
+| LiH | 2 (1.32) | 8.6e7 / 1.8e8 | 6.6e8 [0.3] | 2.6e9 | 4.8e10 | – |
+| LiH | 7 (0.622) | 2.3e8 / 5.0e8 | 8.1e8 [0.6] | 3.2e9 | 1.4e11 | – |
+| N2 | 2 (18.4) | 1.5e6 / 3.3e6 | 1.4e7 [0.6] | 5.8e7 | 2.6e8 | – |
+| N2 | 7 (1.49) | 2.6e7 / 6.4e7 | 1.8e8 [0.6] | 7.6e8 | 6.6e9 | – |
+
+- **Cheapest residual: direct route with matchgate shadows** (unbiased), at
+  every state of every system.
+- **Spin-free elements need half the shots.** They need 0.41–0.56× those of the
+  spin-orbital set for the same relative error. They are also the elements the
+  spin-free generator uses.
+- **Other routes cost more:**
+  - the exact aux route, 1.4–5.6× more, with its bias capping δ;
+  - QWC tomography of the aux targets, another 2–4× on top;
+  - Pauli shadows on the direct route, 9–53×.
+- **DF aux routes are dominated.** DF-Trotter and DF-fragment states add biases
+  that do not vanish with A: 5.0% and 5.3% at δ = 0.1 on the H6 claims state.
+  They cost 14–270× (DF-Trotter) and 10³–10⁵× (DF fragments) more, and become
+  unreachable as ‖A‖ shrinks.
+- **The residual cost grows as the CQE converges.** Shots scale as 1/‖A‖², so
+  the same relative error costs 3–25× more at iterate 7 than at iterate 2. LiH
+  is the costly case: small ‖A‖ and twice the per-element variance of H6.
+  Section 4 shows that a CQE iteration does not need 30% accuracy.
+- **Only symmetry-allowed elements need measuring.** The point-group-forbidden
+  elements vanish exactly, and this benchmark still measures them. The M3
+  design computed the variance of the allowed elements alone: 0.51 (H4), 0.49
+  (H6) and 0.126 (N2) of the total at SD iterate 2. M3 uses the allowed
+  elements only.
+
+**The earlier H6 claims.** All 17 claims hold at the state they were made for,
+the claims' "CQE iteration 2, about 6.6 mHa above FCI". That state is iteration
+2 of steepest descent with the spin-orbital ACSE generator (section 1; 6.558 mHa,
+‖A‖₈₄₀ = 0.0760); the shot counts imply ‖A‖₈₄₀ = 0.0755–0.0761. It is not an
+iterate of our spin-free SD, where iteration 2 is 19.6 mHa above FCI and the
+shot counts are 3× smaller (shots ∝ 1/‖A‖²).
+
+| claim (H6, STO-3G, 1.0 Å unless noted) | claimed | ours | ratio |
+|---|---|---|---|
+| energy variance, QWC (interleaved order) | 28.0 | 27.6 | 0.99 |
+| energy variance, DF (eigh leaves, unshifted) | 3.2 | 3.16 | 0.99 |
+| energy variance, matchgate shadows | 122 | 122 | 1.00 |
+| the same at 1.5 Å: QWC / DF / matchgate | 24.7 / 1.44 / 72.5 | 24.7 / 1.44 / 72.5 | 1.00 / 1.00 / 1.00 |
+| aux route, Var(Im ²D) per element: matchgate / QWC with 854 settings | 5.4 / 36 | 5.32 / 35.2 | 0.99 / 0.98 |
+| aux route, relative bias at δ = 0.1 / 0.3 / 0.6 | 0.2–1% / 2–8% / 6–29% | 0.95% / 8.2% / 28.5% | inside / 1.03× the top / inside |
+| direct route, per-element variance min / mean / max | 7 / 12–16 / 41 | 4.96 / 11.5 / 40.6 | partly |
+| shots for 30%: aux + QWC, δ = 0.1 | 5.9e9 | 5.68e9 | 0.96 |
+| shots for 30%: aux + shadows, δ = 0.1 / 0.3 | 8.7e8 / 9.7e7 | 8.60e8 / 9.56e7 | 0.99 / 0.99 |
+| shots for 30%: direct shadows | 2.6e7 | 1.85e7 | 0.71 |
+| shots per line-search energy, DF, ±1.6 mHa | 1.2e6 | 1.23e6 | 1.03 |
+
+- **Direct-route statistic.** The claimed 7 / 12–16 / 41 are the statistics of
+  the 98 elements with |A_e| > 10⁻³ (98.9% of ‖A‖²): 7.01 / 16.0 / 40.6. The
+  claimed shot count extrapolates that mean to all 840 elements (2.59e7).
+- **Which variant each claim used.**
+  - QWC: the interleaved order. Sorted insertion leaves the order inside exact
+    ties open; random tie orders give 27.9–30.3 and, for the aux targets,
+    839–864 groups, which contains the claimed 854.
+  - DF: unshifted eigh leaves.
+  - The relative bias depends on the trajectory: 0.25% at δ = 0.1 on the
+    spin-free SD iterate with the same energy (5.86 mHa).
+
+**Reproducibility.**
+- **Orbital orientation.** The N2 numbers above use the symmetry-adapted
+  orbitals of section 2. Before, QWC and Pauli-shadow variances changed by
+  35–57% between runs with the BLAS thread count; now the tables are identical
+  with 1 and 2 threads.
+- **Cholesky pivots.** Pivoted Cholesky breaks exact symmetry ties by index
+  (`factor/cholesky.py`). Before, the order of norm-tied leaves, and with it
+  the DF-Trotter product of LiH and N2, followed round-off.
 
 ## 4. The finite-shot CQE
 

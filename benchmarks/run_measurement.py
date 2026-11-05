@@ -126,9 +126,9 @@ pi_x before pi_y, fixed signs), so the N2 numbers are reproducible and hold for 
 N2 numbers of earlier runs used an arbitrary orientation and differ in exactly these quantities. The
 constant ORIENTATION_DEPENDENT (now empty) lists the systems whose builder leaves the orientation to
 round-off; their dependent numbers are marked † and get ORIENTATION_NOTES. LiH's single degenerate pair is
-a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search round-off),
-and the df-trotter values of LiH and N2 depend on the round-off order of their equal-norm Cholesky leaves
-(TRAJECTORY_NOTE: per-element minima up to 1.6%, totals 2e-6, observed).
+a symmetry. The SD iterates themselves are reproducible to about 1e-9 Ha (observed; line-search round-off).
+The df-trotter product follows the order of the Cholesky leaves; ``factor.cholesky_eri`` breaks exact pivot
+ties by index, so the order of LiH's and N2's equal-norm leaves no longer follows round-off (TRAJECTORY_NOTE).
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS
 / MKL_NUM_THREADS, numpy's BLAS threads (effective only if numpy is not loaded yet, as when this file
@@ -266,16 +266,16 @@ TRAJECTORY_NOTE = ("Reproducibility of the states: the SD iterates are reproduci
                    "round-off level changed by at most 3e-5 relative between runs, containers and invocations "
                    "(observed, single thread: h6a and h8 bitwise identical, h4, h6 and h6b at most 3.5e-6, lih 2.8e-5; "
                    "n2 between 1 and 2 BLAS threads at most 3.2e-7), below the printed precision except for the "
-                   "rounding of a last digit, with one exception. The df-trotter product runs over the Cholesky "
-                   "leaves in the order of decreasing norm, and leaves of equal norm (symmetry-equivalent pairs: 4 "
-                   "pairs each for lih and n2, none for the hydrogen chains) keep the order in which the pivoted "
-                   "Cholesky (`factor.cholesky_eri`) picks exactly tied diagonals, which round-off decides (observed: "
-                   "n2's tied leaves 6 and 7 came swapped in one of two processes with 2 BLAS threads; lih's "
-                   "df-trotter QWC per-element minima at delta = 0.6 differ by 0.2-1.6% between two single-thread "
-                   "full runs at every state, HF included, where the input state is the same). Swapping every tied "
-                   "pair changes df-trotter per-element minima by up to 1.6% (lih, QWC blocked, delta = 0.6) and 2e-4 "
-                   "(n2), totals by at most 2e-6 and the bias by at most 1.3e-5 relative (observed at M1 SD iterate "
-                   "2); the exact and df-fragments routes and the DF energy variances do not depend on the order.")
+                   "rounding of a last digit. The df-trotter product runs over the Cholesky leaves in the order of "
+                   "decreasing norm; leaves of equal norm (symmetry-equivalent pairs: 4 pairs each for lih and n2, none "
+                   "for the hydrogen chains) come in the order of their pivots, which `factor.cholesky_eri` fixes by "
+                   "taking the lowest index among exactly tied diagonals. Before that fix round-off decided it "
+                   "(observed: n2's tied leaves 6 and 7 came swapped in one of two processes with 2 BLAS threads; "
+                   "lih's df-trotter QWC per-element minima at delta = 0.6 differed by 0.2-1.6% between two "
+                   "single-thread runs); swapping every tied pair changes df-trotter per-element minima by up to 1.6% "
+                   "(lih, QWC blocked, delta = 0.6) and 2e-4 (n2), totals by at most 2e-6 and the bias by at most "
+                   "1.3e-5 relative (observed at M1 SD iterate 2). The lih and n2 rows here use the fixed order; the "
+                   "exact and df-fragments routes and the DF energy variances do not depend on it.")
 
 
 def build_system(name: str):
