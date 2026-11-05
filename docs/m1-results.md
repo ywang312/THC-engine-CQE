@@ -8,6 +8,15 @@ commands in the README. The systems use STO-3G:
 - LiH at 1.595 Å.
 - N2 CAS(6,6) at 1.098 Å; `n2s` is the same at 2.0 Å.
 
+> **N2 rows updated in M2.** `systems.n2` now builds symmetry-adapted (D2h)
+> orbitals with the degenerate π pairs axis-aligned (see docs/m2-results.md). Before,
+> their orientation was set by round-off and changed with the BLAS thread count.
+> Energies, leaf counts, ranks, DF floors and λ do not depend on it; element counts,
+> CNOT estimates of elementwise compilation and THC fits do. In the symmetry-adapted
+> basis the N2 generators are sparser: 14 [30] instead of 24 [59] canonical elements
+> at 99% (n2s: 16 [35] instead of 25 [57]), and elementwise compilation is 4.4× cheaper
+> per step than leaves instead of 2.2×. The N2 rows below are the regenerated values.
+
 CNOT counts are model estimates (`diagnostics.cost`) for all-to-all connectivity.
 
 ## 1. With a factorized Hamiltonian, measure the energy with the full H
@@ -60,7 +69,7 @@ This has two consequences for a NISQ CQE:
   OpenFermion's penalty rule (`fit_thc(..., penalty="auto")`) lowers λ, at the
   cost of a larger integral error.
 - **N2.** THC struggles here: M = 2N leaves max|ΔV| = 4.6e-2, and M = 3N reaches
-  1.2e-3. DF with L = 18 reaches 2.1e-3.
+  1.4e-3. DF with L = 18 reaches 2.1e-3.
 - **OpenFermion agreement.** λ and Toffoli counts reproduce OpenFermion: FeMoco
   THC λ = 294, DF λ = 294.8, and the `compute_cost` reference values. The
   fault-tolerant pipeline therefore works, but for N ≤ 8 its numbers only check
@@ -89,8 +98,8 @@ Medians over iterations 1–5 of the exact CQE:
 | h6 | 6 | 18 | 9 | 30 | 30 | 18 | 39 [103] |
 | h6s | 6 | 18 | 9 | 30 | 30 | 20 | 76 [204] |
 | lih | 6 | 16 | 8 | 28 | 30 | 14 | 18 [39] |
-| n2 | 6 | 18 | 8 | 26 | 30 | 18 | 24 [59] |
-| n2s | 6 | 18 | 8 | 26 | 30 | 22 | 25 [57] |
+| n2 | 6 | 18 | 8 | 26 | 30 | 18 | 14 [30] |
+| n2s | 6 | 18 | 8 | 26 | 30 | 22 | 16 [35] |
 | h8 | 8 | 32 | 16 | 56 | 56 | 28 | 88 [241] |
 
 ## 4. Compiling a step: elements beat leaves
@@ -101,12 +110,12 @@ Medians over iterations 1–5 of the exact CQE:
 | h6 | 3516 | 1507 | 2.3 | 5052 | 1800 | 2.8 |
 | h6s | 3900 | 2978 | 1.3 | – | – | – |
 | lih | 2268 | 538 | 4.2 | 580 | 101 | 5.7 |
-| n2 | 2452 | 1119 | 2.2 | 3836 | 1335 | 2.9 |
-| n2s | 2916 | 1085 | 2.7 | – | – | – |
+| n2 | 2452 | 554 | 4.4 | 3836 | 878 | 4.4 |
+| n2s | 2916 | 647 | 4.5 | – | – | – |
 | h8 | 9968 | 4401 | 2.3 | – | – | – |
 
 - **Canonical elements win.** Compiling element by element in canonical
-  orbitals needs 1.3–4.2× fewer CNOTs per step at 99%. It needs 2.8–5.7× fewer to
+  orbitals needs 1.3–4.5× fewer CNOTs per step at 99%. It needs 2.8–5.7× fewer to
   reach chemical accuracy, on the four systems where any run gets there.
 - **Localization hurts.** Localizing the orbitals makes the elementwise scheme
   more expensive. Boys localization within the occupied and within the virtual
