@@ -4,9 +4,11 @@ For each system this script linearizes the CQE at the FCI ground state
 (``diagnostics.linearize``, all coupled singlets; see its module docstring) and
 reports the spectrum of K: the smallest and largest stiffness and the number of
 null modes (lambda <= 1e-10 lambda_max), which are contaminations the residual
-does not see at first order. It also linearizes in the sector the exact CQE
-from HF actually populates, i.e. the states with weight > 1e-20 along the
-trajectories of all three optimizers.
+does not see at first order. It also reports the HF symmetry block of K (the
+block holding the HF determinant's weight, ``linearize(..., sector="hf_block")``),
+the sector an exact CQE from HF stays in, and how much weight the exact runs leak
+out of it through amplified round-off (the largest weight outside the block along
+the trajectories of all three optimizers).
 
 The exact CQE then runs from HF with steepest descent, CG and L-BFGS for
 ``--max-iter`` steps (default 60). The final E - E_0 is split into modes:
@@ -102,17 +104,22 @@ def run_system(name: str, args) -> dict:
                                      "lambda_max": float(lam.max()),
                                      "lambda_smallest": [float(x) for x in lam[:8]]},
            "runs": []}
-    trajectories = []
+    from thc_engine_cqe.fci_ops import FCISpace
+
+    in_block = lin.block_of(FCISpace.of(act).hf())
+    blk = lin.subset(in_block, sector="hf_block")
+    leak = [0.0]
     finals = {}
     for opt in OPTIMIZERS:
-        states = []
-        res = run_cqe(act, max_iter=args.max_iter, optimizer=opt, e_exact=lin.e0,
-                      callback=lambda step, ci: states.append(np.asarray(ci).copy()))
-        trajectories.extend(states)
-        finals[opt] = res
-    sec = linearize(act, sector="references", references=trajectories, weight_tol=1e-20)
-    out["trajectory_sector"] = {"n_states": sec.n_states, "n_null": int(sec.null_modes().sum()),
-                                "lambda_min_nonnull": float(sec.stiffness[~sec.null_modes()].min())}
+        def track(step, ci):
+            _, d = lin.amplitudes(ci)
+            leak[0] = max(leak[0], float(np.sum(d[~in_block] ** 2)))
+
+        finals[opt] = run_cqe(act, max_iter=args.max_iter, optimizer=opt, e_exact=lin.e0, callback=track)
+    out["hf_block"] = {"n_states": blk.n_states, "n_null": int(blk.null_modes().sum()),
+                       "lambda_min_nonnull": float(blk.stiffness[~blk.null_modes()].min()),
+                       "lambda_max": float(blk.stiffness.max()), "n_blocks": int(lin.blocks().max() + 1),
+                       "max_weight_outside": leak[0]}
     for opt, res in finals.items():
         split = split_energy(lin, res.ci, args.soft_rtol)
         out["runs"].append({"optimizer": opt, "steps": len(res.steps), "final_error": float(res.errors[-1]),
@@ -139,15 +146,18 @@ def run_system(name: str, args) -> dict:
 def markdown_summary(results: list[dict], args) -> str:
     lines = ["# Linearized CQE at the FCI ground state", "",
              "K = W^{1/2} S W^{1/2} over all singlets coupled to the ground state by a two-body operator "
-             "(diagnostics/linearized.py). Null: lambda <= 1e-10 lambda_max. The trajectory sector is the "
-             "set of states with weight > 1e-20 along the exact SD, CG and L-BFGS runs from HF (it keeps "
-             "the spatial symmetry of HF).", "",
-             "| system | coupled singlets | null | smallest non-null lambda | lambda_max | trajectory sector | null in sector |",
-             "|---|---|---|---|---|---|---|"]
+             "(diagnostics/linearized.py). Null: lambda <= 1e-10 lambda_max. K is block diagonal by spatial "
+             "symmetry; the HF block holds the HF determinant's weight, and an exact CQE from HF stays in it "
+             "up to amplified round-off (last column: the largest weight outside the block along the exact "
+             "SD, CG and L-BFGS runs).", "",
+             "| system | coupled singlets | null | smallest non-null lambda | lambda_max | blocks | HF block | "
+             "null in HF block | smallest non-null lambda in HF block | max weight outside the HF block |",
+             "|---|---|---|---|---|---|---|---|---|---|"]
     for r in results:
-        c, s = r["coupled"], r["trajectory_sector"]
+        c, b = r["coupled"], r["hf_block"]
         lines.append(f"| {r['system']} | {c['n_states']} | {c['n_null']} | {c['lambda_min_nonnull']:.2e} | "
-                     f"{c['lambda_max']:.1f} | {s['n_states']} | {s['n_null']} |")
+                     f"{c['lambda_max']:.1f} | {b['n_blocks']} | {b['n_states']} | {b['n_null']} | "
+                     f"{b['lambda_min_nonnull']:.2e} | {b['max_weight_outside']:.1e} |")
     lines += ["", f"## Where the remaining error sits after {args.max_iter} exact steps from HF", "",
               f"Soft: non-null modes with lambda < {args.soft_rtol:g} lambda_max. Outside: higher orders "
               "and states outside the linearized sector. Energies in Ha.", "",
@@ -191,8 +201,9 @@ def main(argv=None) -> int:
         with open(os.path.join(args.out, f"linearized_{name}.json"), "w") as fh:
             json.dump(res, fh, indent=1)
         c = res["coupled"]
+        b = res["hf_block"]
         print(f"[{name}] coupled={c['n_states']} null={c['n_null']} lam_min={c['lambda_min_nonnull']:.2e} "
-              f"sector={res['trajectory_sector']['n_states']} null_sector={res['trajectory_sector']['n_null']} "
+              f"hf_block={b['n_states']} null_block={b['n_null']} leak={b['max_weight_outside']:.1e} "
               f"({res['seconds']:.1f} s)", flush=True)
     with open(os.path.join(args.out, "linearized_summary.md"), "w") as fh:
         fh.write(markdown_summary(results, args) + "\n")

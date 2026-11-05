@@ -108,17 +108,15 @@ def test_sd_amplitude_map(h4, lin_h4):
 
 def test_n2_null_modes(n2, lin_n2):
     """N2/STO-3G CAS(6,6) at 1.098 A: B has 5 null vectors among the 174 coupled singlets
-    and 3 in the sector the exact CQE from HF populates. Along a null mode ||A|| grows as
-    t^2, along the stiffest mode as t; the exact CQE's remaining error sits in null modes
+    and 3 in the HF symmetry block (17 states). Along a null mode ||A|| grows as t^2,
+    along the stiffest mode as t; the exact CQE's remaining error sits in null modes
     (observed: 98-99% after 60 L-BFGS steps, E - E_0 = 1.8e-4 Ha)."""
     assert lin_n2.n_states == 174
     assert int(lin_n2.null_modes().sum()) == 5
-    traj = []
-    res = run_cqe(n2, max_iter=60, optimizer="lbfgs", r_tol=0.0, e_tol=0.0,
-                  callback=lambda step, ci: traj.append(np.asarray(ci).copy()))
-    for tol in (1e-20, 1e-12):
-        sec = linearize(n2, sector="references", references=traj, weight_tol=tol)
-        assert int(sec.null_modes().sum()) == 3
+    block = linearize(n2, sector="hf_block")
+    assert block.n_states == 17 and block.sector == "hf_block"
+    assert int(block.null_modes().sum()) == 3
+    res = run_cqe(n2, max_iter=60, optimizer="lbfgs", r_tol=0.0, e_tol=0.0)
     null = lin_n2.null_modes()
     shares = lin_n2.mode_energies(res.ci)
     err = Hamiltonian(n2).energy(res.ci) - lin_n2.e0
@@ -200,3 +198,26 @@ def test_bias_offset_predicts_the_biased_fixed_point(h4, lin_h4):
     got = lin_h4.mode_energies(res.ci)["per_mode"]
     assert np.allclose(got[-5:], w_modes[-5:] ** 2, rtol=0.03, atol=1e-10)
     assert abs(got.sum() / pred["energy"] - 1) < 0.05
+
+def test_k_blocks_are_symmetry_sectors(h4, lin_h4, n2, lin_n2):
+    """K is block diagonal by spatial symmetry. The blocks (graph components of |K| > 1e-8 max|K|)
+    are separated by round-off only (off-block |K| <= 1e-9 max|K|), and the HF determinant's
+    weight lies in one block: 11 of the 19 coupled H4 singlets and 17 of the 174 N2 singlets
+    (symmetry-adapted N2 orbitals). subset() re-diagonalizes K on the block, whose spectrum is a
+    subset of the full one. An exact CQE from HF stays in the HF block up to amplified round-off
+    (observed along 60 L-BFGS steps: weight outside it below 2e-7 for N2), which is why the
+    weight-based "references" sector is not used to count null modes."""
+    hf = FCISpace.of(h4).hf()
+    for lin, hfci, n_block in ((lin_h4, hf, 11), (lin_n2, FCISpace.of(n2).hf(), 17)):
+        lab = lin.blocks()
+        k = np.abs(lin.kmatrix())
+        off = lab[:, None] != lab[None, :]
+        assert k[off].max() <= 1e-9 * k.max()
+        mask = lin.block_of(hfci)
+        assert int(mask.sum()) == n_block and np.unique(lab[mask]).size == 1
+        _, d = lin.amplitudes(hfci)
+        assert np.all(d[~mask] == 0.0) or np.abs(d[~mask]).max() < 1e-10 * np.abs(d).max()
+        sub = lin.subset(mask)
+        full = np.sort(lin.stiffness)
+        for lam in sub.stiffness:
+            assert np.min(np.abs(full - lam)) <= 1e-9 * max(full.max(), 1.0)

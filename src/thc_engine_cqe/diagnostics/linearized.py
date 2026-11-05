@@ -38,10 +38,20 @@ does not see at first order: ||A|| grows only quadratically along it, and the CQ
 can remove it only through higher-order terms. Observed for N2/STO-3G CAS(6,6)
 at 1.098 A (tests/test_linearized.py checks the counts and the scaling):
 
-- B has 5 null vectors among the 174 coupled singlets, and 3 among the states
-  the exact CQE from HF populates.
+- B has 5 null vectors among the 174 coupled singlets, and 3 of them lie in the
+  HF symmetry block (17 states; ``sector="hf_block"``).
 - After 60 L-BFGS steps, more than 90% of the remaining E - E_0 (about 1.8e-4 Ha)
   lies in those null modes.
+
+K is block diagonal by spatial symmetry: transition RDMs to states of different
+irreps are orthogonal. :meth:`LinearizedCQE.blocks` returns the blocks as the
+connected components of the graph |K_ij| > rtol max|K|, and the block holding the
+HF determinant's weight is the sector an exact CQE from HF stays in. In floating
+point the exact CQE leaks out of it: round-off contamination of other irreps is
+amplified by steps beyond the stability limit of their stiff modes (observed along
+60 exact L-BFGS steps: weight outside the HF block up to 2e-7 for N2 and H6, 2e-4
+for N2 at 2.0 A). A sector defined by a weight threshold along the trajectory
+(``sector="references"``) therefore depends on round-off; the HF block does not.
 
 Two predictions for runs with estimated residuals (``noise_floor``,
 ``bias_offset``):
@@ -253,6 +263,55 @@ class LinearizedCQE:
         return {"total": float(per_mode.sum()), "per_mode": per_mode,
                 "undriven": null & ~driven_null, "stable": stable}
 
+    def blocks(self, rtol: float = 1e-8) -> np.ndarray:
+        """Block labels of K: the connected components of the graph |K_ij| > rtol max|K|.
+
+        Labels are 0, 1, ... in the order of each block's first state. Each block is a
+        spatial-symmetry sector, up to accidental degeneracies (degenerate eigenstates
+        of different irreps may come out mixed and join their blocks).
+        """
+        from scipy.sparse.csgraph import connected_components
+
+        if self.n_states == 0:
+            return np.zeros(0, dtype=int)
+        k = np.abs(self.kmatrix())
+        _, lab = connected_components(k > rtol * k.max(), directed=False)
+        _, first = np.unique(lab, return_index=True)
+        relabel = np.empty(first.size, dtype=int)
+        relabel[np.argsort(np.argsort(first))] = np.arange(first.size)
+        return relabel[lab]
+
+    def block_of(self, ci: np.ndarray, rtol: float = 1e-8, weight_rtol: float = 1e-12) -> np.ndarray:
+        """Mask of the states in the block(s) of K that hold the weight of ``ci``.
+
+        A block holds the weight if one of its states has d_k^2 > weight_rtol max d^2.
+        With the HF determinant this is the HF symmetry block, the sector an exact
+        CQE from HF stays in (up to amplified round-off; see the module docstring).
+        """
+        _, d = self.amplitudes(ci)
+        w = d**2
+        lab = self.blocks(rtol)
+        if w.size == 0 or w.max() == 0.0:
+            return np.zeros(self.n_states, bool)
+        return np.isin(lab, np.unique(lab[w > weight_rtol * w.max()]))
+
+    def subset(self, mask: np.ndarray, sector: str | None = None) -> "LinearizedCQE":
+        """The linearization restricted to the states in ``mask`` (K re-diagonalized)."""
+        mask = np.asarray(mask, bool)
+        if mask.shape != (self.n_states,):
+            raise ValueError(f"mask must have shape ({self.n_states},)")
+        coupling = self.coupling[mask]
+        energies = self.energies[mask]
+        wh = np.sqrt(energies - self.e0)
+        lam, u = np.linalg.eigh(wh[:, None] * (coupling @ coupling.T) * wh[None, :])
+        info = dict(self.info, n_selected=int(mask.sum()))
+        if "coupling_norms" in info:
+            info["coupling_norms"] = np.asarray(info["coupling_norms"])[mask]
+        return LinearizedCQE(active=self.active, e0=self.e0, psi0=self.psi0, energies=energies,
+                             states=self.states[mask], coupling=coupling,
+                             stiffness=np.clip(lam, 0.0, None), modes=u,
+                             sector=sector or f"{self.sector}[subset]", info=info)
+
     def bias_offset(self, bias: np.ndarray, rcond: float = 1e-10) -> dict:
         """Energy offset of the fixed point under a residual bias b (N^4 entries):
         y* = -B^+ b, energy ||y*||^2, per mode (aligned with ``stiffness``)."""
@@ -275,8 +334,13 @@ def linearize(active: ActiveSpace, *, spin_square: float | None = 0.0, root: int
       spatial symmetry; spin-free generators keep S^2.
     - "all": every state of the spin sector.
     - "references": states with weight > ``weight_tol`` in at least one of the
-      CI vectors ``references``, e.g. an exact CQE trajectory, which stays in
-      the symmetry sector of its start.
+      CI vectors ``references``, e.g. an exact CQE trajectory. In exact
+      arithmetic such a trajectory stays in the symmetry sector of its start, but
+      amplified round-off leaks out of it, so this set depends on ``weight_tol``
+      and on round-off (module docstring).
+    - "hf_block": the coupled states in the block(s) of K that hold the HF
+      determinant's weight (:meth:`LinearizedCQE.block_of`, rtol ``coupling_rtol``),
+      i.e. the HF symmetry sector. It does not depend on round-off.
     """
     energies, states, _ = dense_eigenstates(active, spin_square=spin_square, max_dim=max_dim)
     if root >= energies.size - 1:
@@ -293,7 +357,7 @@ def linearize(active: ActiveSpace, *, spin_square: float | None = 0.0, root: int
         _, dm2 = trans_rdm12(space, psi0, states[k].reshape(space.shape))
         coupling[i] = (dm2 - dm2.transpose(1, 0, 3, 2)).ravel()
     norms = np.linalg.norm(coupling, axis=1)
-    if sector == "coupled":
+    if sector in ("coupled", "hf_block"):
         sel = norms > coupling_rtol * norms.max()
     elif sector == "all":
         sel = np.ones(others.size, bool)
@@ -313,6 +377,9 @@ def linearize(active: ActiveSpace, *, spin_square: float | None = 0.0, root: int
     lam = np.clip(lam, 0.0, None)    # K = B^T B is positive semidefinite; clip round-off
     info = {"n_sector_states": int(energies.size - 1), "n_selected": int(sel.sum()),
             "coupling_norms": norms[sel]}
-    return LinearizedCQE(active=active, e0=e0, psi0=psi0, energies=e_sel,
-                         states=states[others[sel]], coupling=coupling, stiffness=lam,
-                         modes=u, sector=sector, info=info)
+    lin = LinearizedCQE(active=active, e0=e0, psi0=psi0, energies=e_sel,
+                        states=states[others[sel]], coupling=coupling, stiffness=lam,
+                        modes=u, sector=sector, info=info)
+    if sector == "hf_block":
+        lin = lin.subset(lin.block_of(space.hf(), rtol=coupling_rtol), sector="hf_block")
+    return lin
