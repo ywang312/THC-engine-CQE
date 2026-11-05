@@ -5,10 +5,12 @@ search direction d and moves along Psi(eps) = exp(eps D) Psi,
 D = sum d[p,q,r,s] e_{pq,rs}, with an exact line search. The default direction
 is steepest descent, d = g = conj(A), optionally compressed by a user callback;
 ``optimizer="cg"`` or ``"lbfgs"`` selects the conjugate-gradient or L-BFGS
-directions of :mod:`thc_engine_cqe.optimizers`. This is the reference
-trajectory against which compressed and noisy variants are compared.
-``run_cqe(..., eps_candidates=...)`` replaces the exact line search by a choice
-among a few fixed step sizes, as on hardware.
+directions of :mod:`thc_engine_cqe.optimizers`, and ``metric="spin_orbital"``
+preconditions any of them with the metric of the standard spin-orbital ACSE
+generator (for singlets, steepest descent then is the standard spin-orbital
+CQE). This is the reference trajectory against which compressed and noisy
+variants are compared. ``run_cqe(..., eps_candidates=...)`` replaces the exact
+line search by a choice among a few fixed step sizes, as on hardware.
 
 Estimator hooks. ``residual_estimator`` and ``energy_estimator`` substitute
 estimates (for example from a finite-shot noise model) for the exact residual
@@ -59,7 +61,8 @@ class CQEStep:
     n_energy_evals counts the energies E(eps) the line search evaluated in this
     step (exact search: grid and refinement points of every bracket; candidates:
     one per candidate); the energy of the current state is not counted.
-    optimizer_info is the optimizer's diagnostics dict (None for "sd").
+    optimizer_info is the optimizer's diagnostics dict (None for "sd" with the
+    default metric; it carries "metric" when the metric is not the default).
     """
 
     iteration: int
@@ -84,8 +87,13 @@ class CQEStep:
     def captured_descent(self) -> float:
         """slope / full_slope: fraction of the steepest-descent rate retained.
 
-        For "cg" and "lbfgs" this ratio of exact slopes can exceed 1 (observed
-        up to 2.6 in benchmarks/run_optimizers.py).
+        full_slope is always that of the unpreconditioned d = g. For "cg" and
+        "lbfgs" this ratio of exact slopes can exceed 1 (observed up to 2.6 in
+        benchmarks/run_optimizers.py); for "sd" with metric "spin_orbital" and
+        the exact residual it is <g, M g>/<g, g>, between 1/3 and 1. With a
+        residual_estimator it is <g, d>/<g, g> for the direction d built from
+        A_est (for "sd" with metric "spin_orbital", <g, M g_est>/<g, g> with
+        g_est = conj(A_est)), which has neither bound and can be negative.
         """
         return self.slope / self.full_slope if self.full_slope != 0 else 0.0
 
@@ -98,6 +106,7 @@ class CQEResult:
     e_exact: Optional[float] = None
     converged: bool = False
     optimizer: str = "sd"
+    metric: str = "spin_free"
 
     @property
     def energies(self) -> np.ndarray:
@@ -306,17 +315,20 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             eps_candidates: Sequence[float] | None = None, optimizer: str = "sd",
             optimizer_options: Mapping | None = None,
             residual_estimator: ResidualEstimator | None = None,
-            energy_estimator: EnergyEstimator | None = None) -> CQEResult:
+            energy_estimator: EnergyEstimator | None = None,
+            metric: str = "spin_free") -> CQEResult:
     """Run the exact CQE from ``ci0`` (default: the Hartree-Fock determinant).
 
     With the default arguments this is the M1 steepest-descent CQE, bit for bit.
 
     Args:
         compress: optional callback returning compressed generator coefficients
-            (steepest descent only). If the compressed generator is not a
-            descent direction its sign is flipped; if its slope vanishes the run
-            stops. With a residual_estimator it receives g = conj(A_est) and the
-            exact ResidualData.
+            (steepest descent with the default metric only; NotImplementedError
+            otherwise). If the compressed generator is not a descent direction
+            its sign is flipped; if its slope vanishes the run stops. With a
+            residual_estimator it receives g = conj(A_est) and the exact
+            ResidualData. To compress the spin-orbital direction, compose:
+            compress=lambda g, rd, it: f(optimizers.apply_metric(g, "spin_orbital"), rd, it).
         e_exact: reference energy stored on the result (e.g. FCI) for errors.
         callback: called as callback(step, ci_after) after every iteration.
         eps_candidates: fixed step sizes. If given, each step evaluates the energy
@@ -334,6 +346,15 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             step 6 on and ends 0.74 Ha above FCI after 60 steps; adding 0.0125
             keeps it monotone. The benchmark's default 0.00625 * 2^k,
             k = 0..10, served all three optimizers on those systems.
+            With metric "spin_orbital" the directions are shorter (M has the
+            eigenvalues 1 and 1/3) and the steps longer. Observed on the same
+            systems plus H6 at 1.0 A (two benchmark runs, on different
+            machines): first step 0.12-0.38 (d = M g for every optimizer);
+            later steps, 10-90% ranges per system, 0.035-0.35 for "sd",
+            0.06-0.8 for "cg" and 0.5-8.5 for "lbfgs" (15-20 of 427 L-BFGS steps
+            above 6.4, the largest 1.9e3 on N2; spin-free L-BFGS has 15 of 431).
+            The default set still contains every exact "sd" and "cg" step of
+            both metrics.
             Candidates may be zero or negative. Zero keeps the current state; its
             energy (and estimate) is the current one, not evaluated again and not
             counted in n_energy_evals. A negative eps steps against d, which can
@@ -342,13 +363,43 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             estimators, a second consecutive zero step along the same direction
             stops the run unconverged, since every later step would repeat it.
         optimizer: the search direction (:mod:`thc_engine_cqe.optimizers`):
-            "sd" (steepest descent d = g = conj(A), the default), "cg" (nonlinear
-            conjugate gradient, Polak-Ribiere+ by default) or "lbfgs" (L-BFGS in
-            the local coordinates). Each call starts a fresh optimizer; the first
-            "cg" and "lbfgs" direction is g. The line search is the same for all.
+            "sd" (steepest descent d = g = conj(A), the default; d = M g with a
+            metric), "cg" (nonlinear conjugate gradient, Polak-Ribiere+ by
+            default) or "lbfgs" (L-BFGS in the local coordinates). Each call
+            starts a fresh optimizer; the first "cg" and "lbfgs" direction is
+            the "sd" direction of the same metric. The line search is the same
+            for all.
         optimizer_options: keyword arguments of the optimizer: "cg" takes
             beta ("pr+" | "fr") and restart; "lbfgs" takes memory (default 10)
             and curvature_tol (default 1e-12); "sd" takes none.
+        metric: the metric (preconditioner) M of every optimizer
+            (optimizers.METRICS, optimizers.apply_metric). "spin_free"
+            (default): M = I, the M1/M2 directions bit for bit.
+            "spin_orbital": M = (2 I + T)/3 with (T X)[p,q,r,s] = X[p,s,r,q],
+            symmetric positive definite on the residual's structured space
+            (eigenvalues 1 and 1/3). For singlet states, sum (M g) e is exactly
+            the standard spin-orbital ACSE generator (Smart & Mazziotti,
+            PRL 126, 070504 (2021))
+            sum_{ijkl} conj(2A^{ij}_{kl}) a+_i a+_j a_l a_k,
+            2A^{ij}_{kl} = <[a+_i a+_j a_l a_k, H]>, in the full-sum
+            convention: i, j, k, l run independently over all 2N spin orbitals,
+            with no prefactor (the convention of the Mazziotti group's HQCA
+            code; optimizers module docstring). "sd" is then the standard
+            spin-orbital CQE, and eps_candidates multiply that full-sum
+            generator; a generator summed over i < j, k < l only is a quarter
+            of it and needs 4 eps for the same step. "cg" uses z = M g
+            (preconditioned Polak-Ribiere+ or Fletcher-Reeves, restarts d = z);
+            "lbfgs" uses H_0 = gamma M with gamma = <s, y>/<y, M y> and d = M g
+            with an empty memory. For non-singlet states sum (M g) e is the spin
+            average of the spin-orbital generator, not the generator itself.
+            The same holds with a residual_estimator: if A_est is the spin
+            contraction (measure.targets.contract_spin) of a spin-orbital
+            estimate 2A_est, sum (M conj(A_est)) e is the spin-averaged
+            (S^2-conserving) projection of the spin-orbital generator built
+            from 2A_est, for any state and estimation error, not that raw
+            estimated generator, whose non-singlet error components would
+            change <S^2>. The metric is recorded in CQEResult.metric and, when
+            not the default, in optimizer_info.
         residual_estimator: optional callable (rd, ci, iteration) -> A_est, the
             estimated pair-order residual of the current state. rd is a copy of
             the exact ResidualData and ci a copy of the normalized current CI
@@ -387,9 +438,13 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
     energy_estimator("current"), then (unless the run stops) one
     energy_estimator("candidate") call per candidate.
     """
-    opt = make_optimizer(optimizer, optimizer_options)
+    opt = make_optimizer(optimizer, optimizer_options, metric=metric)
     if compress is not None and opt.name != "sd":
         raise NotImplementedError("compress is implemented only for optimizer='sd' (out of scope for M2)")
+    if compress is not None and opt.metric != "spin_free":
+        raise NotImplementedError("compress is implemented only for metric='spin_free'; to compress the "
+                                  "spin-orbital direction, apply optimizers.apply_metric(g, 'spin_orbital') "
+                                  "inside the compressor")
     if energy_estimator is not None:
         if eps_candidates is None:
             raise ValueError("energy_estimator requires eps_candidates: the exact line search "
@@ -398,7 +453,7 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
     ham = Hamiltonian(active)
     space = ham.space
     psi = space.hf() if ci0 is None else normalize(np.asarray(ci0).reshape(space.shape))
-    result = CQEResult(active=active, e_exact=e_exact, optimizer=opt.name)
+    result = CQEResult(active=active, e_exact=e_exact, optimizer=opt.name, metric=opt.metric)
     with_res_est = residual_estimator is not None
     zero_step_dir = None
     for it in range(max_iter):

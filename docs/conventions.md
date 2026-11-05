@@ -86,7 +86,39 @@ reference trajectory; it converges slowly in the tail (it zig-zags).
 Ψ ← exp(ε D)Ψ, D = Σ d·e. Both work in the local coordinates of the current
 iterate, with gradient −conj(A) and the real inner product Re Σ conj(u) v
 (`thc_engine_cqe.optimizers`; this is the "locally parameterized" quasi-Newton
-CQE of Smart, Boyn & Mazziotti, JCTC 18, 5286 (2022)). With
+CQE of Smart, Boyn & Mazziotti, JCTC 18, 5286 (2022)).
+`run_cqe(..., metric="spin_orbital")` preconditions any of the three with the
+metric M = (2I + T)/3, (TX)[p,q,r,s] = X[p,s,r,q] (`optimizers.apply_metric`);
+the default `metric="spin_free"` is M = I, which reproduces the M1 and M2
+directions bit for bit. On tensors with the structure of A, M is symmetric
+positive definite, with eigenvalue 1 on T = +1 (singlet-coupled pairs) and 1/3 on
+T = −1 (triplet-coupled pairs). For a singlet state
+
+  Σ_{ijkl} conj(²A^{ij}_{kl}) a†_i a†_j a_l a_k = Σ_pqrs [M g]_pqrs e_{pq,rs},  ²A^{ij}_{kl} = ⟨[a†_i a†_j a_l a_k, H]⟩,
+
+with i, j, k, l running independently over all 2N spin orbitals and no
+prefactor: the full-sum convention. So steepest descent with this metric is the
+standard spin-orbital CQE of Smart & Mazziotti, PRL 126, 070504 (2021), and fixed
+step sizes ε multiply the full-sum generator. A sum over i < j, k < l is a
+quarter of it, so in that convention the same step is 4ε. The full-sum
+convention is the one of the Mazziotti group's HQCA code (github.com/damazz/HQCA,
+commit 5733356: `hqca/acse/_quant_A_acse.py` turns every element of the full
+(2N)⁴ residual tensor, measured with the unnormalized 2-RDM, into one term of the
+generator, and the Euler step multiplies it by ε; details in the `optimizers`
+module docstring). The PRL's own generator equation was not checked. The
+identity is tested as an operator identity on the Fock space of H4.
+Equivalently, M⁻¹ is the Gram matrix of the e_{pq,rs} in the Euclidean inner
+product of spin-orbital amplitudes (a triplet-pair amplitude multiplies three
+M_S components), so this is steepest descent in the metric of the spin-orbital
+amplitudes.
+With the metric, CG builds β from z = M g (preconditioned Polak–Ribière+ or
+Fletcher–Reeves) and L-BFGS starts from H₀ = γM, γ = ⟨s, y⟩/⟨y, My⟩. For a
+non-singlet state Σ (M g)·e is only the spin average of the spin-orbital
+generator, and that generator does not commute with S². The same holds for an
+estimated residual: if A_est is the spin contraction
+(`measure.targets.contract_spin`) of a spin-orbital estimate ²A_est, then
+Σ (M conj(A_est))·e is the spin average of Σ conj(²A_est^{ij}_{kl}) a†_i a†_j a_l a_k
+for any state and any estimation error, not that estimated generator itself. With
 `run_cqe(..., eps_candidates=...)` each step instead takes the lowest energy among
 a few fixed step sizes, as a hardware run would; such steps can raise the energy.
 Candidates may be zero (stay) or negative (step against d, useful when a noisy
