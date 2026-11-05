@@ -60,27 +60,47 @@ fixed-step SD step maps y = W^{1/2}d by I − (ε/2)K, with:
 
 In these coordinates E − E₀ = Σ y². The eigenvalues λ of K are the stiffnesses
 of the CQE modes. A null vector of B is a contamination the residual does not
-see at first order (`diagnostics/linearized.py`; `benchmarks/run_linearized.py`):
+see at first order (`diagnostics/linearized.py`; `benchmarks/run_linearized.py`).
+K is block diagonal by spatial symmetry, and an exact CQE from HF stays in the
+block that holds the HF determinant's weight (`linearize(..., sector="hf_block")`):
 
-| system | coupled singlets | null modes | smallest non-null λ | λ_max | sector reached from HF | null modes in it |
-|---|---|---|---|---|---|---|
-| H4 | 19 | 0 | 5.4e-2 | 64.9 | 19 | 0 |
-| H6 | 174 | 0 | 1.9e-6 | 135 | 174 | 0 |
-| H6 (1.0 Å) | 174 | 0 | 2.7e-6 | 125 | 174 | 0 |
-| H6s | 174 | 0 | 1.1e-5 | 66 | 174 | 0 |
-| LiH | 104 | 0 | 1.4e-6 | 122 | 83 | 0 |
-| N2 | 174 | 5 | 2.8e-6 | 154 | 149 | 3 |
-| N2s | 174 | 5 | 2.5e-7 | 95 | 174 | 5 |
+| system | coupled singlets | null modes | smallest non-null λ | λ_max | HF symmetry block | null modes in it | weight outside it, 60 exact steps |
+|---|---|---|---|---|---|---|---|
+| H4 | 19 | 0 | 5.4e-2 | 64.9 | 11 | 0 | 6e-12 |
+| H6 | 174 | 0 | 1.9e-6 | 135 | 91 | 0 | 2e-7 |
+| H6 (1.0 Å) | 174 | 0 | 2.7e-6 | 125 | 91 | 0 | 4e-7 |
+| H6s | 174 | 0 | 1.1e-5 | 66 | 91 | 0 | 1e-5 |
+| LiH | 104 | 0 | 1.4e-6 | 122 | 30 | 0 | 3e-10 |
+| N2 | 174 | 5 | 2.8e-6 | 154 | 17 | 3 | 4e-7 |
+| N2s | 174 | 5 | 2.5e-7 | 95 | 17 | 3 | 3e-4 |
+
+- **Round-off leaves the symmetry block.** In exact arithmetic the CQE keeps the
+  point-group symmetry of HF. In floating point, contamination of other irreps
+  is amplified whenever a step exceeds 4/λ for their stiff modes, so the exact
+  runs carry 1e-12 to 3e-4 of weight outside the HF block after 60 steps (last
+  column; maximum over SD, CG and L-BFGS). An earlier version of this table
+  counted the states with weight above 1e-20 along the runs as the "sector
+  reached from HF" (149 states for N2); that count measured amplified round-off,
+  not the reachable sector. Section 4 shows that under shot noise this symmetry
+  breaking becomes a real cost.
+- **N2 orbitals.** `systems.n2` now builds symmetry-adapted (D2h) orbitals with
+  the degenerate π pairs axis-aligned (`systems.canonical_orbitals`). Before,
+  their orientation was set by round-off and changed with the BLAS thread count;
+  none of the numbers in this section depend on it, but measurement costs do
+  (section 3).
 
 - **N2 has exact null modes.** Along a null mode ‖A‖ grows as t², not t: halving
   t divides it by 4.00, against 2.00 along the stiffest mode (tested). Such
   contamination can leave only through higher-order terms.
 - **Where N2's remaining error sits.** After 60 exact L-BFGS steps it is
   1.83e-4 Ha, and 1.82e-4 of it lies in the null modes. That energy is set in
-  the first ten steps and then barely moves: 1.82e-4 after 300 L-BFGS steps and
-  1.33e-4 after 2000. Under steepest descent it even grows, from 1.5e-4 to
-  1.8e-4, while the other modes decay. This is the N2 plateau reported by the
-  optimizer benchmark.
+  the first ten steps and then barely moves for a hundred more: 1.82e-4 after
+  100 L-BFGS or CG steps. Only higher-order terms lower it after that, slowly and
+  in a way that depends on round-off: after 2000 steps 1.67e-4 (L-BFGS) and
+  6.8e-5 (CG), against 1.33e-4 for L-BFGS with the earlier, arbitrarily oriented
+  π orbitals. Under steepest descent it even grows, from 1.5e-4 to 1.8e-4, while
+  the other modes decay. This is the N2 plateau reported by the optimizer
+  benchmark.
 - **The other systems have soft modes.** With condition numbers λ_max/λ_min of
   10⁶–10⁸, their slow tails sit in the soft modes (λ < 10⁻³ λ_max) after
   60 CG/L-BFGS steps: 81–93% of the remaining error for H6, H6 (1.0 Å), H6s and
