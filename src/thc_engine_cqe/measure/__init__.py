@@ -4,11 +4,14 @@
              sparse qubit states (QubitState)
     targets  measurement targets: element sets of the residual, the energy target and
              the auxiliary-state (Q_e) and direct (X_e) residual operators
+    schemes  measurement schemes (QWC grouping, DF basis rotation, Pauli and matchgate
+             shadows): exact per-shot variances, Rao-Blackwellized and Monte Carlo estimates
     routes   residual routes: auxiliary states (exact, DF-Trotter, DF fragments),
-             infinite-shot estimates (bias), shot counts
+             infinite-shot estimates (bias), per-shot variances of both routes under
+             the schemes, shot counts
 
-The conventions are documented in the docstring of :mod:`.pauli`; the targets and
-routes in those of :mod:`.targets` and :mod:`.routes`.
+The conventions are documented in the docstring of :mod:`.pauli`; the targets,
+schemes and routes in those of :mod:`.targets`, :mod:`.schemes` and :mod:`.routes`.
 """
 
 from .pauli import (
@@ -43,6 +46,27 @@ from .routes import (
     direct_residual_variance,
     exact_residual,
     shots_for_relative_error,
+)
+from .schemes import (
+    SCHEMES,
+    QWCGrouping,
+    VarianceResult,
+    combine_independent,
+    df_variance,
+    df_variance_mc,
+    matchgate_covered,
+    matchgate_lambda,
+    matchgate_p_both,
+    matchgate_shadow_variance,
+    pauli_bases,
+    pauli_shadow_covered,
+    pauli_shadow_variance,
+    perfect_matchings,
+    qwc_grouping,
+    qwc_variance,
+    random_matchings,
+    rotate_to_basis,
+    scheme_variance,
 )
 from .targets import (
     KINDS,
@@ -96,6 +120,26 @@ __all__ = [
     "aux_targets",
     "direct_targets",
     "aux_estimates",
+    # schemes
+    "SCHEMES",
+    "VarianceResult",
+    "QWCGrouping",
+    "qwc_grouping",
+    "qwc_variance",
+    "pauli_shadow_variance",
+    "matchgate_shadow_variance",
+    "scheme_variance",
+    "df_variance",
+    "df_variance_mc",
+    "combine_independent",
+    "matchgate_lambda",
+    "matchgate_p_both",
+    "matchgate_covered",
+    "pauli_shadow_covered",
+    "random_matchings",
+    "perfect_matchings",
+    "pauli_bases",
+    "rotate_to_basis",
     # routes
     "METHODS",
     "df_fragments",

@@ -2,10 +2,10 @@
 
 The targets and their post-processing are defined in
 :mod:`thc_engine_cqe.measure.targets`; this module prepares the auxiliary states,
-evaluates the infinite-shot estimates (the bias of each route) and converts
-per-shot variances into shot counts. The per-shot variances of the routes under
-the measurement schemes (``aux_residual_variance``, ``direct_residual_variance``)
-are wired to ``measure/schemes.py`` separately; see the stubs at the end.
+evaluates the infinite-shot estimates (the bias of each route), computes the
+per-shot variances of the routes under the measurement schemes of
+:mod:`thc_engine_cqe.measure.schemes` (:func:`aux_residual_variance`,
+:func:`direct_residual_variance`) and converts per-shot variances into shot counts.
 
 States are real CI vectors (exact CQE iterates with real orbitals).
 :func:`aux_residual` and :func:`exact_residual` accept a real vector times a global
@@ -61,34 +61,67 @@ exponentials on H4).
 Shot cost of the routes
 -----------------------
 Every auxiliary state carries the full per-shot variance of the target -Q_e/delta.
-For each scheme of ``measure/schemes.py`` (QWC, Pauli and matchgate shadows) the
-per-shot variance on a state Lambda is sum_jk w_jk <P_j P_k>_Lambda minus a
-quadratic form in the means <P_j>_Lambda, with real weights w_jk and only
-commuting pairs (P_j, P_k) of Pauli strings of the Q_e. Q_e = -i (Gamma_e -
-Gamma_e^T)/2 is an imaginary matrix with real Pauli coefficients, so its strings
-are imaginary and every such P_j P_k is real symmetric. By conj Lambda(delta) =
-Lambda(-delta) (parity argument above), <P_j P_k>_Lambda is even in delta and
-<P_j>_Lambda is odd: the per-shot variance on Lambda equals that on Psi up to
-O(delta^2), however small the fragment that turns Psi into Lambda. Hence:
+The schemes of ``measure/schemes.py`` (QWC, Pauli and matchgate shadows) build
+their per-shot (per-snapshot) variances from blocks, one per QWC group or one
+for a shadow ensemble, of the form sum_jk w_jk <P_j P_k>_Lambda minus a quadratic
+form in the means <P_j>_Lambda, with real weights w_jk and commuting pairs
+(P_j, P_k) of the Pauli strings of the Q_e. Q_e = -i (Gamma_e - Gamma_e^T)/2 is an
+imaginary matrix with real Pauli coefficients, so its strings are imaginary and
+every such P_j P_k is real symmetric. By conj Lambda(delta) = Lambda(-delta)
+(parity argument above), <P_j P_k>_Lambda is even in delta and <P_j>_Lambda is
+odd: every block, and with it the per-shot variance on Lambda, equals its value
+on Psi up to O(delta^2), however small the fragment that turns Psi into Lambda.
+Hence:
 
 * ``"exact"`` and ``"df-trotter"`` cost about the variance V(Psi) of one state.
 * ``"df-fragments"`` measures L + 1 states, each with about V(Psi); with the
   optimal allocation over the states, total = (sum_l sqrt V_l)^2 ~ (L + 1)^2 V(Psi).
   A leaf's first-order term <[Gamma_e, H_l]> shrinks with the leaf, its share of
-  the variance does not. Observed for H6 at 1.0 A (CQE iterate 2, L = 20, each Q_e
-  measured alone in its eigenbasis): (sum_l sqrt V_l)^2 / V_exact = 441.0 at
-  delta = 0.01 and 438-441 up to delta = 0.6, against (L + 1)^2 = 441, for both
-  element sets. The first-order terms of single fragments are larger than A
-  (observed ||a_1|| = 14 ||A||) and cancel in the sum. The relation is tested on
-  H4 (L = 10).
+  the variance does not. This is tested on H4 (L = 10) with each Q_e measured
+  alone in its eigenbasis. With the same proxy, observed for H6 at 1.0 A (CQE
+  iterate 2, L = 20): (sum_l sqrt V_l)^2 / V_exact = 441.0 at delta = 0.01 and
+  438-441 up to delta = 0.6, against (L + 1)^2 = 441, for both element sets.
+  Observed with the exact variances of ``measure/schemes.py``:
+  (sum_l sqrt V_l)^2 / ((L + 1)^2 V_exact) = 0.994-1.000 on H4 (QWC, Pauli and
+  matchgate shadows; delta = 0.1 and 0.6; both element sets) and 0.9999 for H6 at
+  1.0 A (QWC, delta = 0.1). The first-order terms of single fragments are larger
+  than A and cancel in the sum (observed ||a_1|| = 14 ||A|| for the largest leaf,
+  H6 spin-orbital set).
 * Truncating the factorization removes leaves that add variance and almost no
-  signal. Observed with ``df=double_factorize(active.eri, tol=1e-6)``: H6 keeps
-  L = 15 of 20 leaves (1.0 A and 1.8 bohr), so (L + 1)^2 drops from 441 to 256,
-  with a first-order truncation bias of 4e-6 to 5e-6 ||A|| (spin-orbital set,
-  iterate 2) and a route bias that changes by 0.3% or less at delta >= 0.01;
-  H4 keeps 9 of 10 leaves; LiH (21 leaves) and N2 CAS(6,6) (20) keep all.
-  ``aux_residual(..., df=df) - exact_residual(...)`` includes the truncation
-  bias, because :func:`exact_residual` uses the exact ERIs.
+  signal. Observed with ``df=double_factorize(active.eri, tol=1e-6)`` (Cholesky
+  stopped at a largest remaining diagonal of 1e-6): H6 keeps L = 15 of 20 leaves
+  (1.0 A and 1.8 bohr), so (L + 1)^2 drops from 441 to 256, and the first-order
+  truncation bias ||A[eri_DF] - A|| is 4.1e-6 to 5.0e-6 ||A|| (both element sets,
+  iterate 2); the route bias of "df-trotter" and "df-fragments" changes by at most
+  0.35% at delta >= 0.01, and by +60% to +104% at delta = 1e-3, where the
+  truncation bias is comparable to it. H4 at 1.8 bohr keeps 9 of 10 leaves; LiH
+  (21 leaves) and N2 CAS(6,6) (20) keep all.
+  ``aux_residual(..., df=df) - exact_residual(...)`` includes the truncation bias,
+  because :func:`exact_residual` uses the exact ERIs.
+* Fragment-specific step sizes (a larger delta_l for a smaller leaf) would cut
+  the cost of the small leaves; they are not implemented.
+
+Per-shot variances of the routes (:func:`aux_residual_variance`, :func:`direct_residual_variance`)
+-----------------------------------------------------------------------------------------------
+Both functions return a ``schemes.VarianceResult`` whose ``total`` is the per-shot
+sum_e Var(A_hat_e) and whose ``expectation`` is the infinite-shot estimate.
+
+* Aux route: the vector target [-Q_e / delta] (post-processing folded in, so
+  every variance carries 1/delta^2) on ``QubitState.from_ci`` of each auxiliary
+  state, with ``schemes.scheme_variance``. For "df-fragments" the L + 1 states
+  are independent experiments whose estimates add up; ``schemes.combine_independent``
+  gives the optimal allocation across them, total = (sum_l sqrt V_l)^2, nested
+  with the optimal allocation over the settings of each state. The expectation
+  equals :func:`aux_residual` (tested).
+* Direct route: the vector target X_e of ``targets.direct_targets`` on
+  ``QubitState.from_ci`` of Psi; the expectation is the exact residual (tested).
+
+The scheme options pass through (``method="mc"`` simulates the actual
+measurements, which validates the wiring end to end on H4; tested). The scheme
+code builds a dense table of <P(x, z)> for every z once per state whenever it
+fits (``measure.schemes``, "Expectation values"); for the 840 H6 Q_e this table
+takes 0.25-0.5 s per call against 2-20 ms for the pair sums themselves
+(observed), so df-fragments calls cost about (L + 1) times that.
 
 Shots (:func:`shots_for_relative_error`)
 ----------------------------------------
@@ -105,14 +138,16 @@ switch to the Frobenius norm of the full tensor.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Sequence
 
 import numpy as np
 
 from ..fci_ops import FCISpace, Hamiltonian, expm_apply, one_body
 from ..residual import compute_residual
+from . import schemes
 from .pauli import QubitMapping, QubitState, coefficient_matrix
-from .targets import _as_elements, _check_kind, aux_estimates, aux_targets, element_set
+from .targets import _as_elements, _check_kind, aux_estimates, aux_targets, direct_targets, element_set
 
 __all__ = [
     "METHODS",
@@ -345,7 +380,7 @@ def shots_for_relative_error(total_variance, A, rel: float, bias=None, *, weight
     to round-off (S diverges as ||bias|| -> rel ||A|| from below). The per-element
     inputs (and ``weights``) must be 1-D with one common shape, every input finite,
     the variances real and non-negative, the weights non-negative and ``rel``
-    positive and finite (ValueError otherwise).
+    positive and finite (ValueError otherwise; TypeError for non-numeric input).
     """
     rel = float(rel)
     if not (np.isfinite(rel) and rel > 0):
@@ -395,35 +430,169 @@ def shots_for_relative_error(total_variance, A, rel: float, bias=None, *, weight
 
 
 # ---------------------------------------------------------------------------
-# Scheme wiring (benchmark agent, spec_B.md B3). These need measure/schemes.py,
-# which this module does not import yet. The stubs fix the names and contracts.
+# Scheme wiring (spec_B.md B3): per-shot variances of the two routes under the
+# measurement schemes of measure/schemes.py ("Per-shot variances of the routes"
+# in the module docstring).
 # ---------------------------------------------------------------------------
-def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **opts):
-    """STUB (benchmark agent): per-shot variance of the aux-route estimator under a scheme.
+def _check_scheme(scheme: str) -> str:
+    if scheme not in schemes.SCHEMES:
+        raise ValueError(f"scheme must be one of {schemes.SCHEMES} for the residual routes (DF basis "
+                         f"rotation measures the energy only: schemes.df_variance), got {scheme!r}")
+    return scheme
 
-    Contract (spec_B.md B3): returns the ``schemes.VarianceResult`` of
-    A_hat_e = -Q_hat_e / delta over ``elements``. For ``"exact"`` and
-    ``"df-trotter"``: the vector target [-Q_e / delta] (``targets.aux_targets``)
-    on the auxiliary state ``QubitState.from_ci(norb, nelec, aux_states(...)[0],
-    mapping)``. For ``"df-fragments"``: the same target on every fragment state,
-    with the per-fragment totals V_l combined by the optimal shot allocation
-    across fragments, total = (sum_l sqrt(V_l))^2, about (L + 1)^2 times the
-    single-state total ("Shot cost" in the module docstring; report L, e.g.
-    ``df.n_leaves``, with every df-fragments number). ``df`` (``opts``) is passed
-    to :func:`aux_states`. Real Psi only (``_real_ci``).
+
+def _check_mapping(mapping: QubitMapping | None, norb: int) -> QubitMapping:
+    mapping = QubitMapping(norb) if mapping is None else mapping
+    if not isinstance(mapping, QubitMapping):
+        raise TypeError(f"mapping must be a QubitMapping, got {type(mapping).__name__}")
+    if mapping.norb != norb:
+        raise ValueError(f"mapping has norb={mapping.norb}, active space {norb}")
+    return mapping
+
+
+def _shared_rng(opts: dict, n_states: int) -> dict:
+    """One Generator for all states, so that their Monte Carlo draws are independent."""
+    if n_states > 1 and "seed" in opts and not isinstance(opts["seed"], np.random.Generator):
+        opts = dict(opts, seed=np.random.default_rng(opts["seed"]))
+    return opts
+
+
+def aux_residual_variance(active, ci, delta, method, elements, kind, scheme, **opts):
+    """Per-shot variance of the aux-route estimator A_hat_e = -Q_hat_e / delta under a scheme.
+
+    The vector target is [-Q_e / delta] over ``elements`` (``targets.aux_targets(elements,
+    mapping, kind)``, each divided by -delta, so the post-processing is folded in), and
+    each auxiliary state Lambda_l of :func:`aux_states` is measured as
+    ``QubitState.from_ci(norb, nelec, Lambda_l, mapping)`` with
+    ``schemes.scheme_variance(targets, state, scheme, **scheme_options)``:
+
+    * ``"exact"`` and ``"df-trotter"``: one state; the result is that call's
+      :class:`~.schemes.VarianceResult`.
+    * ``"df-fragments"``: L + 1 independent experiments whose estimates are summed.
+      ``schemes.combine_independent`` allocates the shots across them optimally, so
+      ``total`` = (sum_l sqrt V_l)^2 with V_l the per-state totals (for QWC the global
+      optimum over all (L + 1) n_G settings), ``per_target`` = sum_l v_{l,e} / f_l,
+      ``allocation`` = the fractions f_l per state, ``n_settings`` = the sum over the
+      states, and ``scheme`` = "combined"; ``info["parts"]`` holds the per-state
+      results (and their per-setting allocations). The total is about (L + 1)^2 times
+      that of one state ("Shot cost of the routes"); report L (``info["n_leaves"]``)
+      with every df-fragments number.
+
+    ``total`` and ``per_target`` are per shot (S shots give sum_e Var(A_hat_e) =
+    total / S) and include the 1/delta^2 of the post-processing. ``expectation`` is the
+    infinite-shot estimate: it equals :func:`aux_residual` (tested), so
+    ``expectation - exact_residual(...)`` is the route bias.
+
+    Args:
+        active, ci, delta, method, elements, kind: as for :func:`aux_residual`
+            (``elements=None``: ``targets.element_set(N, kind)``). Real Psi only, up to
+            a global phase (the parity argument and the estimator assume it).
+        scheme: one of ``schemes.SCHEMES`` ("qwc", "pauli_shadow", "matchgate_shadow").
+        **opts: the route options ``mapping`` (QubitMapping, default blocked; QWC and
+            Pauli shadows depend on the order), ``df`` and ``states`` (as for
+            :func:`aux_residual`). Every other keyword goes to the scheme, e.g.
+            ``method`` ("exact"/"auto" by default; "mc" simulates the measurements,
+            n <= 14 for the shadows), ``n_shots``/``n_snapshots``/``n_settings`` and
+            ``seed``. For QWC the grouping of the targets is computed once (unless a
+            ``grouping`` is passed) and used for every state. With several states a
+            ``seed`` that is not a Generator becomes one Generator shared by the
+            states, so their Monte Carlo draws are independent.
+
+    ``info`` additions: ``route`` ("aux"), ``route_method``, ``delta``, ``kind``,
+    ``scheme``, ``order`` (of the mapping), ``n_states`` and ``n_leaves`` (L of the
+    factorization; None for "exact").
     """
-    raise NotImplementedError("aux_residual_variance is added by the benchmark agent "
-                              "(spec_B.md B3); it wires routes.py to measure/schemes.py")
+    space = FCISpace(active.norb, active.nelec)
+    ci = _real_ci(ci, space)
+    delta = _check_delta(delta)
+    _check_method(method)
+    _check_kind(kind)
+    _check_scheme(scheme)
+    norb = active.norb
+    el = element_set(norb, kind) if elements is None else _as_elements(elements, kind, norb)
+    if el.shape[0] == 0:
+        raise ValueError("need at least one element")
+    mapping = _check_mapping(opts.pop("mapping", None), norb)
+    df = opts.pop("df", None)
+    states = opts.pop("states", None)
+    n_leaves = None
+    if method != "exact":
+        if states is None and df is None:
+            from ..factor import double_factorize
+
+            df = double_factorize(np.asarray(active.eri))      # the default of aux_states
+        if df is not None:
+            n_leaves = int(df.n_leaves)
+        elif method == "df-fragments":
+            n_leaves = len(states) - 1
+    if states is None:
+        states = aux_states(active, ci, delta, method, df=df)
+    else:
+        states = _check_states(states, space)
+    ops = [(-q) / delta for q in aux_targets(el, mapping, kind)]
+    if scheme == "qwc" and opts.get("grouping") is None:
+        opts["grouping"] = schemes.qwc_grouping(ops)
+    opts = _shared_rng(opts, len(states))
+    parts = [schemes.scheme_variance(ops, QubitState.from_ci(norb, active.nelec, lam, mapping), scheme, **opts)
+             for lam in states]
+    res = parts[0] if len(parts) == 1 else schemes.combine_independent(parts)
+    info = dict(res.info)
+    info.update(route="aux", route_method=method, delta=delta, kind=kind, scheme=scheme, order=mapping.order,
+                n_states=len(parts), n_leaves=n_leaves)
+    return dataclasses.replace(res, info=info)
 
 
 def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
-    """STUB (benchmark agent): per-shot variance of the direct-route estimator A_hat_e = X_hat_e.
+    """Per-shot variance of the direct-route estimator A_hat_e = X_hat_e under a scheme.
 
-    Contract (spec_B.md B3): the ``schemes.VarianceResult`` of the vector target
-    ``targets.direct_targets(elements, active, mapping, kind)`` on
-    ``QubitState.from_ci(norb, nelec, ci, mapping)`` (real Psi), exact for small
-    targets and Rao-Blackwellized Monte Carlo for H6-size targets (about 1.6e6
-    Pauli terms, observed).
+    The vector target X_e = [Gamma_e - Gamma_e^dagger, H]/2
+    (``targets.direct_targets(elements, active, mapping, kind)``; identity
+    post-processing) measured on Psi = ``QubitState.from_ci(norb, nelec, ci, mapping)``:
+    the :class:`~.schemes.VarianceResult` of ``schemes.scheme_variance(X, Psi, scheme,
+    **scheme_options)``. ``expectation`` = <X_e>_Psi = A_e, the exact residual (tested).
+    Real Psi only, up to a global phase (``_real_ci``): for complex Psi, <X_e> is Re A_e.
+
+    Cost: the X_e have up to three-body terms (H6: 1.6e6 Pauli terms over 36,474
+    strings, 1.68e9 term pairs for the 840 spin-orbital X_e; observed). With the
+    scheme's default ``method="auto"``, matchgate shadows use the Rao-Blackwellized
+    estimate above 2e7 pairs (default 2e4 settings; standard errors in ``stderr`` and
+    ``per_target_stderr``), and Pauli shadows always use the exact pair sums (89-99 s
+    for the 840 spin-orbital X_e at H6, 198 s for the 315 spin-free ones; observed,
+    one thread), because their Rao-Blackwellized estimate is heavy-tailed
+    (``measure.schemes``).
+
+    Args:
+        active, ci, elements, kind: as for :func:`exact_residual` (``elements=None``:
+            ``targets.element_set(N, kind)``).
+        scheme: one of ``schemes.SCHEMES``.
+        **opts: the route options ``mapping`` (QubitMapping, default blocked),
+            ``hamiltonian`` (a prebuilt qubit Hamiltonian of ``mapping``, passed to
+            ``direct_targets``) and ``targets`` (the X_e of ``direct_targets(elements,
+            active, mapping, kind)``, to reuse them for several states; only their
+            number and qubit count are checked). Every other keyword goes to the
+            scheme (``method``, ``n_settings``, ``rel_stderr``, ``seed``, ``max_pairs``, ...).
+
+    ``info`` additions: ``route`` ("direct"), ``kind``, ``scheme`` and ``order``.
     """
-    raise NotImplementedError("direct_residual_variance is added by the benchmark agent "
-                              "(spec_B.md B3); it wires routes.py to measure/schemes.py")
+    space = FCISpace(active.norb, active.nelec)
+    ci = _real_ci(ci, space)
+    _check_kind(kind)
+    _check_scheme(scheme)
+    norb = active.norb
+    el = element_set(norb, kind) if elements is None else _as_elements(elements, kind, norb)
+    if el.shape[0] == 0:
+        raise ValueError("need at least one element")
+    mapping = _check_mapping(opts.pop("mapping", None), norb)
+    hamiltonian = opts.pop("hamiltonian", None)
+    ops = opts.pop("targets", None)
+    if ops is None:
+        ops = direct_targets(el, active, mapping, kind, hamiltonian=hamiltonian)
+    else:
+        ops = list(ops)
+        if len(ops) != el.shape[0] or any(o.n_qubits != mapping.n_qubits for o in ops):
+            raise ValueError(f"targets must be the {el.shape[0]} X_e of direct_targets(elements, active, "
+                             f"mapping, kind) on {mapping.n_qubits} qubits")
+    res = schemes.scheme_variance(ops, QubitState.from_ci(norb, active.nelec, ci, mapping), scheme, **opts)
+    info = dict(res.info)
+    info.update(route="direct", kind=kind, scheme=scheme, order=mapping.order)
+    return dataclasses.replace(res, info=info)

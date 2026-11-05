@@ -17,6 +17,7 @@ Q_e = (G_e - G_e^dag)/(2i) and X_e = [G_e - G_e^dag, H]/2 = i[Q_e, H] with
 G_e = a+_i a+_j a_l a_k from ``jw_rdm2_elements``.
 """
 
+import contextlib
 import functools
 import itertools
 import math
@@ -219,6 +220,15 @@ def test_input_validation(rng):
     h = jw_hamiltonian(get_system("h2")[0], m)
     with pytest.raises(ValueError, match="Hermitian"):
         qwc_variance(h + PauliSum(4, [1], [0], [1j]), st)
+    # Hermiticity is checked per target: a small anti-Hermitian target next to a large Hermitian one
+    # is rejected (it used to be accepted and silently replaced by its real part, here 0)
+    with pytest.raises(ValueError, match="Hermitian.*target 1"):
+        qwc_variance([10 * h, PauliSum(4, [3], [0], [1e-11j])], st)
+    # ... while round-off imaginary parts are accepted and dropped (relative to the target, or below
+    # 1e-14 of the largest coefficient overall)
+    noisy = [h + PauliSum(4, [3], [0], [1e-17j], tol=0), PauliSum(4, [3], [0], [1e-16 + 1e-16j], tol=0)]
+    r = qwc_variance([h] + noisy, st)
+    assert np.isclose(r.per_target[1], r.per_target[0], rtol=1e-12)
     with pytest.raises(ValueError, match="normalized"):
         pauli_shadow_variance(h, st * 2.0)
     with pytest.raises(ValueError, match="qubits"):
@@ -229,6 +239,27 @@ def test_input_validation(rng):
         pauli_shadow_variance(h, st, method="dense")
     with pytest.raises(ValueError, match="normalized"):
         df_variance(get_system("h2")[0], 2 * get_system("h2")[2])
+    # explicit local bases must measure every qubit in X, Y or Z: (bx | bz) == 2^n - 1 (unmeasured
+    # qubits used to be accepted and gave -0.06 +- 0 against an exact 2.85)
+    for bad in ([(0, 0)] * 10, [(0b0111, 0)], [(0b11111, 0)], [(-1, 15)]):
+        with pytest.raises(ValueError, match="every one of the 4 qubits"):
+            pauli_shadow_variance(h, st, method="rb", settings=bad)
+    # constant targets (identity only, or zero) cost nothing in every scheme and method
+    for const in (PauliSum.identity(4, 2.5), PauliSum.zero(4)):
+        c0 = const.identity_coefficient().real
+        for method in ("exact", "mc"):
+            q = qwc_variance(const, st, method=method, n_shots=100, seed=1)
+            assert q.total == 0 and q.n_settings == 0 and np.array_equal(q.per_target, [0.0])
+            assert np.isclose(q.expectation[0], c0)
+            if method == "mc":
+                assert q.stderr == 0 and np.array_equal(q.per_target_stderr, [0.0])
+                assert np.isclose(q.info["sample_mean"][0], c0)
+        for fn in (pauli_shadow_variance, matchgate_shadow_variance):
+            for method in ("exact", "rb", "mc"):
+                r = fn(const, st, method=method, n_settings=50, n_snapshots=100, seed=1)
+                assert r.total == 0 and np.isclose(r.expectation[0], c0)
+    mixed = qwc_variance([h, PauliSum.identity(4, 2.5)], st, method="mc", n_shots=1000, seed=2)
+    assert mixed.per_target[1] == 0 and mixed.per_target_stderr[1] == 0 and mixed.per_target[0] > 0
 
 
 # ================================================================= QWC
@@ -236,7 +267,8 @@ def test_input_validation(rng):
 def test_qwc_groups_partition_the_terms_and_commute_qubitwise(order):
     """Every non-identity string is in exactly one group, members commute qubit-wise, the union
     string of a group is its measured basis, and the assignment is sorted-insertion first-fit
-    (re-derived here by a naive member-by-member implementation)."""
+    (re-derived here by a naive member-by-member implementation) in the order of decreasing weight,
+    with round-off ties (consecutive sorted weights within 1e-10 of the largest) in canonical order."""
     act, _, _ = get_system("h4")
     m = QubitMapping(4, order)
     for target in (jw_hamiltonian(act, m), aux_ops(m, spin_orbital_elements(4))):
@@ -251,13 +283,20 @@ def test_qwc_groups_partition_the_terms_and_commute_qubitwise(order):
             assert np.all(qubitwise_commutes(xa, za, xb, zb))
             assert np.bitwise_or.reduce(g.xs[mem]) == g.group_x[gi]
             assert np.bitwise_or.reduce(g.zs[mem]) == g.group_z[gi]
-        # sorted insertion: decreasing sum_e |W_ej|; naive first-fit gives the same groups
+        # sorted insertion: decreasing sum_e |W_ej|, tie classes in canonical order; naive first-fit
+        # gives the same groups
         ops = [target] if isinstance(target, PauliSum) else target
         wsum = np.zeros(g.xs.size)
         for op in ops:
             idx = np.searchsorted((g.xs << np.uint64(32)) | g.zs, (op.xs << np.uint64(32)) | op.zs)
             wsum[idx] += np.abs(op.coeffs)
-        assert np.all(np.diff(wsum[g.order]) <= 1e-15)
+        cand = [j for j in range(g.xs.size) if not ident[j]]
+        by_weight = sorted(cand, key=lambda j: -wsum[j])
+        tie_class = {by_weight[0]: 0}
+        for prev, cur in zip(by_weight, by_weight[1:]):
+            tie_class[cur] = tie_class[prev] + int(wsum[prev] - wsum[cur] > 1e-10 * wsum[by_weight[0]])
+        assert list(g.order) == sorted(cand, key=lambda j: (tie_class[j], j))
+        assert max(tie_class.values()) < len(cand) - 1          # there are ties (alpha/beta partners)
         naive, groups = np.full(g.xs.size, -1), []
         for j in g.order:
             for gi, mem in enumerate(groups):
@@ -269,6 +308,55 @@ def test_qwc_groups_partition_the_terms_and_commute_qubitwise(order):
                 groups.append([j])
                 naive[j] = len(groups) - 1
         assert np.array_equal(naive, g.group)
+
+
+def test_qwc_grouping_is_insensitive_to_coefficient_round_off(rng):
+    """Mathematically equal weights tie, so relative perturbations of every coefficient by 1e-15 or
+    1e-13 leave the grouping and the variance unchanged (H4 energy, both orders; 17 H4 aux targets).
+    Before the tie rule the order of tied strings followed their round-off: perturbations of 4e-16
+    changed the H4 energy variance by up to 22% (37-41 groups instead of 39; observed)."""
+    act, _, ci = get_system("h4")
+    for order in ORDERS:
+        m = QubitMapping(4, order)
+        st = QubitState.from_ci(4, act.nelec, ci, m)
+        for target in (jw_hamiltonian(act, m), aux_ops(m, spin_orbital_elements(4)[::9], scale=-10.0)):
+            ops = [target] if isinstance(target, PauliSum) else target
+            ref = qwc_variance(target, st)
+            for rel in (1e-15, 1e-15, 1e-15, 1e-13, 1e-13):
+                pert = [PauliSum(8, o.xs, o.zs, o.coeffs * (1 + rel * rng.standard_normal(o.n_terms))) for o in ops]
+                r = qwc_variance(pert[0] if isinstance(target, PauliSum) else pert, st)
+                assert np.array_equal(r.info["grouping"].group, ref.info["grouping"].group)
+                assert np.allclose(r.per_target, ref.per_target, rtol=1e-10)
+
+
+def openfermion_hamiltonian(act, order):
+    """H from OpenFermion: jordan_wigner(get_fermion_operator(InteractionOperator)), as a PauliSum."""
+    of = pytest.importorskip("openfermion")
+    from openfermion.chem.molecular_data import spinorb_from_spatial
+
+    ob, tb = spinorb_from_spatial(act.h1, np.asarray(act.eri.transpose(0, 2, 3, 1), order="C"))
+    if order == "blocked":                                  # spinorb_from_spatial is interleaved
+        perm = np.array([2 * p + s for s in (0, 1) for p in range(act.norb)])
+        ob, tb = ob[np.ix_(perm, perm)], tb[np.ix_(perm, perm, perm, perm)]
+    op = of.InteractionOperator(act.ecore, ob, 0.5 * tb)
+    return PauliSum.from_openfermion(of.jordan_wigner(of.get_fermion_operator(op)), 2 * act.norb, tol=1e-12)
+
+
+def test_qwc_grouping_is_the_same_for_openfermions_hamiltonian():
+    """H6 at 1.0 A built by OpenFermion's Jordan-Wigner transform has the same strings as
+    jw_hamiltonian, with coefficients that differ by round-off (up to 2.1e-15, in 351 and 364 of 919
+    terms; observed). The groupings are identical: 204 (blocked) and 312 (interleaved) groups. Before
+    the tie rule they differed in both orders (interleaved: 314 groups from jw_hamiltonian, 312 from
+    OpenFermion; observed)."""
+    act = systems.hydrogen_chain(6, 1.0, "angstrom")
+    for order in ORDERS:
+        mine = jw_hamiltonian(act, QubitMapping(6, order))
+        theirs = openfermion_hamiltonian(act, order)
+        assert np.array_equal(mine.xs, theirs.xs) and np.array_equal(mine.zs, theirs.zs)
+        assert mine.allclose(theirs, atol=1e-13) and np.any(mine.coeffs != theirs.coeffs)
+        a, b = qwc_grouping(mine), qwc_grouping(theirs)
+        assert np.array_equal(a.group, b.group) and np.array_equal(a.order, b.order)
+        assert a.n_groups == {"blocked": 204, "interleaved": 312}[order]
 
 
 def test_qwc_single_group_reproduces_the_plain_variance(rng):
@@ -322,6 +410,12 @@ def test_rotate_to_basis_matches_kronecker_rotations(rng):
                 v = gates[-1]
                 assert np.allclose(v @ _LETTER[(xb, zb)] @ v.conj().T, _Z)
         assert np.allclose(rotate_to_basis(psi, bx, bz), kron_all(gates) @ psi)
+    # the row-vectorized rotation of the Pauli-shadow validator applies the same gates row by row
+    rows = np.stack([random_state(4, rng).to_dense() for _ in range(40)])
+    bx, bz = rng.integers(0, 16, (2, 40)).astype(np.uint64)            # X, Y, Z and unmeasured letters
+    out = schemes._rotate_rows(rows, bx, bz)
+    for r in range(40):
+        assert np.allclose(out[r], rotate_to_basis(rows[r], int(bx[r]), int(bz[r])), atol=1e-14)
 
 
 @pytest.mark.parametrize("order", ORDERS)
@@ -414,6 +508,90 @@ def test_qwc_monte_carlo_agrees_with_exact(order):
     assert_within(mc2.info["sample_mean"], mc2.info["sample_mean_stderr"], ex2.expectation)
 
 
+def _spread_ratio(est, se):
+    """SD of the estimates over seeds divided by the mean reported standard error (per column)."""
+    est, se = np.asarray(est, dtype=float), np.asarray(se, dtype=float)
+    return est.std(axis=0, ddof=1) / se.mean(axis=0)
+
+
+def _calibration(est, se, ref):
+    """(SD / mean stderr per column, SD of the pooled z-scores, scalar?) over seeds (rows).
+
+    Columns whose standard error is 0 for every seed must be exact (|x - <x>| constant per shot, e.g.
+    a single string with <P> = 0); they are checked for that and left out of the ratios."""
+    est, se = np.asarray(est, dtype=float), np.asarray(se, dtype=float)
+    scalar = est.ndim == 1
+    est, se = est.reshape(est.shape[0], -1), se.reshape(se.shape[0], -1)
+    ref = np.broadcast_to(np.atleast_1d(np.asarray(ref, dtype=float)), est.shape[1:])
+    exact = np.all(se == 0, axis=0)
+    assert np.allclose(est[:, exact], ref[exact], rtol=1e-12, atol=1e-12)
+    est, se, ref = est[:, ~exact], se[:, ~exact], ref[~exact]
+    return _spread_ratio(est, se), float(((est - ref) / se).std(ddof=1)), scalar
+
+
+def test_monte_carlo_standard_errors_are_calibrated():
+    """Over 60 seeds (30 for the shadows) the spread of every Monte Carlo estimate matches its
+    reported standard error, 0.7 < SD(estimates) / mean(stderr) < 1.4 (and likewise for the pooled
+    per-target z-scores), so the 4-sigma checks of the other tests are what they claim. Covered:
+    QWC per target and total (17 H4 aux targets on a complex state; per-target errors include the
+    dependence of the sampled allocation), the uniform values, the group variances and the sample
+    means; DF totals, per-setting variances and the energy (H4); Pauli and matchgate shadows per
+    target and total (same aux targets); combine_independent of two independent QWC Monte Carlo
+    parts. Observed over 200 seeds on H2 and H4 targets (module docstring): 0.91-1.02 for the
+    totals, 0.90-1.05 per target. The sample variances with the plug-in standard errors used before
+    gave 0.61 for a symmetric two-point outcome and 0.42-0.78 for the QWC per-target values
+    (observed)."""
+    act, _, ci = get_system("h4")
+    m = QubitMapping(4)
+    lam = aux_ci("h4", 0.1)
+    st = QubitState.from_ci(4, act.nelec, lam, m)
+    st_b = QubitState.from_ci(4, act.nelec, aux_ci("h4", 0.3), m)
+    ops = aux_ops(m, spin_orbital_elements(4)[::9], scale=-10.0)
+    seeds, few_seeds = range(60), range(30)
+    checks = {}
+
+    def collect(name, runs, exact, fields):
+        for label, get_est, get_se, ref in fields:
+            checks[f"{name} {label}"] = _calibration([get_est(r) for r in runs], [get_se(r) for r in runs], ref)
+
+    ex = qwc_variance(ops, st)
+    runs = [qwc_variance(ops, st, method="mc", n_shots=2000, seed=s) for s in seeds]
+    collect("qwc", runs, ex, [
+        ("total", lambda r: r.total, lambda r: r.stderr, ex.total),
+        ("per target", lambda r: r.per_target, lambda r: r.per_target_stderr, ex.per_target),
+        ("uniform", lambda r: r.uniform_total, lambda r: r.uniform_stderr, ex.uniform_total),
+        ("uniform per target", lambda r: r.per_target_uniform, lambda r: r.info["per_target_uniform_stderr"],
+         ex.per_target_uniform),
+        ("groups", lambda r: r.setting_variances, lambda r: r.info["group_stderr"], ex.setting_variances),
+        ("mean", lambda r: r.info["sample_mean"], lambda r: r.info["sample_mean_stderr"], ex.expectation)])
+    exd = df_variance(act, ci)
+    runs = [df_variance_mc(act, ci, 2000, seed=100 + s) for s in seeds]
+    collect("df", runs, exd, [
+        ("total", lambda r: r.total, lambda r: r.stderr, exd.total),
+        ("settings", lambda r: r.setting_variances, lambda r: r.info["setting_stderr"], exd.setting_variances),
+        ("energy", lambda r: r.info["sample_mean"], lambda r: r.info["sample_mean_stderr"], exd.expectation[0])])
+    for fn, n_snap in ((pauli_shadow_variance, 4000), (matchgate_shadow_variance, 1000)):
+        exs = fn(ops, st, method="exact")
+        runs = [fn(ops, st, method="mc", n_snapshots=n_snap, seed=200 + s) for s in few_seeds]
+        collect(fn.__name__, runs, exs, [
+            ("total", lambda r: r.total, lambda r: r.stderr, exs.total),
+            ("per target", lambda r: r.per_target, lambda r: r.per_target_stderr, exs.per_target),
+            ("mean", lambda r: r.info["sample_mean"], lambda r: r.info["sample_mean_stderr"], exs.expectation)])
+    exc = combine_independent([qwc_variance(ops, st), qwc_variance(ops, st_b)])
+    runs = [combine_independent([qwc_variance(ops, st, method="mc", n_shots=1000, seed=300 + 2 * s),
+                                 qwc_variance(ops, st_b, method="mc", n_shots=1000, seed=301 + 2 * s)])
+            for s in seeds]
+    collect("combined", runs, exc, [("total", lambda r: r.total, lambda r: r.stderr, exc.total),
+                                    ("uniform", lambda r: r.uniform_total, lambda r: r.uniform_stderr,
+                                     exc.uniform_total)])
+    for name, (ratio, z_sd, scalar) in checks.items():
+        assert ratio.size and 0.7 < z_sd < 1.4, (name, z_sd)
+        if scalar:
+            assert 0.7 < ratio[0] < 1.4, (name, ratio)
+        else:                       # per column: 30-60 seeds give a sampling spread of 9-13% each
+            assert 0.7 < np.median(ratio) < 1.4 and np.all((0.5 < ratio) & (ratio < 2.0)), (name, ratio)
+
+
 # ======================================================== closed forms
 def test_closed_forms_for_single_strings_and_monomials(rng):
     """One Pauli string P with <P> = m: QWC 1 - m^2, Pauli shadows 3^{|P|} - m^2; one Hermitian
@@ -468,9 +646,11 @@ def test_pauli_shadow_second_moments_by_enumeration(n, rng):
     mean = sum(ci * np.vdot(psi, dense_pauli(x, z, n) @ psi).real for ci, (x, z) in zip(c, strings))
     st = QubitState.from_dense(psi)
     assert np.isclose(pauli_shadow_variance(op, st).total, c @ mom @ c - mean ** 2, rtol=1e-10)
-    # Rao-Blackwellization over all 3^n bases is exact
+    # Rao-Blackwellization over all 3^n bases is exact (the 9 bases of n = 2 are too few for a
+    # standard error: warning)
     bx, bz = pauli_bases(n)
-    rb = pauli_shadow_variance(op, st, method="rb", settings=zip(bx, bz))
+    with pytest.warns(RuntimeWarning, match="fewer than 10") if n == 2 else contextlib.nullcontext():
+        rb = pauli_shadow_variance(op, st, method="rb", settings=zip(bx, bz))
     assert rb.n_samples == 3 ** n and np.isclose(rb.total, c @ mom @ c - mean ** 2, rtol=1e-10)
 
 
@@ -494,10 +674,32 @@ def test_pauli_shadow_exact_vs_snapshot_monte_carlo(order):
     assert_within(mc2.per_target, mc2.per_target_stderr, ex2.per_target)
     assert_within(mc2.total, mc2.stderr, ex2.total)
     assert_within(mc2.info["sample_mean"], mc2.info["sample_mean_stderr"], ex2.expectation)
-    # Rao-Blackwellized estimate over all 81 bases equals the exact value
+    # Rao-Blackwellized estimate over all 81 bases equals the exact value (some targets are covered
+    # by fewer than 10 of the 81 bases: warning, infinite per-target standard errors)
     bx, bz = pauli_bases(4)
-    rb = pauli_shadow_variance(ops, st2, method="rb", settings=zip(bx, bz))
+    with pytest.warns(RuntimeWarning, match="fewer than 10"):
+        rb = pauli_shadow_variance(ops, st2, method="rb", settings=zip(bx, bz))
     assert np.allclose(rb.per_target, ex2.per_target, rtol=1e-10, atol=1e-10)
+
+
+def test_pauli_shadow_monte_carlo_on_a_random_complex_state(rng):
+    """Random complex 4-qubit state; a random real combination of about 40 strings with X, Y and Z
+    letters, and the eight single-qubit X_k and Y_k: exact = snapshot MC within 4 sigma for every
+    per-target variance, the total and every mean. (The real H4/H2 states above do not distinguish
+    the X and Y basis rotations. Exchanging them here moves the variance of the combination by 7
+    standard errors and the means of the single-qubit targets by 11-56, observed: the shadow of
+    Y_k then averages to <X_k>.)"""
+    st = random_state(4, rng)
+    strings = {(int(x), int(z)) for x, z in rng.integers(0, 16, (40, 2)) if x | z}
+    xs, zs = np.array(sorted(strings), dtype=np.uint64).T
+    assert np.count_nonzero(xs & zs) > 10                          # Y letters present
+    ops = [PauliSum(4, xs, zs, rng.standard_normal(xs.size)) + 0.4]
+    ops += [PauliSum(4, [1 << k], [z << k], [1.0]) for z in (0, 1) for k in range(4)]   # X_k, Y_k
+    ex = pauli_shadow_variance(ops, st, method="exact")
+    mc = pauli_shadow_variance(ops, st, method="mc", n_snapshots=40000, seed=23)
+    assert_within(mc.per_target, mc.per_target_stderr, ex.per_target)
+    assert_within(mc.total, mc.stderr, ex.total)
+    assert_within(mc.info["sample_mean"], mc.info["sample_mean_stderr"], ex.expectation)
 
 
 # ==================================================== matchgate shadows
@@ -559,8 +761,9 @@ def test_matchgate_second_moments_by_enumeration(n, rng):
     want = (np.conj(coef) @ mom @ coef - abs(mean) ** 2).real
     st = QubitState.from_dense(psi)
     assert np.isclose(matchgate_shadow_variance(op, st, method="exact").total, want, rtol=1e-10)
-    # Rao-Blackwellization over all matchings is exact
-    rb = matchgate_shadow_variance(op, st, method="rb", settings=perfect_matchings(2 * n))
+    # Rao-Blackwellization over all matchings is exact (3 matchings for n = 2: warning)
+    with pytest.warns(RuntimeWarning, match="fewer than 10") if n == 2 else contextlib.nullcontext():
+        rb = matchgate_shadow_variance(op, st, method="rb", settings=perfect_matchings(2 * n))
     assert np.isclose(rb.total, want, rtol=1e-10)
 
 
@@ -667,7 +870,8 @@ def test_rao_blackwellized_estimates_match_exact_on_h4():
     assert early.n_samples < 50000 and early.stderr <= 0.05 * early.total
     # "auto" picks the exact sums for small targets and RB above max_pairs
     assert matchgate_shadow_variance(xops, st).method == "exact"
-    assert matchgate_shadow_variance(xops, st, max_pairs=10, n_settings=10, seed=1).method == "rb"
+    with pytest.warns(RuntimeWarning, match="fewer than 10"):
+        assert matchgate_shadow_variance(xops, st, max_pairs=10, n_settings=10, seed=1).method == "rb"
 
 
 def test_rao_blackwellized_vs_snapshot_monte_carlo():
@@ -678,6 +882,62 @@ def test_rao_blackwellized_vs_snapshot_monte_carlo():
     rb = matchgate_shadow_variance(h, st, method="rb", n_settings=6000, seed=51)
     mc = matchgate_shadow_variance(h, st, method="mc", n_snapshots=20000, seed=52, batch=512)
     assert abs(rb.total - mc.total) <= 4 * np.hypot(rb.stderr, mc.stderr)
+
+
+def test_rb_standard_errors_batches_and_coverage(rng):
+    """Over an explicit list of N settings the RB estimate is the plain mean of the per-setting
+    values <O_{e,setting}^2> minus <O_e>^2, and its standard errors are their std(ddof=1)/sqrt(N),
+    for every batch size (the batch merge). info["n_covering"] counts, per target, the settings that
+    cover a non-identity string (here against the bit-swap test). Targets covered fewer than 10 times
+    get per_target_stderr = inf with a warning, and so does the total when fewer than 10 settings
+    cover anything: before, X0X1 = gamma_1 gamma_2 with no covering setting among 50 gave
+    -2.6e-5 +- 0 against an exact 7.0 (observed)."""
+    act, _, _ = get_system("h4")
+    st, m = qstate("h4", "blocked")
+    h = jw_hamiltonian(act, m)
+    ops = direct_ops(m, spin_orbital_elements(4)[::40], h) + [h]
+    tg = schemes._prepare(ops)
+    for scheme, fn in (("matchgate_shadow", matchgate_shadow_variance), ("pauli_shadow", pauli_shadow_variance)):
+        setup = schemes._RBSetup(tg, schemes._Expectations(st), scheme)
+        if scheme == "matchgate_shadow":
+            settings = list(random_matchings(8, 300, rng))
+        else:
+            settings = list(zip(*pauli_bases(8, 300, rng)))
+        vals = np.array([setup.second_moments(setup.covered(s))[0] for s in settings])
+        mu = np.array([st.expectation(o).real for o in ops])
+        n = len(settings)
+        for batch in (1, 3, 256):
+            rb = fn(ops, st, method="rb", settings=settings, batch=batch)
+            assert rb.n_samples == n and np.all(rb.info["n_covering"] >= 10)
+            assert np.allclose(rb.per_target, vals.mean(axis=0) - mu ** 2, rtol=1e-12, atol=1e-12)
+            assert np.isclose(rb.total, vals.sum(axis=1).mean() - np.sum(mu ** 2), rtol=1e-12)
+            assert np.isclose(rb.stderr, vals.sum(axis=1).std(ddof=1) / np.sqrt(n), rtol=1e-9)
+            assert np.allclose(rb.per_target_stderr, vals.std(axis=0, ddof=1) / np.sqrt(n), rtol=1e-9)
+        # coverage counts: settings that cover at least one non-identity string of each target
+        want = []
+        for o in ops:
+            keep = (o.xs != 0) | (o.zs != 0)
+            if scheme == "matchgate_shadow":
+                cov = matchgate_covered(pauli_to_majorana(o.xs[keep], o.zs[keep])[0], np.array(settings))
+            else:
+                cov = np.array([pauli_shadow_covered(o.xs[keep], o.zs[keep], bx, bz) for bx, bz in settings])
+            want.append(int(cov.any(axis=1).sum()))
+        assert np.array_equal(rb.info["n_covering"], want)
+    # a rarely covered target: gamma_1 gamma_2 is covered with probability 1/15 per matching (n = 8)
+    x01 = PauliSum(8, [3], [0], [1.0])
+    few = list(random_matchings(8, 30, rng))
+    n_hit = int(matchgate_covered(pauli_to_majorana(3, 0)[0], np.array(few)).sum())
+    assert n_hit < 10
+    with pytest.warns(RuntimeWarning, match="fewer than 10"):
+        r1 = matchgate_shadow_variance(x01, st, method="rb", settings=few)
+    assert r1.info["n_covering"][0] == n_hit and np.isinf(r1.per_target_stderr[0]) and np.isinf(r1.stderr)
+    with pytest.warns(RuntimeWarning, match="fewer than 10"):
+        r2 = matchgate_shadow_variance([x01, h], st, method="rb", settings=few)
+    assert np.isinf(r2.per_target_stderr[0]) and np.isfinite(r2.per_target_stderr[1]) and np.isfinite(r2.stderr)
+    # the early stop on rel_stderr waits for coverage
+    r3 = matchgate_shadow_variance(x01, st, method="rb", n_settings=4000, rel_stderr=10.0, min_settings=1,
+                                   batch=1, seed=5)
+    assert r3.info["n_covering"][0] >= 10 and np.isfinite(r3.stderr) and r3.n_samples < 4000
 
 
 # ===================================================================== DF
@@ -750,6 +1010,15 @@ def test_df_monte_carlo_and_truncation_bias():
     mc_tr = df_variance_mc(act, ci, 20000, n_leaves=4, seed=62)
     assert_within(mc_tr.setting_variances, mc_tr.info["setting_stderr"], tr.setting_variances)
     assert_within(mc_tr.info["sample_mean"], mc_tr.info["sample_mean_stderr"], e_model)
+    # truncated leaf ranks (eig_threshold): the sampler completes each leaf's orbitals to an
+    # orthonormal basis with mu = 0 on the added orbitals
+    tre = df_variance(act, ci, eig_threshold=0.05)
+    ranks = [u.shape[1] for u in tre.info["factorization"].eigenvectors]
+    assert min(ranks) < act.norb
+    mc_e = df_variance_mc(act, ci, 20000, eig_threshold=0.05, seed=64)
+    assert np.allclose(mc_e.info["fragment_means_exact_distribution"], tre.info["fragment_means"], atol=1e-10)
+    assert_within(mc_e.setting_variances, mc_e.info["setting_stderr"], tre.setting_variances)
+    assert_within(mc_e.total, mc_e.stderr, tre.total)
 
 
 def test_df_shifted_leaves_and_eigendecomposition_factors():
@@ -783,23 +1052,44 @@ def test_df_shifted_leaves_and_eigendecomposition_factors():
 
 # ======================================================== combination, internals
 def test_combine_independent_experiments():
-    """Optimal allocation across experiments: (sum sqrt V_l)^2; per-target sum_l v_le / f_l."""
+    """Optimal allocation across experiments: (sum sqrt V_l)^2; per-target sum_l v_le / f_l. The
+    uniform values are those of a uniform allocation over all settings of all parts (None for
+    shadows); equal shots per part (optimal inside) is info["uniform_over_parts"]. Standard errors of
+    the parts combine by the delta method (exact parts count as exact)."""
     st, m = qstate("h2", "blocked")
     ops = aux_ops(m, spin_orbital_elements(2))
     parts = [matchgate_shadow_variance(ops, st), pauli_shadow_variance([o * 2 for o in ops], st)]
     c = combine_independent(parts)
     v = np.array([p.total for p in parts])
     assert np.isclose(c.total, np.sum(np.sqrt(v)) ** 2) and np.isclose(c.total, c.per_target.sum())
-    assert np.isclose(c.uniform_total, 2 * v.sum()) and c.total <= c.uniform_total
+    assert c.n_settings is None and c.uniform_total is None and c.per_target_uniform is None
+    assert np.isclose(c.info["uniform_over_parts"], 2 * v.sum()) and c.total <= c.info["uniform_over_parts"]
+    assert np.allclose(c.info["per_target_uniform_over_parts"], 2 * (parts[0].per_target + parts[1].per_target))
     assert np.allclose(c.expectation, parts[0].expectation + parts[1].expectation)
     assert np.allclose(c.per_target, sum(p.per_target / f for p, f in zip(parts, c.allocation)))
-    assert c.n_settings is None
-    # nested optimal allocations (QWC groups inside parts) equal the global optimum over all groups
+    assert c.stderr is None
+    # nested optimal allocations (QWC groups inside parts) equal the global optimum over all groups;
+    # the uniform allocation is over all 28 groups: n_tot sum_l sum_G V_lG (per target likewise)
     q = [qwc_variance(ops, st), qwc_variance([o * 3 for o in ops[::-1]], st)]
     cq = combine_independent(q)
     allv = np.concatenate([r.setting_variances for r in q])
-    assert cq.n_settings == q[0].n_settings + q[1].n_settings
+    n_tot = q[0].n_settings + q[1].n_settings
+    assert cq.n_settings == n_tot == allv.size
     assert np.isclose(cq.total, np.sum(np.sqrt(allv)) ** 2, rtol=1e-12)
+    assert np.isclose(cq.uniform_total, n_tot * allv.sum(), rtol=1e-12)
+    per_g = np.zeros(len(ops))
+    for r in q:
+        brow, bgrp, vb = r.info["group_target_variances"]
+        per_g += np.bincount(brow, weights=vb, minlength=len(ops))
+    assert np.allclose(cq.per_target_uniform, n_tot * per_g, rtol=1e-12)
+    assert np.isclose(cq.uniform_total, cq.per_target_uniform.sum())
+    # mixed exact and Monte Carlo parts (H2 energy): the exact part contributes no error
+    h = jw_hamiltonian(get_system("h2")[0], m)
+    ex, mc = qwc_variance(h, st), qwc_variance(h, st, method="mc", n_shots=2000, seed=3)
+    cm = combine_independent([ex, mc])
+    sq = np.sqrt([ex.total, mc.total])
+    assert mc.stderr > 0 and np.isclose(cm.stderr, sq.sum() * mc.stderr / sq[1], rtol=1e-12)
+    assert np.isclose(cm.uniform_stderr, (ex.n_settings + mc.n_settings) * mc.uniform_stderr / mc.n_settings)
 
 
 def test_table_and_fallback_expectations_and_pair_blocks_agree(monkeypatch, rng):
@@ -824,6 +1114,13 @@ def test_table_and_fallback_expectations_and_pair_blocks_agree(monkeypatch, rng)
     for a, b in zip(ref, new):
         assert np.allclose(a.per_target, b.per_target, rtol=1e-11, atol=1e-12)
     assert np.allclose(schemes._Expectations(sta)(xs, zs), exact, atol=1e-14)
+    # a dense 12-qubit state cannot have a table (d 2^n > 2^23): rejected before the d^2 pair XORs
+    # (which took 1 s and 134 MB; observed); now about 1e-5 s (observed)
+    monkeypatch.undo()
+    dense = random_state(12, rng)
+    t0 = time.perf_counter()
+    oracle = schemes._Expectations(dense)
+    assert oracle.table is None and time.perf_counter() - t0 < 0.2
 
 
 def test_h6_aux_route_vector_targets_time():
@@ -854,21 +1151,24 @@ def test_h6_energy_variances_against_the_earlier_claims():
     claimed QWC 28.0, DF 3.2, matchgate shadows 122):
 
         state      QWC blocked  QWC interl.  DF chol/eigh  shifted DF   Pauli bl/int  matchgate
-        FCI        16.18 (204)  28.32 (314)  5.02 / 3.06   1.23 / 1.19  1015 / 1982   121.74
-        SD iter 2  15.64 (204)  27.19 (314)  5.44 / 3.35   1.16 / 1.15  1015 / 1980   121.74
+        FCI        16.18 (204)  28.14 (312)  5.02 / 3.06   1.23 / 1.19  1015 / 1982   121.74
+        SD iter 2  15.64 (204)  27.02 (312)  5.44 / 3.35   1.16 / 1.15  1015 / 1980   121.74
 
     (QWC groups in parentheses; DF has 21 settings; shifted DF: Cholesky / eigh leaves.)
 
     QWC (interleaved, OpenFermion's order) and matchgate shadows reproduce the claims; DF does
     so with eigendecomposition leaves (first="eigh", unshifted) but not with the pivoted-Cholesky
-    default (5.0-5.4); the shifted leaves are 2.6-4.7 times lower than either."""
+    default (5.0-5.4); the shifted leaves are 2.6-4.7 times lower than either. The interleaved QWC
+    values are those of the round-off-independent sorted insertion (tie classes); ordering tied
+    weights by their round-off gave 28.32 and 27.19 (314 groups) for this jw_hamiltonian and 28.14
+    and 27.02 (312) for OpenFermion's (observed)."""
     act = systems.hydrogen_chain(6, 1.0, "angstrom")
     e_fci, ci_fci = act.fci()
     from thc_engine_cqe.cqe import run_cqe
     run = run_cqe(act, max_iter=2)
     assert np.isclose((run.energies[-1] - e_fci) * 1e3, 19.5717, atol=1e-3)
-    want = {"FCI": (16.1825, 204, 28.3169, 314, 5.0224, 3.0577, 1.2330, 1.1940, 1014.66, 1981.77, 121.737),
-            "iter2": (15.6434, 204, 27.1876, 314, 5.4357, 3.3530, 1.1572, 1.1489, 1014.76, 1980.26, 121.740)}
+    want = {"FCI": (16.1825, 204, 28.1359, 312, 5.0224, 3.0577, 1.2330, 1.1940, 1014.66, 1981.77, 121.737),
+            "iter2": (15.6434, 204, 27.0221, 312, 5.4357, 3.3530, 1.1572, 1.1489, 1014.76, 1980.26, 121.740)}
     for label, ci in (("FCI", ci_fci), ("iter2", run.ci)):
         got = []
         mg = []
@@ -894,7 +1194,7 @@ def test_h8_energy_all_schemes_time():
     """Performance target: all exact energy variances for H8 (16 qubits, 1.8 bohr, FCI) within a few
     minutes. Observed (one thread, blocked order): QWC 0.9 s (626 groups), Pauli shadows 3.2 s
     (9.8e5 compatible pairs), matchgate shadows 4.3 s (2.8e6 commuting pairs), DF 0.03 s
-    (31 settings). The interleaved order gives QWC 117.6 (967 groups) and Pauli 9.50e4 (observed)."""
+    (31 settings). The interleaved order gives QWC 115.2 (966 groups) and Pauli 9.50e4 (observed)."""
     act = systems.hydrogen_chain(8, 1.8, "bohr")
     e_fci, ci = act.fci()
     m = QubitMapping(8)
@@ -906,17 +1206,18 @@ def test_h8_energy_all_schemes_time():
     d = df_variance(act, ci)
     assert time.perf_counter() - t0 < 300.0
     assert (q.n_settings, d.n_settings) == (626, 31) and p.method == g.method == "exact"
-    assert np.allclose([q.total, p.total, g.total, d.total], [61.607, 44549.8, 336.743, 9.4051], rtol=2e-4)
+    assert np.allclose([q.total, p.total, g.total, d.total], [61.6068, 44549.8, 336.743, 9.4051], rtol=2e-4)
 
 
 def test_h6_direct_route_rao_blackwellized():
     """Direct-route targets X_e = i[Q_e, H] for the 840 H6 elements (1.6e6 Pauli terms) at the SD
     iteration-2 state: matchgate RB with 2000 settings per order. Observed: 2.3-2.4 s per order
     here (relative standard error 0.5%; about 1 s is setup: the coefficient matrix and the dense
-    <P> table); 2e4 settings take 13.4-13.6 s and give totals 9615 +- 15 (blocked) and 9618 +- 15
-    (interleaved), per-element variances 4.9 to 44 (mean 11.4), relative standard errors 0.16%
-    (total) and at most 3.9% (per element). The two orders agree (the ensemble is permutation
-    invariant) and the relative standard error of the total is below the 2% target."""
+    <P> table); 2e4 settings take 13-14 s with relative standard errors of 0.15-0.16% (total) and at
+    most 4.0% (per element). The exact pair sum (max_pairs=np.inf; 8.77e8 commuting pairs, 173-174 s
+    per order, observed) gives a total of 9636.39 and per-element variances 4.963 to 40.69 (mean
+    11.47), identical in both orders (observed); the RB total of each order agrees with it within
+    4 standard errors (asserted). The relative standard error of the total is below the 2% target."""
     act = systems.hydrogen_chain(6, 1.0, "angstrom")
     from thc_engine_cqe.cqe import run_cqe
     ci = run_cqe(act, max_iter=2).ci
@@ -934,4 +1235,6 @@ def test_h6_direct_route_rao_blackwellized():
     a, b = res["blocked"], res["interleaved"]
     assert np.allclose(a.expectation, b.expectation, atol=1e-12)
     assert abs(a.total - b.total) <= 4 * np.hypot(a.stderr, b.stderr)
-    assert 9000 < a.total < 10300 and 4 < a.per_target.min() and a.per_target.max() < 60
+    for r in (a, b):
+        assert abs(r.total - 9636.39) <= 4 * r.stderr         # the exact sum (observed, see above)
+    assert 4 < a.per_target.min() and a.per_target.max() < 60

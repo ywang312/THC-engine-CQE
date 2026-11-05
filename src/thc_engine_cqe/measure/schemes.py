@@ -14,9 +14,11 @@ Targets, shots and VarianceResult
 ---------------------------------
 A target is a Hermitian :class:`~.pauli.PauliSum` O = sum_j c_j P_j, or a list of
 them (a vector target) O_e = sum_j W_ej P_j, with W the real coefficient matrix
-of :func:`~.pauli.coefficient_matrix`. Post-processing weights (e.g. -1/delta of
-the auxiliary route) are folded into the targets by the caller. The state is a
-normalized :class:`~.pauli.QubitState`; complex amplitudes are allowed.
+of :func:`~.pauli.coefficient_matrix`. Hermiticity is checked per target:
+max_j |Im W_ej| <= 1e-10 max_j |W_ej|, or <= 1e-14 times the largest |W| of all
+targets (round-off); the real part is used. Post-processing weights (e.g.
+-1/delta of the auxiliary route) are folded into the targets by the caller. The
+state is a normalized :class:`~.pauli.QubitState`; complex amplitudes are allowed.
 
 Every scheme defines a single-shot estimator x_e (one measurement setting, one
 outcome) with E[x_e] = <O_e>. :class:`VarianceResult` reports per-shot
@@ -30,11 +32,23 @@ constant: it costs no shots and is excluded from groups and pair sums.
 QWC grouping (:func:`qwc_grouping`, :func:`qwc_variance`)
 --------------------------------------------------------
 Sorted insertion: the non-identity strings of the union basis are ordered by
-decreasing weight w_j = sum_e |W_ej| (|c_j| for one target; ties keep the
-canonical (x, z) order) and placed first-fit into groups whose members commute
-qubit-wise. A group G is measured in one product basis, and each P_j in G is
-read off as the parity of the outcome on supp P_j. The group estimator of O_e
-is x_{G,e} = sum_{j in G} W_ej s_j, with per-shot variance
+decreasing weight w_j = sum_e |W_ej| (|c_j| for one target) and placed
+first-fit into groups whose members commute qubit-wise. Weights that are equal
+up to round-off are tied: in the decreasing sequence of weights, a tie class
+continues while consecutive weights differ by at most 1e-10 max_j w_j, and the
+strings of a tie class keep the canonical (x, z) order. Without this rule,
+mathematically equal weights (alpha/beta partners, mirror-image terms) are
+ordered by their round-off, and the grouping depends on how the operator was
+built: relative perturbations of 4e-16 changed the H4 and H6 QWC variances by
+11-25% (observed). A gap rule is used rather than rounding to a grid, which
+would split a tied pair that straddles a grid point. Observed margins: tied
+gaps are at most 5.2e-16 max w, all other gaps at least 9.2e-8 max w (H4, H6 at
+1.0 A and H8 Hamiltonians, the 840 H6 aux-route targets). The grouping is
+unchanged by relative perturbations of 1e-15 and 1e-13 and is the same for
+``jw_hamiltonian`` and OpenFermion's Jordan-Wigner Hamiltonian (tested).
+A group G is measured in one product basis, and each P_j in G is read off as
+the parity of the outcome on supp P_j. The group estimator of O_e is
+x_{G,e} = sum_{j in G} W_ej s_j, with per-shot variance
 
     V_{G,e} = sum_{j,k in G} W_ej W_ek Cov_jk,   V_G = sum_e V_{G,e} = sum_{j,k in G} M_jk Cov_jk.
 
@@ -147,15 +161,34 @@ leaves S unchanged (:func:`matchgate_covered`, vectorized bit operations); the
 RB loop instead enumerates the unions of at most k_max pairs and looks them up,
 when that is cheaper (tested to agree).
 
+The spread over settings says nothing about strings that no sampled setting
+covered: a target whose strings are never covered reports c_e0^2 - <O_e>^2 with
+a standard error of 0 (observed: -7e-19 +- 0 against an exact 2278 for a target
+of weight-6 strings and 400 Pauli settings). Per-target errors need
+N lambda_k >> 1 (matchgate) or N 3^-w >> 1 (Pauli) for the strings that carry
+the variance. ``info["n_covering"]`` counts, per target, the settings that
+covered at least one of its non-identity strings; where it is below 10 the
+per-target standard error is set to inf, and if fewer than 10 settings covered
+a non-identity string of any target, so is the total's (with a RuntimeWarning;
+tested). The early stop on ``rel_stderr`` waits for that coverage.
+
 The matchgate weights are bounded, 1/lambda_k <= 1/lambda_3 = 611.8 for the
 degree-6 monomials of X_e at n = 12, and every setting covers many strings, so
-the matchgate RB estimate converges quickly (observed for the 840 H6 X_e:
-relative standard error 0.16% on the total and at most 3.9% per element after
-2e4 settings, 14 s). For Pauli shadows a weight-w string enters O_B with 3^w
-and is covered with probability 3^-w, so rare settings dominate: the estimate
-is heavy-tailed and its standard error unreliable (observed for the same
-targets at CQE iteration 2: 2000 settings gave a total of 3.2e5 +- 0.7e5
-against the exact 5.1e5, with per-element standard errors up to 99%). Hence
+the matchgate RB estimate converges quickly. Observed for the 840 H6 X_e at SD
+iteration 2 (1.0 A): the exact sum (``max_pairs=np.inf``; 8.77e8 commuting
+pairs, 173-174 s per order, one thread) gives a total of 9636.39 and
+per-element variances 4.963 to 40.69 (mean 11.47), identical in both orders.
+RB with 2e4 settings (13-14 s) has relative standard errors of 0.15-0.16% on
+the total and at most 4.0% per element; against the exact values its totals
+lie within 1.2 standard errors and its per-element z-scores have a standard
+deviation of 1.05 and max |z| = 3.6 (two seeds; the elements share the
+settings, so their errors are correlated).
+
+For Pauli shadows a weight-w string enters O_B with 3^w and is covered with
+probability 3^-w, so rare settings dominate: the estimate is heavy-tailed and
+its standard error unreliable (observed for the same targets at CQE iteration
+2: 2000 settings gave a total of 3.2e5 +- 0.7e5 against the exact 5.1e5, with
+per-element standard errors up to 99%). Hence
 ``method="auto"`` uses the exact sums for Pauli shadows at any size (89 s for the
 H6 X_e, observed; 5.3e7 compatible pairs) and RB for matchgate shadows only
 above 2e7 pairs.
@@ -170,13 +203,25 @@ sequential projective sampling, then read every covered term off the
 post-measurement state as <phi|P_j|phi> (= +-1), independently of the phase
 bookkeeping of the exact formula; DF rotates the CI vector into each fragment's
 orbital basis (``pyscf.fci.addons.transform_ci``), samples determinants and
-evaluates the diagonal fragment operator. Per-target variances are sample
-variances; their standard errors use Var(s^2) = (mu_4 - sigma^4)/S +
-2 sigma^4/(S(S-1)) (the second term matters for two-point distributions such as
-a single string with <P> near 0). The reported ``total`` and its ``stderr``
-combine them as described in each function. The standard errors are calibrated
-(observed over 12 seeds per scheme on H4: z-scores with mean within 0.35 of 0
-and standard deviation 0.65-1.2).
+evaluates the diagonal fragment operator.
+
+Per-shot variances are estimated as the mean of y = (x - <x>)^2, the squared
+deviation of each shot's (snapshot's) estimate from its exact mean (the exact
+<O_e>, QWC group mean or fragment mean; that E[x] = <x> is checked separately by
+the sample means, ``info["sample_mean"]``). This is an average of i.i.d. terms,
+so its standard error sqrt(s_y^2 / S) has an unbiased square, (mu_4 -
+sigma^4)/S, and its distribution is close to normal. The sample variance s^2
+is worse on both counts for near-symmetric two-point outcomes (a string with
+<P> near 0): s^2 - sigma^2 ~ sigma^2 (1 - chi^2_1) / S is skewed, and the plug-in
+estimate of Var(s^2) is biased high by 4 sigma^4 / S^2; the standard errors used
+before were 1.6-2.4 times too large there (observed). Where |x - <x>| is
+constant (the H2 auxiliary-route targets) the estimate is exact and its standard
+error 0. Totals under the optimal allocation and the QWC per-target values
+(whose sampled allocation depends on the sampled V_G) use the delta method.
+Calibration over 200 seeds (observed; 0.7 < SD/stderr < 1.4 over 30-60 seeds
+is tested): SD of the estimates / mean stderr = 0.91-1.02 for the totals of all
+schemes and 0.90-1.05 per target; Pauli shadows have heavy tails (H4 energy:
+max |z| = 5.3 over 200 seeds), so their 4-sigma checks can fail for some seeds.
 
 Expectation values
 ------------------
@@ -190,13 +235,15 @@ Timings (observed, one thread): H8 energy at FCI (1.8 bohr, 2913 terms) QWC
 0.2-0.9 s, Pauli shadows 2.4-3.2 s, matchgate shadows 4.3-4.7 s, DF 0.03 s; the
 840 H6 aux-route Q_e on a complex auxiliary state 0.3-0.7 s per scheme; the 840
 H6 direct-route X_e (1.6e6 terms) matchgate RB with 2e4 settings 13-14 s, exact
-Pauli shadows 89 s (blocked) and 99 s (interleaved order).
+matchgate shadows 173-174 s, exact Pauli shadows 89 s (blocked) and 99 s
+(interleaved order).
 """
 
 from __future__ import annotations
 
 import itertools
 import math
+import warnings
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
@@ -236,10 +283,14 @@ _U1 = np.uint64(1)
 _PAIR_CHUNK = 1 << 21        # pair evaluations per vectorized block
 _TABLE_MAX = 1 << 23         # entries of the dense <P(x, z)> table (64 MB of float64)
 _NORM_ATOL = 1e-8            # |<psi|psi> - 1| allowed for "normalized" states
-_HERM_RTOL = 1e-10           # max |Im W| / max |W| allowed for Hermitian targets
+_HERM_RTOL = 1e-10           # per target: max |Im W_ej| / max |W_ej| allowed for Hermitian targets
+_HERM_FLOOR = 1e-14          # ... or max |Im W_ej| <= _HERM_FLOOR * max |W| over all targets (round-off)
+_QWC_TIE_RTOL = 1e-10        # sorted insertion: weights within 1e-10 * max weight of their sorted neighbor tie
 # method="auto": exact pair sums up to this many pairs, else Rao-Blackwellized MC. Pauli shadows
 # always use the exact sums: their RB estimate is heavy-tailed (module docstring).
 _AUTO_MAX_PAIRS = {"pauli_shadow": np.inf, "matchgate_shadow": 2e7}
+# RB: a standard error over settings needs settings that actually covered the target's strings
+_RB_MIN_COVERING = 10
 
 
 # =============================================================== result type
@@ -258,11 +309,15 @@ class VarianceResult:
             exact <H>; the model's value is in ``info``.
         n_settings: QWC groups, L + 1 DF bases; None for randomized schemes.
         allocation: shot fractions per setting (optimal), or None.
-        uniform_total: total under uniform allocation over the settings (QWC, DF).
+        uniform_total: total under uniform allocation over the settings (QWC, DF,
+            and "combined" results whose parts all have settings).
         per_target_uniform: per-target variances under uniform allocation.
-        setting_variances: V_G (QWC, summed over targets) or Var_l (DF).
-        stderr: standard error of ``total`` ("rb", "mc").
-        per_target_stderr: standard errors of ``per_target`` ("rb", "mc").
+        setting_variances: V_G (QWC, summed over targets), Var_l (DF) or the
+            parts' totals ("combined").
+        stderr: standard error of ``total`` ("rb", "mc"); inf for "rb" when fewer
+            than 10 settings covered any target's strings.
+        per_target_stderr: standard errors of ``per_target`` ("rb", "mc"); inf for
+            "rb" targets covered by fewer than 10 settings.
         uniform_stderr: standard error of ``uniform_total`` (QWC/DF "mc").
         n_samples: settings ("rb") or snapshots/shots ("mc") used.
         info: scheme-specific extras (documented by each function).
@@ -338,10 +393,18 @@ def _prepare(targets) -> _Targets:
     w = w.tocsr()
     data = w.data
     if data.size:
-        scale = float(np.max(np.abs(data)))
-        imag = float(np.max(np.abs(data.imag)))
-        if imag > _HERM_RTOL * scale:
-            raise ValueError(f"targets must be Hermitian (max |Im c| = {imag:.3g}, max |c| = {scale:.3g})")
+        # per target: max_j |Im W_ej| <= _HERM_RTOL max_j |W_ej|, or below the round-off floor
+        nnz = np.diff(w.indptr)
+        rows = np.flatnonzero(nnz)
+        scale = np.zeros(w.shape[0])
+        imag = np.zeros(w.shape[0])
+        scale[rows] = np.maximum.reduceat(np.abs(data), w.indptr[rows])
+        imag[rows] = np.maximum.reduceat(np.abs(data.imag), w.indptr[rows])
+        bad = np.flatnonzero((imag > _HERM_RTOL * scale) & (imag > _HERM_FLOOR * scale.max()))
+        if bad.size:
+            e = int(bad[np.argmax(imag[bad] / scale[bad])])
+            raise ValueError(f"targets must be Hermitian: {bad.size} target(s) are not, e.g. target {e} "
+                             f"(max |Im c| = {imag[e]:.3g}, max |c| = {scale[e]:.3g})")
     wr = sp.csr_matrix((data.real.astype(np.float64), w.indices, w.indptr), shape=w.shape)
     wr.eliminate_zeros()
     used = np.unique(wr.indices)
@@ -394,7 +457,8 @@ class _Expectations:
         self.table = None
         b, a = state.basis, state.amplitudes
         d = b.size
-        if d == 0 or n > 24 or (1 << n) > max_entries or d > 4096:
+        # {b_0 ^ b_j} alone has d distinct x patterns: check this lower bound before forming all d^2 XORs
+        if d == 0 or n > 24 or d * (1 << n) > max_entries:
             return
         xset = np.unique((b[:, None] ^ b[None, :]).ravel())
         if xset.size * (1 << n) > max_entries:
@@ -562,10 +626,31 @@ class QWCGrouping:
         return np.bincount(self.group[self.group >= 0], minlength=self.n_groups)
 
 
+def _sorted_insertion_order(weight: np.ndarray, cand: np.ndarray) -> np.ndarray:
+    """``cand`` by decreasing weight, with round-off ties in canonical (index) order.
+
+    The weights of ``cand`` are sorted in decreasing order; a new tie class starts
+    wherever two consecutive sorted weights differ by more than _QWC_TIE_RTOL * max
+    weight. Classes come in decreasing weight, and the members of a class in
+    increasing index (canonical (x, z) order). Class membership depends only on
+    the multiset of weights, so the order is deterministic.
+    """
+    if cand.size == 0:
+        return cand
+    w = weight[cand]
+    srt = np.argsort(-w, kind="stable")
+    ws = w[srt]
+    new_class = np.ones(ws.size, dtype=bool)
+    new_class[1:] = (ws[:-1] - ws[1:]) > _QWC_TIE_RTOL * float(ws[0])
+    cls = np.empty(ws.size, dtype=np.int64)
+    cls[srt] = np.cumsum(new_class)
+    return cand[np.lexsort((cand, cls))]
+
+
 def _qwc_grouping(tg: _Targets) -> QWCGrouping:
     weight = np.asarray(abs(tg.W).sum(axis=0)).ravel()
     cand = np.flatnonzero(~((tg.xs == 0) & (tg.zs == 0)))
-    order = cand[np.argsort(-weight[cand], kind="stable")]
+    order = _sorted_insertion_order(weight, cand)
     group = np.full(tg.B, -1, dtype=np.int64)
     cap = 64
     gx = np.zeros(cap, dtype=np.uint64)
@@ -599,7 +684,10 @@ def qwc_grouping(targets) -> QWCGrouping:
     """Sorted-insertion QWC grouping of a target or vector target (module docstring).
 
     Every non-identity string of the union basis is in exactly one group, and
-    the strings of a group commute qubit-wise (tested).
+    the strings of a group commute qubit-wise (tested). The insertion order is
+    decreasing weight sum_e |W_ej|; consecutive sorted weights that differ by at
+    most 1e-10 times the largest weight are tied, and a tie class keeps the
+    canonical (x, z) order, so the grouping does not depend on round-off.
     """
     return _qwc_grouping(_prepare(targets))
 
@@ -637,12 +725,17 @@ def qwc_variance(targets, state: QubitState, *, grouping: QWCGrouping | None = N
     (e, G, value) arrays).
 
     ``method="mc"``: actual measurements on the dense state (n <= 20). Every group
-    is measured ``n_shots`` times in its product basis; V_hat_{G,e} are sample
-    variances. The optimal allocation is then the one of the sampled V_hat_G, and
+    is measured ``n_shots`` times in its product basis; V_hat_{G,e} is the mean of
+    (x_{G,e} - <x_{G,e}>)^2 about the exact group mean (module docstring, Monte Carlo
+    validators). The optimal allocation is then the one of the sampled V_hat_G;
     ``stderr`` (``uniform_stderr``) is the delta-method standard error of
-    (sum sqrt(V_hat_G))^2 (of n_G sum V_hat_G). ``info["group_stderr"]`` holds the
-    standard errors of V_hat_G and ``info["sample_mean"]``/``info["sample_mean_stderr"]``
+    (sum sqrt(V_hat_G))^2 (of n_G sum V_hat_G), and ``per_target_stderr`` that of
+    sum_G V_hat_{G,e} / f_G including the dependence of the sampled f_G on the
+    V_hat (``info["per_target_uniform_stderr"]`` for the uniform values).
+    ``info["group_stderr"]`` (``info["group_target_stderr"]``) holds the standard
+    errors of V_hat_G (V_hat_{G,e}), and ``info["sample_mean"]``/``info["sample_mean_stderr"]``
     the combined estimate of <O_e> (a uniform-shot campaign) and its error.
+    Constant targets (no non-identity strings) give zero variances and errors.
     """
     tg = _prepare(targets)
     _check_state(state, tg.n)
@@ -655,7 +748,7 @@ def qwc_variance(targets, state: QubitState, *, grouping: QWCGrouping | None = N
     ng = grouping.n_groups
     info = {"grouping": grouping, "group_sizes": grouping.sizes(), "n_terms": int(tg.B - (tg.id_col >= 0))}
     if method == "mc":
-        return _qwc_mc(tg, state, grouping, mu, int(n_shots), _rng(seed), info)
+        return _qwc_mc(tg, state, grouping, p, mu, int(n_shots), _rng(seed), info)
     if method not in ("exact", "auto"):
         raise ValueError(f"method must be 'exact' (or 'auto') or 'mc' for QWC, got {method!r}")
     indptr, cols, vals, brow, bgrp = _qwc_blocks(tg, grouping)
@@ -751,80 +844,93 @@ def _parity(a: np.ndarray) -> np.ndarray:
     return (np.bitwise_count(a) & 1).astype(np.int8)
 
 
-def _sample_variance_stderr(m4_minus_m2sq, var, s: int):
-    """Standard error of an unbiased sample variance from s samples.
-
-    Var(s^2) = (mu_4 - sigma^4)/s + 2 sigma^4/(s(s-1)) exactly. The second term
-    dominates for nearly symmetric two-point distributions (a single string with
-    <P> near 0), where mu_4 = sigma^4. For sums of the variances of several
-    correlated targets, pass the summed quantities: 2 (sum_e sigma_e^2)^2 bounds
-    the second-order term 2 sum_{e,e'} Cov_ee'^2 from above.
-    """
-    first = np.clip(m4_minus_m2sq, 0.0, None) / s
-    return np.sqrt(first + 2.0 * np.asarray(var) ** 2 / (s * (s - 1)))
+def _identity_coefficients(tg: _Targets) -> np.ndarray:
+    """(K,) identity coefficient of every target (0 where absent)."""
+    if tg.id_col < 0:
+        return np.zeros(tg.K)
+    return np.asarray(tg.W[:, tg.id_col].toarray()).ravel()
 
 
-def _qwc_mc(tg: _Targets, state: QubitState, grouping: QWCGrouping, mu: np.ndarray, n_shots: int,
-            rng: np.random.Generator, info: dict) -> VarianceResult:
+def _qwc_mc(tg: _Targets, state: QubitState, grouping: QWCGrouping, p: np.ndarray, mu: np.ndarray,
+            n_shots: int, rng: np.random.Generator, info: dict) -> VarianceResult:
     if tg.n > 20:
         raise ValueError("Monte Carlo validators need the dense state (n <= 20)")
     if n_shots < 2:
         raise ValueError("n_shots must be >= 2")
-    psi = state.to_dense()
     ng = grouping.n_groups
+    const = _identity_coefficients(tg)
+    if ng == 0:     # constant targets: nothing to measure, zero variance
+        z = np.zeros(tg.K)
+        e = np.zeros(0)
+        new_info = dict(info, group_target_variances=(e.astype(np.int64), e.astype(np.int64), e),
+                        group_stderr=e, group_target_stderr=e, sample_mean=const, sample_mean_stderr=z.copy(),
+                        per_target_uniform_stderr=z.copy())
+        return VarianceResult(scheme="qwc", method="mc", total=0.0, per_target=z, expectation=mu, n_settings=0,
+                              allocation=e, uniform_total=0.0, per_target_uniform=z.copy(), setting_variances=e,
+                              stderr=0.0, per_target_stderr=z.copy(), uniform_stderr=0.0, n_samples=0,
+                              info=new_info)
+    psi = state.to_dense()
     wn = tg.without_identity().tocsc()
     s_all = tg.xs | tg.zs
-    vb_rows, vb_grps, vb_vals, vb_se = [], [], [], []
-    vg_hat = np.zeros(ng)
-    vg_se = np.zeros(ng)
-    mean_est = np.zeros(tg.K)
+    s = n_shots
+    blocks = {k: [] for k in ("row", "grp", "v", "var_y", "cov")}
+    var_yg = np.zeros(ng)
+    mean_est = const.copy()
     mean_var = np.zeros(tg.K)
     for g in range(ng):
         mem = grouping.members(g)
         sub = wn[:, mem].tocsr()
         rows = np.flatnonzero(np.diff(sub.indptr))
+        coef = sub[rows].toarray()                                          # (rows, |G|)
         rot = rotate_to_basis(psi, int(grouping.group_x[g]), int(grouping.group_z[g]))
         probs = np.abs(rot) ** 2
-        _, b = _sample_rows(probs[None, :], np.array([n_shots]), rng)
+        _, b = _sample_rows(probs[None, :], np.array([s]), rng)
         bu = b.astype(np.uint64)
         sign = 1.0 - 2.0 * _parity(bu[:, None] & s_all[mem][None, :])     # (S, |G|)
-        x = sign @ sub[rows].toarray().T                                    # (S, rows)
-        d = x - x.mean(axis=0)
-        v = (d ** 2).sum(axis=0) / (n_shots - 1)
-        m2 = (d ** 2).mean(axis=0)
-        se = _sample_variance_stderr((d ** 4).mean(axis=0) - m2 ** 2, v, n_shots)
-        tot = (d ** 2).sum(axis=1)
-        vg_hat[g] = tot.sum() / (n_shots - 1)
-        vg_se[g] = float(_sample_variance_stderr(tot.var(), vg_hat[g], n_shots))
-        vb_rows.append(rows)
-        vb_grps.append(np.full(rows.size, g))
-        vb_vals.append(v)
-        vb_se.append(se)
+        x = sign @ coef.T                                                   # (S, rows)
+        y = (x - coef @ p[mem]) ** 2           # squared deviations from the exact group means
+        yt = y.sum(axis=1)
+        dy, dyt = y - y.mean(axis=0), yt - yt.mean()
+        var_yg[g] = dyt @ dyt / (s - 1)
+        blocks["row"].append(rows)
+        blocks["grp"].append(np.full(rows.size, g))
+        blocks["v"].append(y.mean(axis=0))
+        blocks["var_y"].append((dy ** 2).sum(axis=0) / (s - 1))
+        blocks["cov"].append(dyt @ dy / (s - 1))
         mean_est[rows] += x.mean(axis=0)
-        mean_var[rows] += v / n_shots
-    brow = np.concatenate(vb_rows).astype(np.int64)
-    bgrp = np.concatenate(vb_grps).astype(np.int64)
-    vb = np.concatenate(vb_vals)
-    seb = np.concatenate(vb_se)
-    if tg.id_col >= 0:
-        mean_est += np.asarray(tg.W[:, tg.id_col].toarray()).ravel()
+        mean_var[rows] += x.var(axis=0, ddof=1) / s
+    brow, bgrp = (np.concatenate(blocks[k]).astype(np.int64) for k in ("row", "grp"))
+    vb, var_y, cov = (np.concatenate(blocks[k]) for k in ("v", "var_y", "cov"))
     res = _allocate_groups("qwc", "mc", tg, mu, vb, brow, bgrp, ng, info)
-    sq = np.sqrt(np.clip(res.setting_variances, 0.0, None))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rel = np.where(sq > 0, vg_se / sq, 0.0)
-    stderr = float(sq.sum() * np.sqrt(np.sum(rel ** 2)))     # d(sum sqrt V)^2 / dV_G = sum sqrt V / sqrt V_G
-    f = res.allocation
-    inv_f = np.divide(1.0, f, out=np.zeros(ng), where=f > 0)
-    per_se = np.sqrt(np.bincount(brow, weights=(seb * inv_f[bgrp]) ** 2, minlength=tg.K))
+    vg = res.setting_variances                       # V_hat_G = sum_e V_hat_{G,e} = mean of yt
+    pos = vg > 0
+    sq = np.sqrt(np.where(pos, vg, 0.0))
+    t = float(sq.sum())
+    inv_v = np.divide(1.0, vg, out=np.zeros(ng), where=pos)
+    stderr = t * float(np.sqrt(np.sum(var_yg * inv_v) / s))   # d(sum sqrt V)^2 / dV_G = t / sqrt V_G
+    # Delta method for per[e] = t R_e, R_e = sum_G V_Ge / sqrt V_G, including the dependence of the
+    # sampled allocation on the V_hat: d per[e] / d V_{G,e'} = delta_ee' t / sqrt V_G + a_{G,e},
+    # a_{G,e} = (R_e - t V_Ge / V_G) / (2 sqrt V_G) (a_{G,e} = R_e / (2 sqrt V_G) for e outside G).
+    r = res.per_target / t if t > 0 else np.zeros(tg.K)
+    ok = pos[bgrp]
+    sqb = np.where(ok, sq[bgrp], 1.0)
+    alpha = np.where(ok, t / sqb, 0.0)
+    a_in = np.where(ok, (r[brow] - t * vb * inv_v[bgrp]) / (2.0 * sqb), 0.0)
+    a_out = np.where(ok, r[brow] / (2.0 * sqb), 0.0)
+    blk = alpha ** 2 * var_y + 2.0 * alpha * a_in * cov + (a_in ** 2 - a_out ** 2) * var_yg[bgrp]
+    c0 = float(np.sum(var_yg * inv_v)) / 4.0
+    per_var = (np.bincount(brow, weights=blk, minlength=tg.K) + r ** 2 * c0) / s
+    per_se = np.sqrt(np.clip(per_var, 0.0, None))
     new_info = dict(res.info)
-    new_info.update(group_stderr=vg_se, sample_mean=mean_est, sample_mean_stderr=np.sqrt(mean_var),
-                    group_target_stderr=seb)
+    new_info.update(group_stderr=np.sqrt(var_yg / s), sample_mean=mean_est, sample_mean_stderr=np.sqrt(mean_var),
+                    group_target_stderr=np.sqrt(var_y / s),
+                    per_target_uniform_stderr=ng * np.sqrt(np.bincount(brow, weights=var_y, minlength=tg.K) / s))
     return VarianceResult(scheme="qwc", method="mc", total=res.total, per_target=res.per_target,
-                          expectation=mu, n_settings=ng, allocation=f, uniform_total=res.uniform_total,
-                          per_target_uniform=res.per_target_uniform, setting_variances=res.setting_variances,
+                          expectation=mu, n_settings=ng, allocation=res.allocation, uniform_total=res.uniform_total,
+                          per_target_uniform=res.per_target_uniform, setting_variances=vg,
                           stderr=stderr, per_target_stderr=per_se,
-                          uniform_stderr=float(ng * np.sqrt(np.sum(vg_se ** 2))),
-                          n_samples=n_shots * ng, info=new_info)
+                          uniform_stderr=float(ng * np.sqrt(np.sum(var_yg) / s)),
+                          n_samples=s * ng, info=new_info)
 
 
 # ======================================================== matchgate helpers
@@ -1102,17 +1208,22 @@ class _RBSetup:
         hit = matchgate_covered(self.masks[self.non_id], pairs)
         return np.concatenate([self.id_cols, self.non_id[hit]])
 
-    def second_moments(self, cols: np.ndarray) -> np.ndarray:
-        """<O_{e,setting}^2> for every target e (K,), given the covered columns."""
+    def second_moments(self, cols: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(<O_{e,setting}^2>, covered_e) for every target e (K,), given the covered columns.
+
+        ``cols`` lists the identity column first (if present); covered_e is True when
+        the setting covers at least one non-identity string of target e.
+        """
         tg = self.tg
         if cols.size == 0:
-            return np.zeros(tg.K)
+            return np.zeros(tg.K), np.zeros(tg.K, dtype=bool)
         xc, zc = tg.xs[cols], tg.zs[cols]
         phi, x3, z3 = pauli_product(xc[:, None], zc[:, None], xc[None, :], zc[None, :])
         g = (1.0 - phi) * self.oracle(x3.ravel(), z3.ravel()).reshape(phi.shape)   # phase +-1 (commuting)
         wc = self.wp[:, cols]
+        hit = np.bincount(wc.indices[wc.indptr[self.id_cols.size]:], minlength=tg.K) > 0
         y = wc @ g
-        return np.asarray(wc.multiply(y).sum(axis=1)).ravel()
+        return np.asarray(wc.multiply(y).sum(axis=1)).ravel(), hit
 
 
 def _shadow_rb(tg: _Targets, state: QubitState, scheme: str, *, n_settings: int, rel_stderr: float | None,
@@ -1124,12 +1235,27 @@ def _shadow_rb(tg: _Targets, state: QubitState, scheme: str, *, n_settings: int,
     per = _Welford(tg.K)
     tot = _Welford(1)
     n = tg.n
+    n_cov = np.zeros(tg.K, dtype=np.int64)        # settings covering a non-identity string of target e
+    n_cov_any = 0                                  # settings covering a non-identity string of any target
+    has_terms = np.diff(tg.without_identity().indptr) > 0
 
     def run(block):
-        vals = np.stack([setup.second_moments(setup.covered(s)) for s in block])
+        nonlocal n_cov_any
+        out = [setup.second_moments(setup.covered(s)) for s in block]
+        vals = np.stack([o[0] for o in out])
+        hits = np.stack([o[1] for o in out])
         per.update(vals)
         tot.update(vals.sum(axis=1, keepdims=True))
+        n_cov[:] += hits.sum(axis=0)
+        n_cov_any += int(np.count_nonzero(hits.any(axis=1)))
 
+    def total_stderr():
+        # the spread over settings says nothing about strings that (almost) never occurred
+        if has_terms.any() and n_cov_any < _RB_MIN_COVERING:
+            return np.inf
+        return float(tot.stderr()[0])
+
+    full = (1 << n) - 1
     if settings is not None:
         block = []
         for s in settings:
@@ -1141,8 +1267,9 @@ def _shadow_rb(tg: _Targets, state: QubitState, scheme: str, *, n_settings: int,
                 s = np.sort(s, axis=1)
             else:
                 bx, bz = (int(v) for v in s)
-                if (bx | bz) >> n:
-                    raise ValueError(f"local bases must fit in {n} qubits")
+                if bx < 0 or bz < 0 or (bx | bz) != full:
+                    raise ValueError(f"a local-basis setting (bx, bz) must give every one of the {n} qubits "
+                                     f"a letter X (1, 0), Y (1, 1) or Z (0, 1): (bx | bz) == 2^{n} - 1")
                 s = (np.uint64(bx), np.uint64(bz))
             block.append(s)
             if len(block) == batch:
@@ -1163,51 +1290,50 @@ def _shadow_rb(tg: _Targets, state: QubitState, scheme: str, *, n_settings: int,
             done += nb
             if rel_stderr is not None and done >= min_settings:
                 t = float(tot.mean[0] - np.sum(mu ** 2))
-                if t > 0 and float(tot.stderr()[0]) <= rel_stderr * t:
+                if t > 0 and total_stderr() <= rel_stderr * t:
                     break
     var = per.mean - mu ** 2
     total = float(tot.mean[0] - np.sum(mu ** 2))
+    per_se = per.stderr()
+    under = has_terms & (n_cov < _RB_MIN_COVERING)
+    per_se[under] = np.inf
+    stderr = total_stderr()
+    if under.any():
+        warnings.warn(f"Rao-Blackwellized {scheme} estimate: {int(under.sum())} of {tg.K} targets were covered "
+                      f"by fewer than {_RB_MIN_COVERING} of the {per.n} settings; their per_target_stderr is "
+                      f"set to inf" + ("" if np.isfinite(stderr) else ", and so is the total's stderr")
+                      + " (info['n_covering']; use more settings)", RuntimeWarning, stacklevel=4)
     return VarianceResult(scheme=scheme, method="rb", total=total, per_target=var, expectation=mu,
-                          stderr=float(tot.stderr()[0]), per_target_stderr=per.stderr(), n_samples=per.n,
+                          stderr=stderr, per_target_stderr=per_se, n_samples=per.n,
                           info={"n_terms": int(tg.B - (tg.id_col >= 0)),
-                                "enumerated_coverage": getattr(setup, "enumerate", None)})
+                                "enumerated_coverage": getattr(setup, "enumerate", None),
+                                "n_covering": n_cov.copy(), "n_covering_any": int(n_cov_any)})
 
 
 # ================================================ snapshot Monte Carlo
 class _MomentSums:
-    """Streaming sums of d = x - mu (per target) and of y = sum_e d_e^2 (per snapshot)."""
+    """Streaming means (with standard errors) of d = x - <O> per target, of d^2 per target and of
+    sum_e d_e^2 per snapshot (the squared deviations about the exact means)."""
 
     def __init__(self, k: int):
-        self.n = 0
-        self.s1 = np.zeros(k)
-        self.s2 = np.zeros(k)
-        self.s4 = np.zeros(k)
-        self.y1 = 0.0
-        self.y2 = 0.0
+        self.d = _Welford(k)
+        self.d2 = _Welford(k)
+        self.y = _Welford(1)
 
     def update(self, d: np.ndarray) -> None:
-        self.n += d.shape[0]
         d2 = d * d
-        self.s1 += d.sum(axis=0)
-        self.s2 += d2.sum(axis=0)
-        self.s4 += (d2 * d2).sum(axis=0)
-        y = d2.sum(axis=1)
-        self.y1 += float(y.sum())
-        self.y2 += float((y * y).sum())
+        self.d.update(d)
+        self.d2.update(d2)
+        self.y.update(d2.sum(axis=1, keepdims=True))
 
     def result(self, scheme: str, mu: np.ndarray, info: dict) -> VarianceResult:
-        s = self.n
-        mean_d = self.s1 / s
-        var = (self.s2 - s * mean_d ** 2) / (s - 1)           # sample variance (around the sample mean)
-        m2, m4 = self.s2 / s, self.s4 / s                       # moments around the exact mean
-        se = _sample_variance_stderr(m4 - m2 ** 2, var, s)
-        ym = self.y1 / s
-        yse = float(_sample_variance_stderr(self.y2 / s - ym ** 2, var.sum(), s))
+        if self.d.n < 2:
+            raise ValueError("Monte Carlo validators need at least 2 snapshots")
         info = dict(info)
-        info.update(sample_mean=mu + mean_d, sample_mean_stderr=np.sqrt(np.clip(var, 0.0, None) / s))
-        return VarianceResult(scheme=scheme, method="mc", total=float(var.sum()), per_target=var,
-                              expectation=mu, stderr=float(yse), per_target_stderr=se, n_samples=s,
-                              info=info)
+        info.update(sample_mean=mu + self.d.mean, sample_mean_stderr=self.d.stderr())
+        return VarianceResult(scheme=scheme, method="mc", total=float(self.y.mean[0]), per_target=self.d2.mean.copy(),
+                              expectation=mu, stderr=float(self.y.stderr()[0]), per_target_stderr=self.d2.stderr(),
+                              n_samples=self.d.n, info=info)
 
 
 def _pauli_shadow_mc(tg: _Targets, state: QubitState, mu: np.ndarray, n_snapshots: int, batch: int,
@@ -1342,11 +1468,14 @@ def pauli_shadow_variance(targets, state: QubitState, *, method: str = "auto", n
             E[x_j x_k] = 3^{|supp_j n supp_k|} <P_j P_k>. ``info["n_pairs"]`` counts them.
         "rb": Rao-Blackwellized Monte Carlo over ``n_settings`` random local bases
             (stops early once stderr <= rel_stderr * total, after ``min_settings``),
-            or over the explicit ``settings`` (iterable of (bx, bz) masks; all 3^n
-            bases give the exact value). ``stderr``/``per_target_stderr`` are the
-            standard errors over settings.
+            or over the explicit ``settings`` (iterable of (bx, bz) masks with one
+            letter per qubit, (bx | bz) = 2^n - 1; all 3^n bases give the exact
+            value). ``stderr``/``per_target_stderr`` are the standard errors over
+            settings, inf where fewer than 10 settings covered the target
+            (``info["n_covering"]``; module docstring).
         "mc": ``n_snapshots`` simulated snapshots (random bases, outcomes sampled
-            from the rotated dense state); sample variances with standard errors.
+            from the rotated dense state); mean squared deviations from <O_e>
+            with standard errors (module docstring).
         "auto" (default): "exact" if the number of pairs (sum over targets of
             m(m+1)/2 for m terms) is at most ``max_pairs``, else "rb".
     """
@@ -1389,13 +1518,25 @@ def combine_independent(results: Sequence[VarianceResult]) -> VarianceResult:
     For experiments l with per-shot variances v_{l,e} (e.g. the DF-fragment
     auxiliary states, A_hat_e = sum_l (-Q_hat_e^{(l)} / delta)), a fraction f_l of the
     shots on experiment l gives Var_e = sum_l v_{l,e} / f_l per shot. The optimum
-    f_l = sqrt(V_l) / sum sqrt(V_m), V_l = sum_e v_{l,e}, gives
-    ``total`` = (sum_l sqrt(V_l))^2; ``uniform_total`` = L sum_l V_l. Expectations
-    add up; ``n_settings`` is the sum over the parts (None if any part is
-    randomized); ``allocation`` holds the f_l. Nested optimal allocations (e.g. QWC
+    f_l = sqrt(V_l) / sum sqrt(V_m), V_l = sum_e v_{l,e}, gives ``total`` =
+    (sum_l sqrt(V_l))^2 and ``per_target`` = sum_l v_{l,e} / f_l; ``allocation`` holds
+    the f_l and ``setting_variances`` the V_l. Nested optimal allocations (e.g. QWC
     groups inside each part) give the global optimum over all settings,
-    (sum_l sum_G sqrt(V_lG))^2. Standard errors (if every input has one) combine by
-    the delta method.
+    (sum_l sum_G sqrt(V_lG))^2 (tested). Expectations add up.
+
+    ``n_settings`` is the sum n_tot of the parts' settings, and ``uniform_total`` and
+    ``per_target_uniform`` mean what they mean for a single result: a uniform
+    allocation over all n_tot settings, n_tot sum_l sum_G V_lG (from the parts'
+    uniform values, U_l / n_l = sum_G V_lG). They are None if a part has no settings
+    (shadows). ``info["uniform_over_parts"]`` and ``info["per_target_uniform_over_parts"]``
+    give instead equal shots per part with the optimal allocation inside each part:
+    L sum_l V_l and L sum_l v_{l,e}.
+
+    ``stderr`` = (sum_l sqrt V_l) (sum_l se_l^2 / V_l)^{1/2} (delta method for
+    independent parts; parts without a standard error count as exact; None if no
+    part has one), and ``uniform_stderr`` likewise from the parts' uniform values.
+    ``per_target_stderr`` is None: it would need the covariances of each part's
+    per-target and total estimates. ``info["parts"]`` holds the inputs.
     """
     results = list(results)
     if not results:
@@ -1403,25 +1544,38 @@ def combine_independent(results: Sequence[VarianceResult]) -> VarianceResult:
     k = results[0].n_targets
     if any(r.n_targets != k for r in results):
         raise ValueError("all results must have the same number of targets")
+    n_parts = len(results)
     v = np.array([r.total for r in results], dtype=float)
     sq = np.sqrt(np.clip(v, 0.0, None))
-    f = sq / sq.sum() if sq.sum() > 0 else np.full(v.size, 1.0 / v.size)
-    inv_f = np.divide(1.0, f, out=np.zeros(v.size), where=f > 0)
-    per = sum(r.per_target * w for r, w in zip(results, inv_f))
-    per_u = v.size * sum(r.per_target for r in results)
+    t = float(sq.sum())
+    f = sq / t if t > 0 else np.full(n_parts, 1.0 / n_parts)
+    inv_f = np.divide(1.0, f, out=np.zeros(n_parts), where=f > 0)
+    per = sum(np.asarray(r.per_target, dtype=float) * w for r, w in zip(results, inv_f))
     stderr = None
-    if all(r.stderr is not None for r in results):
-        se = np.array([r.stderr for r in results])
-        rel = np.divide(se, sq, out=np.zeros(v.size), where=sq > 0)
-        stderr = float(sq.sum() * np.sqrt(np.sum(rel ** 2)))
+    if any(r.stderr is not None for r in results):
+        se = np.array([0.0 if r.stderr is None else float(r.stderr) for r in results])
+        rel = np.divide(se, sq, out=np.zeros(n_parts), where=sq > 0)
+        stderr = t * float(np.sqrt(np.sum(rel ** 2)))
+    nset = uniform = per_u = uniform_se = None
+    if all(r.n_settings is not None for r in results):
+        nset = int(sum(r.n_settings for r in results))
+        if all(r.uniform_total is not None and r.per_target_uniform is not None for r in results):
+            used = [r for r in results if r.n_settings > 0]
+            uniform = float(nset * sum(r.uniform_total / r.n_settings for r in used))
+            per_u = nset * sum((np.asarray(r.per_target_uniform, dtype=float) / r.n_settings for r in used),
+                               np.zeros(k))
+            if any(r.uniform_stderr is not None for r in used):
+                use = np.array([0.0 if r.uniform_stderr is None else float(r.uniform_stderr) / r.n_settings
+                                for r in used])
+                uniform_se = float(nset * np.sqrt(np.sum(use ** 2)))
     methods = sorted({r.method for r in results})
-    nset = (int(sum(r.n_settings for r in results)) if all(r.n_settings is not None for r in results)
-            else None)
+    info = {"parts": results, "uniform_over_parts": float(n_parts * v.sum()),
+            "per_target_uniform_over_parts": n_parts * sum(np.asarray(r.per_target, dtype=float) for r in results)}
     return VarianceResult(scheme="combined", method=methods[0] if len(methods) == 1 else "+".join(methods),
-                          total=float(sq.sum() ** 2), per_target=np.asarray(per, dtype=float),
+                          total=t ** 2, per_target=np.asarray(per, dtype=float),
                           expectation=sum(r.expectation for r in results), n_settings=nset, allocation=f,
-                          uniform_total=float(v.size * v.sum()), per_target_uniform=np.asarray(per_u, float),
-                          setting_variances=v, stderr=stderr, info={"parts": results})
+                          uniform_total=uniform, per_target_uniform=per_u, setting_variances=v, stderr=stderr,
+                          uniform_stderr=uniform_se, info=info)
 
 
 # ============================================================ DF basis rotation
@@ -1537,10 +1691,14 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, shift: bo
     L_l), ``n_shots`` determinants are sampled from |ci'|^2 and the diagonal
     operator is evaluated: sum_k eps_k n_k (fragment 0) or 1/2 (sum_k mu_lk n_k - c_l)^2
     (c_l = 0, or tr L_l with ``shift=True``).
-    ``setting_variances`` are the sample variances, ``total`` = (sum sqrt V_hat_l)^2
-    with its delta-method ``stderr``, ``uniform_total`` = (L + 1) sum V_hat_l with
-    ``uniform_stderr``. ``info``: ``setting_stderr``, ``fragment_sample_means``
-    and ``fragment_means_exact_distribution`` (the means over the full rotated
+    ``setting_variances`` V_hat_l are the mean squared deviations of the sampled
+    values from the exact mean of the rotated distribution (module docstring,
+    Monte Carlo validators), ``total`` = (sum sqrt V_hat_l)^2 with its delta-method
+    ``stderr`` (also ``per_target_stderr``), ``uniform_total`` = (L + 1) sum V_hat_l
+    with ``uniform_stderr``. Truncated leaves (rank < N, e.g. ``eig_threshold``)
+    are completed to an orthonormal basis whose extra orbitals carry mu = 0.
+    ``info``: ``setting_stderr``, ``fragment_sample_means`` and
+    ``fragment_means_exact_distribution`` (the means over the full rotated
     distribution, a check of the rotation convention), ``sample_mean`` (the
     energy estimate of a uniform campaign) and its ``sample_mean_stderr``.
     """
@@ -1550,6 +1708,8 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, shift: bo
     fac, _, h0m, shifts, const = _df_fragments(active, factorization, df_options, shift)
     rng = _rng(seed)
     n_shots = int(n_shots)
+    if n_shots < 2:
+        raise ValueError("n_shots must be >= 2")
     occ = _determinant_occupations(active.norb, active.nelec)
     eps, u0 = np.linalg.eigh(h0m)
     frags = [(u0, eps, None)] + [(u, mu, c) for mu, u, c in zip(fac.eigenvalues, fac.eigenvectors, shifts)]
@@ -1570,17 +1730,17 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, shift: bo
         means_d.append(float(prob @ val) / float(prob.sum()))
         idx = rng.choice(prob.size, size=n_shots, p=prob / prob.sum())
         x = val[idx]
-        d = x - x.mean()
-        v = float(d @ d) / (n_shots - 1)
-        v_hat.append(v)
-        v_se.append(float(_sample_variance_stderr(np.mean(d ** 4) - np.mean(d ** 2) ** 2, v, n_shots)))
+        y = (x - means_d[-1]) ** 2              # squared deviations from the distribution's exact mean
+        v_hat.append(float(y.mean()))
+        v_se.append(float(np.sqrt(y.var(ddof=1) / n_shots)))
         means_s.append(float(x.mean()))
-        mean_var.append(v / n_shots)
+        mean_var.append(float(x.var(ddof=1)) / n_shots)
     v_hat, v_se = np.array(v_hat), np.array(v_se)
     sq = np.sqrt(np.clip(v_hat, 0.0, None))
     rel = np.divide(v_se, sq, out=np.zeros(sq.size), where=sq > 0)
     nset = v_hat.size
-    f = sq / sq.sum()
+    f = sq / sq.sum() if sq.sum() > 0 else np.full(nset, 1.0 / nset)
+    stderr = float(sq.sum() * np.sqrt(np.sum(rel ** 2)))     # d(sum sqrt V)^2 / dV_l = sum sqrt V / sqrt V_l
     from ..fci_ops import Hamiltonian
 
     e_exact = Hamiltonian(active).energy(ci)
@@ -1592,6 +1752,6 @@ def df_variance_mc(active, state, n_shots: int, *, factorization=None, shift: bo
                           per_target=np.array([float(sq.sum() ** 2)]), expectation=np.array([e_exact]),
                           n_settings=nset, allocation=f, uniform_total=float(nset * v_hat.sum()),
                           per_target_uniform=np.array([float(nset * v_hat.sum())]), setting_variances=v_hat,
-                          stderr=float(sq.sum() * np.sqrt(np.sum(rel ** 2))),
-                          per_target_stderr=None, uniform_stderr=float(nset * np.sqrt(np.sum(v_se ** 2))),
+                          stderr=stderr, per_target_stderr=np.array([stderr]),
+                          uniform_stderr=float(nset * np.sqrt(np.sum(v_se ** 2))),
                           n_samples=n_shots * nset, info=info)

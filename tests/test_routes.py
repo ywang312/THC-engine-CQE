@@ -454,8 +454,10 @@ def test_shots_for_relative_error():
 
 def test_shots_weighted_bias_threshold_and_validation(rng):
     """The weights apply to the bias too (closed form, 1e-13); a bias with ||b|| = rel ||A|| to
-    round-off is unreachable (inf, not a huge finite S), just below it S is finite; per-element inputs
-    of different shapes, 2-D or non-finite inputs, complex variances and negative weights raise."""
+    round-off is unreachable (inf, not a huge finite S): a budget rel^2 ||A||^2 - ||b||^2 of
+    1e-14 rel^2 ||A||^2, positive beyond round-off but below the 1e-12 threshold, gives inf, while
+    1e-10 and a bias 0.9999 rel ||A|| give the finite closed form; per-element inputs of different
+    shapes, 2-D or non-finite inputs, complex variances and negative weights raise."""
     a = rng.standard_normal(50)
     v = rng.random(50) * 3
     b = 0.05 * rng.standard_normal(50)
@@ -465,6 +467,9 @@ def test_shots_weighted_bias_threshold_and_validation(rng):
     at = b / np.linalg.norm(b) * 0.3 * np.linalg.norm(a)
     assert rt.shots_for_relative_error(v, a, 0.3, bias=at) == np.inf
     assert rt.shots_for_relative_error(v, a, 0.3, bias=1.0001 * at) == np.inf
+    assert rt.shots_for_relative_error(v, a, 0.3, bias=at * np.sqrt(1 - 1e-14)) == np.inf
+    near = rt.shots_for_relative_error(v, a, 0.3, bias=at * np.sqrt(1 - 1e-10))
+    assert np.isclose(near, v.sum() / (1e-10 * 0.09 * np.sum(a ** 2)), rtol=1e-4, atol=0)
     below = rt.shots_for_relative_error(v, a, 0.3, bias=0.9999 * at)
     assert np.isclose(below, v.sum() / (0.09 * np.sum(a ** 2) - np.sum((0.9999 * at) ** 2)), rtol=1e-9, atol=0)
     bad = [((v[:3], a), {}), ((v, a), {"bias": b[:3]}), ((v.sum(), a), {"bias": b[:3]}),
@@ -482,7 +487,9 @@ def test_shots_weighted_bias_threshold_and_validation(rng):
 def test_a_global_phase_of_a_real_state_is_accepted(h4, rng):
     """aux_residual and exact_residual remove a global phase of a real CI vector (every route quantity
     is quadratic in Psi): ci e^{0.3i} and -2i ci give the real-ci results (1e-13). Imaginary noise of
-    1e-14 relative is accepted, 1e-12 and a genuinely complex state are rejected."""
+    1e-14 relative is accepted, 1e-12 and a genuinely complex state are rejected. The phase is read
+    from the largest amplitude: with a first amplitude of 1e-9, noise of 1e-15 is still accepted (its
+    own phase would be off by about 1e-6 and the state would be rejected)."""
     act, ci = h4
     for kind in tg.KINDS:
         ref = rt.exact_residual(act, ci, kind=kind)
@@ -493,6 +500,11 @@ def test_a_global_phase_of_a_real_state_is_accepted(h4, rng):
             assert np.abs(rt.aux_residual(act, np.exp(0.3j) * ci, 0.1, method, kind=kind) - ref).max() <= 1e-13
     noise = rng.standard_normal(ci.shape)
     assert np.abs(rt.exact_residual(act, ci + 1e-14j * noise) - rt.exact_residual(act, ci)).max() <= 1e-13
+    small = ci.copy()
+    small.flat[0] = 1e-9
+    small /= np.linalg.norm(small)
+    noisy = np.exp(0.3j) * (small + 1e-15j * noise)
+    assert np.abs(rt.exact_residual(act, noisy) - rt.exact_residual(act, small)).max() <= 1e-13
     for bad in (ci + 1e-12j * noise, ci + 0.1j * noise):
         with pytest.raises(ValueError, match="real"):
             rt.exact_residual(act, bad)
