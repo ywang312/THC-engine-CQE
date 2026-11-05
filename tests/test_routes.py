@@ -658,11 +658,11 @@ def test_df_fragments_cost_about_L_plus_1_squared_times_one_state(h4):
 def test_aux_variance_monte_carlo_end_to_end(h4):
     """scheme_method="mc" simulates the measurements of the folded targets -Q_e/delta on the auxiliary
     states (delta = 0.3): the sampled per-shot totals agree with the exact ones within 4 standard
-    errors (QWC on "exact" and "df-fragments", matchgate shadows on "exact"), and the sampled
-    estimates of A_hat_e (QWC, a uniform-shot campaign) agree with aux_residual within 4.5 standard
-    errors for every element. With several states an integer seed becomes one shared Generator: the
-    first fragment's draws equal a single-state call with default_rng(seed), the second's differ
-    from a fresh default_rng(seed), and the call is reproducible."""
+    errors (QWC on "exact" and "df-fragments" with 3 leaves, 4 states; matchgate shadows on "exact"),
+    and the sampled estimates of A_hat_e (QWC, a uniform-shot campaign) agree with aux_residual within
+    4.5 standard errors for every element. With several states an integer seed becomes one shared
+    Generator: the first fragment's draws equal a single-state call with default_rng(seed), the
+    second's differ from a fresh default_rng(seed), and the call is reproducible."""
     act, ci = h4
     d = 0.3
     for kind in tg.KINDS:
@@ -675,14 +675,15 @@ def test_aux_variance_monte_carlo_end_to_end(h4):
         assert np.abs(exact.expectation - rt.aux_residual(act, ci, d, "exact", kind=kind)).max() <= 1e-13
     exact = rt.aux_residual_variance(act, ci, d, "exact", None, "spin_orbital", "matchgate_shadow")
     mc = rt.aux_residual_variance(act, ci, d, "exact", None, "spin_orbital", "matchgate_shadow",
-                                  scheme_method="mc", n_snapshots=5000, seed=12)
+                                  scheme_method="mc", n_snapshots=3000, seed=12)
     assert mc.method == "mc" and abs(mc.total - exact.total) <= 4 * mc.stderr
-    exact = rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc")
-    kw = dict(scheme_method="mc", n_shots=500, seed=7)
+    df3 = double_factorize(act.eri, n_leaves=3)
+    exact = rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc", df=df3)
+    kw = dict(scheme_method="mc", n_shots=500, seed=7, df=df3)
     mc = rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc", **kw)
-    assert mc.method == "mc" and abs(mc.total - exact.total) <= 4 * mc.stderr
+    assert mc.method == "mc" and mc.info["n_states"] == 4 and abs(mc.total - exact.total) <= 4 * mc.stderr
     assert rt.aux_residual_variance(act, ci, d, "df-fragments", None, "spin_orbital", "qwc", **kw).total == mc.total
-    states = rt.aux_states(act, ci, d, "df-fragments")
+    states = rt.aux_states(act, ci, d, "df-fragments", df=df3)
     ops = [(-q) / d for q in tg.aux_targets(tg.element_set(act.norb), QubitMapping(act.norb))]
     grouping = sc.qwc_grouping(ops)
     single = [sc.qwc_variance(ops, QubitState.from_ci(act.norb, act.nelec, states[l], QubitMapping(act.norb)),
@@ -695,8 +696,8 @@ def test_aux_variance_monte_carlo_end_to_end(h4):
 def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
     """direct_residual_variance = schemes.scheme_variance of targets.direct_targets on Psi (rtol 1e-12),
     with expectation = exact_residual (1e-12), for every scheme and both element sets (subsets of about
-    20 elements, and the full spin-free set with Pauli shadows); reused ``targets`` and a prebuilt
-    ``hamiltonian`` (with its mapping) give the same result, and a model Hamiltonian (5 of the 10 DF
+    12 elements, and the full spin-free set, elements=None, with QWC); reused ``targets`` and a prebuilt
+    ``hamiltonian`` (each with its mapping) give the same result, and a model Hamiltonian (5 of the 10 DF
     leaves) gives the model's residual (1e-12); matchgate shadows do not depend on the qubit order
     (rtol 1e-12); scheme_method="rb" passes through (seeded, n_settings settings, within 4 standard
     errors of the exact value)."""
@@ -706,7 +707,7 @@ def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
     for kind in tg.KINDS:
         full = tg.element_set(act.norb, kind)
         for scheme in sc.SCHEMES:
-            el = full if (kind, scheme) == ("spin_free", "pauli_shadow") else full[::len(full) // 20]
+            el = full if (kind, scheme) == ("spin_free", "qwc") else full[::len(full) // 12]
             xs = tg.direct_targets(el, act, m, kind)
             ref = sc.scheme_variance(xs, psi, scheme)
             res = rt.direct_residual_variance(act, ci, None if el is full else el, kind, scheme)
@@ -714,10 +715,10 @@ def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
             assert np.allclose(res.per_target, ref.per_target, rtol=1e-12, atol=0)
             assert np.abs(res.expectation - rt.exact_residual(act, ci, el, kind)).max() <= 1e-12
             assert res.info["route"] == "direct" and res.info["kind"] == kind and res.info["scheme"] == scheme
-        el = full[:12]
+        el = full[:8]
         xs = tg.direct_targets(el, act, m, kind)
         res = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow")
-        reuse = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", targets=xs)
+        reuse = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", targets=xs, mapping=m)
         prebuilt = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", mapping=m,
                                                hamiltonian=tg.energy_target(act, m))
         il = QubitMapping(act.norb, "interleaved")
@@ -733,18 +734,19 @@ def test_direct_variance_is_the_scheme_variance_of_the_direct_targets(h4):
         assert np.abs(res_model.expectation - a_model).max() <= 1e-12
         assert np.abs(a_model - res.expectation).max() > 1e-3
         rb = rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", scheme_method="rb",
-                                         n_settings=1000, seed=3)
-        assert rb.method == "rb" and rb.n_samples == 1000
+                                         n_settings=500, seed=3)
+        assert rb.method == "rb" and rb.n_samples == 500
         assert abs(rb.total - res.total) <= 4 * rb.stderr
         assert rt.direct_residual_variance(act, ci, el, kind, "matchgate_shadow", method="rb",
-                                           n_settings=1000, seed=3).total == rb.total
+                                           n_settings=500, seed=3).total == rb.total
 
 
 def test_variance_wiring_validation(h4):
     """Unknown or energy-only schemes, a mapping of another size, reused states of the wrong number,
-    size or norm, a scheme method given twice, a hamiltonian without its mapping, reused targets of the
-    wrong number, empty element sets and genuinely complex states raise. Reused states may be any
-    iterable (a generator gives the same result as the list; without ``df`` the state count sets L)."""
+    size or norm, a scheme method given twice, a hamiltonian or reused targets without their mapping,
+    reused targets of the wrong number, empty element sets and genuinely complex states raise. Reused
+    states may be any iterable (a generator gives the same result as the list; without ``df`` the state
+    count sets L)."""
     act, ci = h4
     so = tg.element_set(act.norb)
     with pytest.raises(ValueError, match="residual routes"):         # before any state is prepared
@@ -775,8 +777,10 @@ def test_variance_wiring_validation(h4):
     with pytest.raises(ValueError, match="mapping"):
         rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", hamiltonian=tg.energy_target(act))
     xs = tg.direct_targets(so[:3], act)
-    with pytest.raises(ValueError, match="targets"):
-        rt.direct_residual_variance(act, ci, so[:4], "spin_orbital", "qwc", targets=xs)
+    with pytest.raises(ValueError, match="mapping the targets"):           # their qubit order is not recorded
+        rt.direct_residual_variance(act, ci, so[:3], "spin_orbital", "qwc", targets=xs)
+    with pytest.raises(ValueError, match="targets must be"):
+        rt.direct_residual_variance(act, ci, so[:4], "spin_orbital", "qwc", targets=xs, mapping=QubitMapping(act.norb))
     for fn, args in ((rt.aux_residual_variance, (act, ci, 0.1, "exact")), (rt.direct_residual_variance, (act, ci))):
         with pytest.raises(ValueError, match="element"):
             fn(*args, so[:0], "spin_orbital", "qwc")

@@ -594,10 +594,14 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
             ``targets.element_set(N, kind)``).
         scheme: one of ``schemes.SCHEMES``.
         **opts: the route options ``mapping`` (QubitMapping, default blocked),
-            ``hamiltonian`` (a prebuilt qubit Hamiltonian, passed to ``direct_targets``;
-            it needs the ``mapping`` it was built with) and ``targets`` (the X_e of
-            ``direct_targets(elements, active, mapping, kind)``, to reuse them for
-            several states; only their number and qubit count are checked).
+            ``hamiltonian`` (a prebuilt qubit Hamiltonian, passed to ``direct_targets``)
+            and ``targets`` (the X_e of ``direct_targets(elements, active, mapping,
+            kind)``, to reuse them for several states; only their number and qubit
+            count are checked). A PauliSum does not record its qubit order, so
+            ``hamiltonian`` and ``targets`` each require ``mapping``, the mapping they
+            were built with (ValueError without it; X_e of another order would give
+            wrong variances and a wrong ``expectation``, and a mismatched mapping
+            cannot be detected).
             ``scheme_method`` (or ``method``) is the scheme's method; every other
             keyword goes to the scheme unchanged (``n_settings``, ``rel_stderr``,
             ``seed``, ``max_pairs``, ...).
@@ -612,9 +616,10 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
     el = element_set(norb, kind) if elements is None else _as_elements(elements, kind, norb)
     if el.shape[0] == 0:
         raise ValueError("need at least one element")
-    if opts.get("hamiltonian") is not None and opts.get("mapping") is None:
-        raise ValueError("pass the mapping the hamiltonian was built with (a PauliSum does not "
-                         "record its qubit order)")
+    for name in ("hamiltonian", "targets"):
+        if opts.get(name) is not None and opts.get("mapping") is None:
+            raise ValueError(f"pass the mapping the {name} {'was' if name == 'hamiltonian' else 'were'} built "
+                             "with (a PauliSum does not record its qubit order)")
     mapping = _check_mapping(opts.pop("mapping", None), norb)
     hamiltonian = opts.pop("hamiltonian", None)
     ops = opts.pop("targets", None)

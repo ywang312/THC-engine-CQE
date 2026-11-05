@@ -83,7 +83,8 @@ E4  H4: real matchgate snapshots (``SnapshotResidual``) against the correlated a
 E5  N2: the energy of the noisy runs split by mode class of the linearized CQE at FCI: the HF symmetry
     sector (the block of K that contains the HF determinant; K is block diagonal by symmetry) and the
     other coupled states, each split into null (lambda <= 1e-10 lambda_max), soft (< 1e-3 lambda_max)
-    and stiff modes, plus "outside" (E - E_FCI minus the sum of y_m^2: higher orders). Runs: E2's N2
+    and stiff modes, plus "outside" (E - E_FCI minus the sum of y_m^2: the energy outside the coupled
+    singlets, zero up to round-off, because E - E_0 = sum_k w_k d_k^2 exactly). Runs: E2's N2
     runs and long (150-iteration) SD and L-BFGS runs with the oracle line search at S_res = 1e6, 1e7.
 Summary: per system, the cheapest E3 configuration (optimizer, candidate set, S_res, S_E) whose median
     shots to reach and stay below 1.6 mHa is lowest among the configurations in which every seed got
@@ -106,13 +107,20 @@ benchmarks/run_optimizers.py), so the pin takes effect when this file runs as a 
 
 Outputs: <out>/sampled_<system>.json, <out>/sampled_summary.md and <out>/sampled_summary.json; cached
 variances and covariances in <out>/cache (``--no-cache``). ``--summary-only`` rebuilds the markdown from
-the JSON files.
+the JSON files of ``--systems`` (its runtime total is the sum of the per-system run times). Every random
+stream is keyed by the experiment, the system and the seed index, so a system run on its own
+(``--systems lih``) gives exactly the runs of the same system inside a full run, and the systems can be
+run in separate invocations into one ``--out`` and summarized together. ``--e3-sets`` restricts E3 to
+some candidate sets (e.g. a finer (S_res, S_E) grid for pos11 and pos11+0 with ``--e3-grid``); a cell of
+such a run equals the same cell of the full grid.
 
 Usage:
     python benchmarks/run_sampled_cqe.py --threads 1 --out results/
     python benchmarks/run_sampled_cqe.py --quick --threads 1 --out /tmp/quick
     python benchmarks/run_sampled_cqe.py --experiments e1,e2 --systems h4,n2 --seeds 5 --threads 1
     python benchmarks/run_sampled_cqe.py --summary-only --out results/
+    python benchmarks/run_sampled_cqe.py --threads 1 --experiments e3 --e3-sets pos11,pos11+0 \\
+        --e3-grid 3e5:1e4,3e5:3e4,1e6:1e4,1e6:3e4 --out results/refine
 """
 
 from __future__ import annotations
@@ -394,8 +402,10 @@ class LinearTwin:
 class ModeBasis:
     """Orthonormal mode basis of the linearized CQE at FCI with named classes of modes.
 
-    ``energies(ci, e)`` returns the second-order energy y_m^2 summed per class, the sum over all modes
-    and "outside" = (e - e0) - that sum (higher orders, states outside the linearization).
+    ``energies(ci, e)`` returns y_m^2 summed per class, the sum over all modes and "outside" = (e - e0) -
+    that sum. With d_k the exact overlaps, sum_m y_m^2 = sum_k w_k d_k^2 is the exact energy of the coupled
+    states (E - E_0 = sum_k w_k d_k^2 for a normalized state), so "outside" is the energy in the other
+    states (uncoupled singlets, other spin sectors): zero up to round-off for spin-free generators.
     """
 
     def __init__(self, lin, e0: float, modes, classes: dict):
@@ -926,7 +936,8 @@ def candidate_analysis(cands, rec: RecordingEnergy, res) -> dict:
         return float(m.mean()) if m.size else 0.0
 
     nonpos = chosen_sign <= 0
-    out = {"chosen_sign": chosen_sign.tolist(), "uphill": uphill.astype(int).tolist(), "mismatch": mismatch}
+    out = {"chosen_sign": chosen_sign.tolist(), "uphill": uphill.astype(int).tolist(), "mismatch": mismatch,
+           "best_sign": best_sign.tolist(), "gain": gain.tolist()}
     for label, sl in (("all", slice(None)), ("late", half)):
         g = gain[sl]
         npos = nonpos[sl]
@@ -976,7 +987,7 @@ def run_e3(c, args) -> dict:
     c.IterationEnergyNoise = make_iteration_energy_noise()
     out = {"iterations": args.e3_iter, "exact": [], "cells": []}
     for opt in OPTIMIZERS:
-        for set_name in CANDIDATE_SETS:
+        for set_name in args.e3_sets:
             m = e3_one(c, args, opt, set_name, math.inf, math.inf, 0)
             m.update(optimizer=opt, set=set_name)
             out["exact"].append(m)
@@ -985,7 +996,7 @@ def run_e3(c, args) -> dict:
     for S_res, S_E in args.e3_grid:
         t = time.perf_counter()
         for opt in OPTIMIZERS:
-            for set_name in CANDIDATE_SETS:
+            for set_name in args.e3_sets:
                 runs = [e3_one(c, args, opt, set_name, S_res, S_E, i) for i in range(args.seeds)]
                 cell = {"optimizer": opt, "set": set_name, "S_res": S_res, "S_E": S_E, "runs": runs,
                         "stats": summarize_runs(runs)}
@@ -1218,8 +1229,11 @@ def md_e1(results: dict) -> list[str]:
               "transient-aware linear prediction for that window (from FCI); 'stationary' is noise_floor. "
               "Ratios are simulated / expected per seed (median [16-84%]). fast: |1 - eps lambda/2| < 0.98; slow: "
               "the other non-null modes; null: lambda <= 1e-10 lambda_max (undriven at first order, expected 0); "
-              "outside: E - E_FCI minus the sum of y_m^2 (higher orders). Common random numbers across S (the same "
-              "z for every S), so in the linear regime the ratios do not depend on S.", "",
+              "outside: E - E_FCI minus the sum of y_m^2, the energy in states outside the coupled singlets "
+              "(E - E_0 = sum_k w_k d_k^2 holds exactly for a normalized state, so it is zero up to round-off while "
+              "the state stays a singlet). Mode energies use the exact overlaps d_k, so 'ratio' tests the linearized "
+              "dynamics, not the energy expansion. Common random numbers across S (the same z for every S), so in "
+              "the linear regime the ratios do not depend on S.", "",
               "### Theory: floors and shots per iteration", "",
               "Floor x S (Ha x shots; divide by S). S for a floor: from the stationary total, from its fast modes, "
               "from the window expectation, and from the simulated floors (log-log interpolation of the medians; "
@@ -1334,6 +1348,12 @@ def md_e2(results: dict) -> list[str]:
     return lines
 
 
+def _sets_present(results) -> list[str]:
+    """The candidate sets of the E3 cells in the results, in the order of CANDIDATE_SETS."""
+    have = {x["set"] for r in results.values() if r.get("e3") for x in r["e3"]["cells"]}
+    return [s for s in CANDIDATE_SETS if s in have] or list(CANDIDATE_SETS)
+
+
 def _cell(results, name, opt, set_name, S_res, S_E):
     for x in results[name]["e3"]["cells"]:
         if x["optimizer"] == opt and x["set"] == set_name and x["S_res"] == S_res and x["S_E"] == S_E:
@@ -1345,7 +1365,7 @@ def md_e3(results: dict) -> list[str]:
     first = next((r["e3"] for r in results.values() if r.get("e3")), None)
     if first is None:
         return []
-    sets = list(CANDIDATE_SETS)
+    sets = _sets_present(results)
     lines = ["## E3: noisy residuals and noisy DF energies with fixed step candidates", "",
              f"From HF, {first['iterations']} iterations. Candidate sets: pos11 = 0.00625 * 2^k (k = 0..10); "
              "pos11+0 = pos11 and 0; eq11 = 0, +-{0.0125, 0.05, 0.2, 0.8, 3.2} (equal energy cost: 10 estimates "
@@ -1361,18 +1381,22 @@ def md_e3(results: dict) -> list[str]:
         for opt in OPTIMIZERS:
             cells = []
             for s in sets:
-                m = next(x for x in e3["exact"] if x["optimizer"] == opt and x["set"] == s)
-                cells.append(f"{_it(m['reach'])} / {_g(m['final'])}")
+                m = next((x for x in e3["exact"] if x["optimizer"] == opt and x["set"] == s), None)
+                cells.append("–" if m is None else f"{_it(m['reach'])} / {_g(m['final'])}")
             lines.append(f"| {name} | {opt} | " + " | ".join(cells) + " |")
     lines += ["", "### Candidate sets compared", "",
               "Pairs of sets over all cells (system, optimizer, S_res, S_E): cells where the first set needs fewer "
-              "/ more median shots to reach and stay (both reached), where only one reached, and the geometric "
-              "mean of the ratio of median final errors (first / second).", "",
-              "| comparison | fewer shots | more shots | only first reached | only second reached | neither | "
-              "final error ratio (geo. mean) | cells |", "|---|---|---|---|---|---|---|---|"]
+              "/ the same / more median shots to reach and stay (both reached), where only one reached, and the "
+              "geometric mean of the ratio of median final errors (first / second). Seeds: the same seed of the "
+              "two cells (common random numbers; pos11 and pos11+0 share every draw, so their runs are identical "
+              "until zero is first chosen), counted by which set ends with the lower final error.", "",
+              "| comparison | fewer shots | same | more shots | only first reached | only second reached | neither | "
+              "final error ratio (geo. mean) | seeds: first lower / equal / higher final | cells |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
     for a, b in (("pos11+0", "pos11"), ("eq11", "pos11"), ("dbl23", "pos11+0"), ("dbl23", "pos11"),
                  ("eq11", "pos11+0")):
-        cnt = {"fewer": 0, "more": 0, "only_a": 0, "only_b": 0, "neither": 0}
+        cnt = {"fewer": 0, "tie": 0, "more": 0, "only_a": 0, "only_b": 0, "neither": 0}
+        seeds = {"lower": 0, "equal": 0, "higher": 0}
         logs = []
         n = 0
         for name, r in results.items():
@@ -1389,7 +1413,7 @@ def md_e3(results: dict) -> list[str]:
                 sa, sb = x["stats"]["shots_stay"]["median"], y["stats"]["shots_stay"]["median"]
                 fa, fb = math.isfinite(sa), math.isfinite(sb)
                 if fa and fb:
-                    cnt["fewer" if sa < sb else "more"] += 1
+                    cnt["fewer" if sa < sb else ("tie" if sa == sb else "more")] += 1
                 elif fa:
                     cnt["only_a"] += 1
                 elif fb:
@@ -1399,16 +1423,26 @@ def md_e3(results: dict) -> list[str]:
                 ea, eb = x["stats"]["final"]["median"], y["stats"]["final"]["median"]
                 if ea > 0 and eb > 0:
                     logs.append(math.log(ea / eb))
+                fy = {ry["seed"]: ry["final"] for ry in y["runs"]}
+                for rx in x["runs"]:
+                    if rx["seed"] in fy:
+                        d = rx["final"] - fy[rx["seed"]]
+                        seeds["lower" if d < 0 else ("equal" if d == 0 else "higher")] += 1
+        if n == 0:
+            continue
         gm = math.exp(sum(logs) / len(logs)) if logs else None
-        lines.append(f"| {a} vs {b} | {cnt['fewer']} | {cnt['more']} | {cnt['only_a']} | {cnt['only_b']} | "
-                     f"{cnt['neither']} | {_g(gm)} | {n} |")
+        lines.append(f"| {a} vs {b} | {cnt['fewer']} | {cnt['tie']} | {cnt['more']} | {cnt['only_a']} | "
+                     f"{cnt['only_b']} | {cnt['neither']} | {_g(gm)} | {seeds['lower']} / {seeds['equal']} / "
+                     f"{seeds['higher']} | {n} |")
     lines += ["", "### How often zero and negative candidates are chosen, and what they gain", "",
               "Fractions of iterations (all, and in the second half of the runs, 'late'), averaged over seeds, "
               "systems and the (S_res, S_E) grid. uphill: the noisy direction has exact slope >= 0. best neg / best "
               "zero: the exact-best candidate of the set is negative / zero. gain: E_exact(chosen) - E_exact(the "
               "positive candidate the same estimates would have picked), summed over the zero or negative choices "
               "of the late half (negative = the choice helped), as mean per such choice (mHa) and the counts that "
-              "helped / hurt.", "",
+              "helped / hurt. The means are dominated by rare large events (a noise-corrupted L-BFGS direction can "
+              "make every positive candidate raise the energy by up to Ha; the zero candidate refuses such steps), "
+              "so the counts and the split below are the robust statistics.", "",
               "| optimizer | set | zero chosen | neg chosen | uphill | best neg | best zero | late: zero | late: neg | "
               "late: uphill | late: best neg | late gain per choice (mHa) | late helped / hurt | late regret (mHa) |",
               "|" + "---|" * 14]
@@ -1448,6 +1482,7 @@ def md_e3(results: dict) -> list[str]:
             lines.append(f"| {s} | {_S(sr)} | {_S(se)} | {_pct(u['zero'])} | {_pct(u['neg'])} | {_pct(u['uphill'])} | "
                          f"{_pct(u['best_neg'])} | {_pct(u['best_zero'])} | {_g(1e3 * gsum / npos) if npos else '–'} | "
                          f"{sum(x['usage_late']['n_helped'] for x in cs)} / {sum(x['usage_late']['n_hurt'] for x in cs)} |")
+    lines += _md_split(results, sets)
     lines += ["", "### All cells", "",
               "Per cell: total shots to reach and stay below 1.6 mHa, median (n ok), and the median final error.", "",
               "| system | optimizer | S_res | S_E | " + " | ".join(f"{s}: shots (n ok) / final" for s in sets) + " |",
@@ -1462,6 +1497,9 @@ def md_e3(results: dict) -> list[str]:
             cells = []
             for s in sets:
                 x = _cell(results, name, opt, s, sr, se)
+                if x is None:
+                    cells.append("–")
+                    continue
                 st = x["stats"]
                 cells.append(f"{_g(st['shots_stay']['median'])} ({st['shots_stay']['n_ok']}) / {_g(st['final']['median'])}")
             lines.append(f"| {name} | {opt} | {_S(sr)} | {_S(se)} | " + " | ".join(cells) + " |")
@@ -1481,6 +1519,50 @@ def md_e3(results: dict) -> list[str]:
                          f"{_it(x['stay_exact'])} | {_g(x['max_abs_error_diff'])} | {_g(x['seconds_iteration'])} / "
                          f"{_g(x['seconds_exact'])} |")
     lines.append("")
+    return lines
+
+
+def _md_split(results: dict, sets) -> list[str]:
+    """Zero and negative choices split (all iterations; needs the per-iteration gains of candidate_analysis)."""
+    rows = []
+    for opt in OPTIMIZERS:
+        for s in sets:
+            acc = {"zero": [], "neg": [], "zero_up": 0, "neg_up": 0, "n": 0}
+            for r in results.values():
+                for x in (r.get("e3") or {}).get("cells", []):
+                    if x["optimizer"] != opt or x["set"] != s:
+                        continue
+                    for run in x["runs"]:
+                        ca = run["candidates"]
+                        if "gain" not in ca:
+                            continue
+                        for sg, g, up in zip(ca["chosen_sign"], ca["gain"], ca["uphill"]):
+                            acc["n"] += 1
+                            if sg == 0:
+                                acc["zero"].append(g)
+                                acc["zero_up"] += up
+                            elif sg < 0:
+                                acc["neg"].append(g)
+                                acc["neg_up"] += up
+            if acc["n"] and (acc["zero"] or acc["neg"]):
+                rows.append((opt, s, acc))
+    if not rows:
+        return []
+    lines = ["", "Zero and negative choices split (all iterations, all systems and grid points): n chosen (share of "
+             "iterations), helped / hurt (gain < 0 / > 0), median and mean gain per choice (mHa), and how many of "
+             "the choices were made on uphill directions.", "",
+             "| optimizer | set | iterations | zero: n | helped / hurt | median / mean gain | on uphill | negative: n | "
+             "helped / hurt | median / mean gain | on uphill |", "|" + "---|" * 11]
+    for opt, s, a in rows:
+        cells = []
+        for k in ("zero", "neg"):
+            g = np.asarray(a[k], dtype=float)
+            if g.size == 0:
+                cells.append("0 | – | – | –")
+                continue
+            cells.append(f"{g.size} ({_pct(g.size / a['n'])}) | {int((g < 0).sum())} / {int((g > 0).sum())} | "
+                         f"{_g(1e3 * float(np.median(g)))} / {_g(1e3 * float(g.mean()))} | {a[k + '_up']}")
+        lines.append(f"| {opt} | {s} | {a['n']} | " + " | ".join(cells) + " |")
     return lines
 
 
@@ -1532,8 +1614,9 @@ def md_e5(results: dict) -> list[str]:
              f"({sec['n_in']} coupled states: {sec['n_in_null']} null, {sec['n_in_soft']} soft, {sec['n_in_stiff']} "
              f"stiff modes), the other {sec['n_out']} coupled states hold {sec['n_out_null']} null, {sec['n_out_soft']} "
              f"soft and {sec['n_out_stiff']} stiff modes (largest cross-block |K| {_g(sec['cross_block_max_abs_K'])} of "
-             f"{_g(sec['K_max'])}). Energies in Ha (median over seeds) of y_m^2 per class; outside = E - E_FCI minus "
-             "their sum. Oracle line search, correlated Gaussian residual noise.", "",
+             f"{_g(sec['K_max'])}). Energies in Ha (median over seeds) of y_m^2 per class (exact overlaps, so the "
+             "classes sum to E - E_FCI); outside = E - E_FCI minus their sum (states outside the coupled singlets, "
+             "zero up to round-off). Oracle line search, correlated Gaussian residual noise.", "",
              "| run | S_res | iteration | E - E_FCI | in: null | in: soft | in: stiff | out: null | out: soft | "
              "out: stiff | outside |", "|" + "---|" * 11]
 
@@ -1615,7 +1698,7 @@ def md_summary(results: dict) -> list[str]:
         if b is not None:
             fr = [run["ledger"]["residual_shots"] / run["ledger"]["total_shots"] for run in b["runs"]]
             share = _pct(float(np.median(fr)))
-        sets = "<br>".join(f"{s}: {_cfg(x['by_set'].get(s))}" for s in CANDIDATE_SETS)
+        sets = "<br>".join(f"{s}: {_cfg(x['by_set'].get(s))}" for s in _sets_present(results))
         opts = "<br>".join(f"{o}: {_cfg(x['by_opt'].get(o))}" for o in OPTIMIZERS)
         lines.append(f"| {name} | {ex} | {pc} | {_cfg(b)} | {share} | {sets} | {opts} |")
     lines.append("")
@@ -1746,11 +1829,8 @@ def summary_only(args) -> int:
     if not results:
         raise SystemExit(f"no sampled_<system>.json files in {args.out}")
     settings = dict(next(iter(results.values())).get("settings", {}), summary_only=True)
-    old = os.path.join(args.out, "sampled_summary.json")
+    # The systems may come from separate invocations: the total is the sum of the per-system run times.
     total = float(sum(r["timing"]["total"] for r in results.values()))
-    if os.path.exists(old):
-        with open(old) as fh:
-            total = float(json.load(fh).get("seconds", total))
     write_outputs(results, args, settings, total)
     return 0
 
@@ -1763,6 +1843,8 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=2026, help="base seed of every random stream")
     ap.add_argument("--quick", action="store_true", help=f"systems {QUICK_SYSTEMS}, 2 seeds, short runs (< 3 min)")
     ap.add_argument("--e3-check-shots", default="1e6,1e6", help="S_res,S_E of the E3 energy-variance check")
+    ap.add_argument("--e3-sets", default=",".join(CANDIDATE_SETS),
+                    help="E3 candidate sets, comma-separated subset of " + ",".join(CANDIDATE_SETS))
     ap.add_argument("--e3-grid", default=None,
                     help="E3 (S_res:S_E) points, comma-separated, e.g. 1e6:1e6,1e5:1e7 (default: the preset)")
     for opt_name, help_ in (("e1-shots", "E1 shots (correlated model)"), ("e2-shots", "E2 residual shots"),
@@ -1798,6 +1880,10 @@ def main(argv=None) -> int:
     if bad:
         raise SystemExit(f"unknown experiments {bad}; choose from {EXPERIMENTS}")
     args.e3_check_shots = tuple(float(x) for x in _names(args.e3_check_shots))
+    args.e3_sets = _names(args.e3_sets)
+    bad = [x for x in args.e3_sets if x not in CANDIDATE_SETS]
+    if bad:
+        raise SystemExit(f"unknown candidate sets {bad}; choose from {list(CANDIDATE_SETS)}")
     args.threads_env = pin_threads(args.threads)
     _import_numerics()
     os.makedirs(args.out, exist_ok=True)
