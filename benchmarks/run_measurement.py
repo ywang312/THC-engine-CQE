@@ -44,7 +44,7 @@ Conventions
 
 Reductions (to keep the full run within about 60 minutes on one thread)
 -----------------------------------------------------------------------
-* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (0.4-0.8 s for an
+* Oracle cache. Every scheme call builds a dense table of <P(x, z)> for its state (0.2-0.8 s for an
   N = 6 state against 4-16 ms for the pair sums; ``measure.routes`` docstring). While a system runs,
   the private factory ``schemes._Expectations`` is wrapped by a content-keyed LRU cache (qubit count,
   basis and amplitudes, hashed), so the 3 schemes and 2 element sets that measure one state share one
@@ -59,10 +59,10 @@ Reductions (to keep the full run within about 60 minutes on one thread)
   ``--rb-settings-claims`` (default 20000) at the claims states; the standard error of the total and
   the largest per-element relative standard error are reported (the min and max over elements of
   noisy estimates are biased outward). At the claims states the spin-orbital set also gets the exact
-  pair sums (``max_pairs=inf``; 8.8e8 commuting pairs, about 3 minutes per state, observed;
+  pair sums (``max_pairs=inf``; 8.8e8 commuting pairs, 157-168 s per state, observed;
   ``--direct-mg-exact none`` skips them), which the claims table uses, and the RB estimate there is
   compared with them (z-scores in the per-system files). H4 uses the exact pair sums.
-* Direct route with Pauli shadows at N = 6: exact pair sums (89-198 s per call, observed) only at the
+* Direct route with Pauli shadows at N = 6: exact pair sums (61-263 s per call, observed) only at the
   claims states (spin-orbital at both, spin-free at iterate 2) with ``--pauli-direct claims``
   (default); ``all`` computes them at every state, ``none`` nowhere. H4 always uses the exact sums.
 The claims states are the iterate 2 of h6a and the h6a iterate closest to 6.6 mHa above FCI (the
@@ -79,6 +79,12 @@ value lies within [0.7 lo, 1.3 hi] of a claimed range), a primary verdict (at th
 FCI for the 1.5 A energy claims, which spec_B.md places at FCI-like states) and the likely reason for
 a discrepancy. ``--summary-only`` rebuilds the markdown files and the summary from the JSON files in
 ``--out`` without computing.
+
+Caveats (section of the summary; ORIENTATION_NOTES, TRAJECTORY_NOTE): N2's active space has two
+degenerate pi pairs whose relative orientation RHF leaves to round-off; QWC, Pauli-shadow and
+Cholesky-DF numbers (and the DF-route biases) depend on it, matchgate, DF-eigh, E, sigma^2 and ||A||
+do not. LiH's single degenerate pair is a symmetry. The SD iterates themselves are reproducible to
+about 1e-9 Ha (line-search round-off).
 
 Threads: ``--threads n`` pins PySCF's OpenMP threads and, through OMP_NUM_THREADS / OPENBLAS_NUM_THREADS
 / MKL_NUM_THREADS, numpy's BLAS threads (effective only if numpy is not loaded yet, as when this file
@@ -128,6 +134,39 @@ DF_VARIANTS = (("cholesky", {}, False), ("eigh", {"first": "eigh"}, False),
                ("cholesky_shift", {}, True), ("eigh_shift", {"first": "eigh"}, True))
 SMALL_PAIRS = 2e7              # direct targets with at most this many term pairs use exact sums everywhere
 BRACKET_MAX_ITER = 60          # SD steps searched for the iterates bracketing 6.6 mHa (claims systems)
+# Caveats printed in the markdown (section "Caveats" of the summary and the per-system files). The numbers
+# are observed with rotations of the degenerate active orbitals of systems.n2 / systems.lih at FCI.
+ORIENTATION_NOTES = {
+    "n2": ("Orbital orientation (n2): the CAS(6,6) active space has two degenerate pairs, pi_u (active orbitals "
+           "0, 1) and pi_g (3, 4). `systems.n2` runs RHF without symmetry, so the orientation of each pair is set "
+           "by round-off (observed: it differed between two full runs of this script, and between fresh processes "
+           "with different BLAS thread counts). The relative orientation of the two pairs is not a symmetry of the "
+           "qubit Hamiltonian, and these numbers depend on it: the QWC (with its group counts) and Pauli-shadow "
+           "energy variances, DF with pivoted-Cholesky leaves, the df-trotter and df-fragments biases (their "
+           "fragments are the Cholesky leaves) and every per-element minimum or maximum; the aux-route QWC and "
+           "Pauli-shadow totals only weakly (at most 1.1e-4 relative between the two runs). Independent of it: "
+           "E, sigma^2, ||A||, the "
+           "matchgate totals and per-element means (energy and both routes), DF with eigh leaves and the bias of "
+           "the exact aux route. Observed at FCI over the relative angle of the pairs (7.5-degree steps over the "
+           "180-degree period): QWC blocked 3.91-8.45 and interleaved 3.00-6.40 Ha^2, Pauli shadows blocked "
+           "462-903 and interleaved 335-1467 Ha^2, Cholesky DF 1.033-1.037 Ha^2; matchgate 224.18 and DF eigh "
+           "0.928 Ha^2 unchanged. With both pairs aligned to the x and y axes the in-pair order still matters: "
+           "3.91 / 4.00 / 903 / 335 (QWC blocked / interleaved, Pauli blocked / interleaved; the orbitals of RHF "
+           "with symmetry=True, pi_u ordered y, x and pi_g x, y) or 4.12 / 3.00 / 462 / 1467 (the same order in "
+           "both pairs)."),
+    "lih": ("Orbital orientation (lih): the active space has one degenerate pair (pi, active orbitals 3, 4) in an "
+            "arbitrary orientation, but rotating it is a symmetry of H (axial symmetry), so no number here depends "
+            "on it (observed: QWC, Pauli-shadow, matchgate and DF energy variances at FCI unchanged to the printed "
+            "5 digits under rotations of the pair)."),
+}
+TRAJECTORY_NOTE = ("Reproducibility of the states: the SD iterates are reproducible to about 1e-9 Ha in E and 5e-6 "
+                   "relative in ||A|| (observed for h4, lih and n2 between runs and containers; FCI and iterate 0 agree "
+                   "to round-off). The exact line search locates each minimum from energy values, so its step is fixed "
+                   "only to about the square root of the round-off, and round-off differences (BLAS kernels, memory "
+                   "alignment) move the trajectory at that level. For h4 and lih the derived numbers changed by at "
+                   "most 3e-5 relative (observed), below the printed precision except for the rounding of a last "
+                   "digit, with one exception: per-element minima of QWC variances on df-trotter states (up to 1.6%, "
+                   "lih).")
 
 
 def build_system(name: str):
@@ -854,9 +893,11 @@ def _reason(row: dict, ref: dict) -> str:
                     f"{_g(_alt(row, 'Pauli shadows interleaved') / v[at])}x (interleaved) more")
         if cid == "Q-QWC":
             opt = _alt(row, "interleaved, optimal allocation")
+            n_g = _alt(row, "groups interleaved")
             return (f"matches uniform allocation over the QWC groups (equal shots per setting) in the interleaved "
-                    f"order, {_g(_alt(row, 'groups interleaved'))} groups against the claimed 854 (another grouping "
-                    f"order); the optimal allocation gives {_g(opt)} ({_g(opt / claimed)}x)")
+                    f"order, {_g(n_g)} groups against the claimed 854 (another grouping order); uniform allocation "
+                    f"gives v_e = n_G sum_G V_Ge, so 854 groups with the same group variances would give "
+                    f"{_g(v[at] * 854 / n_g)} (estimate); the optimal allocation gives {_g(opt)} ({_g(opt / claimed)}x)")
         if cid.startswith("bias"):
             return (f"exact exp(-i delta H), relative Frobenius bias over the 840 elements; it. 2 / closest: "
                     f"{_pct(v['it2'])} / {_pct(v['closest'])} (spin-free {_pct(_alt(row, '315 spin-free', 'it2'))} / "
@@ -871,8 +912,10 @@ def _reason(row: dict, ref: dict) -> str:
                     f"the verdict state: min / mean / max = {_g(mn)} / {_g(mean)} / {_g(mx)} against the claimed 7 / "
                     f"12-16 / 41 (min {_signed(mn / 7 - 1)}, mean {_signed(mean / 12 - 1)} of the lower end, max "
                     f"{_signed(mx / 41 - 1)}); state-independent (mean it. 2 / closest / FCI: {trend()}), so not a "
-                    f"state effect; why the claimed min and mean are larger is unknown (a sampled estimate is "
-                    f"possible)")
+                    f"state effect; max and mean agree, the min only at the edge of the 30% band. Why the claimed min "
+                    f"is larger is not explained by our variants: Pauli shadows give "
+                    f"{_g(_alt(row, 'Pauli shadows, mean', at) / mean)}x larger values, and sampling noise in a "
+                    f"per-element estimate would lower a minimum, not raise it")
         if cid.startswith("S-") and cid != "S-E-DF":
             na2, nac = norm_a("it2"), norm_a("closest")
             txt = (f"S ~ 1/||A||^2: ||A|| (840 elements) = {_g(na2, 4)} at iterate 2 and {_g(nac, 4)} at iterate "
@@ -1174,6 +1217,31 @@ def md_timing(results: dict, total: float, cache_check) -> list[str]:
     return lines + [""]
 
 
+def orientation_note(res: dict) -> list[str]:
+    """Markdown caveat for a system with degenerate active orbitals (ORIENTATION_NOTES), with this run's
+    orientation-dependent energy variances at FCI for n2."""
+    name = res["system"]
+    if name not in ORIENTATION_NOTES:
+        return []
+    text = ORIENTATION_NOTES[name]
+    f = _state(res, "fci")
+    if name == "n2" and f is not None:
+        en = f["energy"]
+        text += (f" This run, at FCI: QWC blocked / interleaved {_g(en['qwc']['blocked']['variance'], 4)} / "
+                 f"{_g(en['qwc']['interleaved']['variance'], 4)}, Pauli shadows blocked / interleaved "
+                 f"{_g(en['pauli_shadow']['blocked']['variance'], 4)} / "
+                 f"{_g(en['pauli_shadow']['interleaved']['variance'], 4)}, Cholesky DF "
+                 f"{_g(en['df']['cholesky']['variance'], 4)} Ha^2.")
+    return [text, ""]
+
+
+def md_caveats(results: dict) -> list[str]:
+    lines = ["## Caveats", ""]
+    for res in results.values():
+        lines += orientation_note(res)
+    return lines + [TRAJECTORY_NOTE, ""]
+
+
 def md_system(res: dict, deltas) -> str:
     name = res["system"]
     lines = [f"# Measurement cost: {name} ({res['label']})", "",
@@ -1185,6 +1253,7 @@ def md_system(res: dict, deltas) -> str:
                 "6.6 mHa above FCI." if res.get("bracket_iterates_added") else "")
              + (f" Claims states (iterate 2 and the iterate closest to 6.6 mHa above FCI): "
                 f"{', '.join(map(str, res['claims_states']))}." if res.get("claims_states") else ""), ""]
+    lines += orientation_note(res)
     if "direct_targets" in res:
         dt = res["direct_targets"]
         lines += [f"Direct-route targets X_e: {dt['spin_orbital']['terms']} / {dt['spin_free']['terms']} Pauli terms "
@@ -1243,6 +1312,7 @@ def markdown_summary(results: dict, rows: list[dict], args, total: float, cache_
              f"{', '.join(f'{d:g}' for d in args.deltas)}; residual systems {', '.join(args.residual_systems)}. "
              "Conventions and reductions: the script's module docstring. Per-system detail: measurement_<system>.md.", ""]
     lines += md_claims(rows)
+    lines += md_caveats(results)
     lines += md_states(results)
     lines += md_energy(results)
     if any(True for _ in _res_states(results)):

@@ -122,9 +122,9 @@ The scheme options pass through; the scheme's ``method`` is passed as
 validates the wiring end to end on H4; tested). The scheme code builds a dense
 table of <P(x, z)> for every z once per call whenever it fits (``measure.schemes``,
 "Expectation values"); for the 840 spin-orbital and 315 spin-free H6 Q_e this table
-(1024 x 4096 entries) takes 0.4-0.8 s per call, against 4-16 ms for the pair sums
-themselves (observed, one thread, any of the three schemes), so a df-fragments
-call costs about L + 1 times one state.
+(1024 x 4096 entries) takes 0.2-0.8 s per call, against 4-16 ms for the pair sums
+themselves (observed, one thread, any of the three schemes; the table time varies
+with the machine load), so a df-fragments call costs about L + 1 times one state.
 
 Shots (:func:`shots_for_relative_error`)
 ----------------------------------------
@@ -584,10 +584,10 @@ def direct_residual_variance(active, ci, elements, kind, scheme, **opts):
     strings, 1.68e9 term pairs for the 840 spin-orbital X_e; observed). With the
     scheme's default ``method="auto"``, matchgate shadows use the Rao-Blackwellized
     estimate above 2e7 pairs (default 2e4 settings; standard errors in ``stderr`` and
-    ``per_target_stderr``), and Pauli shadows always use the exact pair sums (89-99 s
-    for the 840 spin-orbital X_e at H6, 198 s for the 315 spin-free ones; observed,
-    one thread), because their Rao-Blackwellized estimate is heavy-tailed
-    (``measure.schemes``).
+    ``per_target_stderr``), and Pauli shadows always use the exact pair sums (61-99 s
+    for the 840 spin-orbital X_e at H6, 160-263 s for the 315 spin-free ones; observed,
+    one thread, depending on the machine load), because their Rao-Blackwellized
+    estimate is heavy-tailed (``measure.schemes``).
 
     Args:
         active, ci, elements, kind: as for :func:`exact_residual` (``elements=None``:
