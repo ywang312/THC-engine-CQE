@@ -33,7 +33,7 @@ Each part has a different job:
 
 Results and conclusions of M1 are in [docs/m1-results.md](docs/m1-results.md).
 
-## Status: milestone 2 (finishing)
+## Status: milestone 2 (complete)
 
 M2 asks what the CQE costs when the residual and the energies come from
 measurements, and replaces steepest descent with better optimizers.
