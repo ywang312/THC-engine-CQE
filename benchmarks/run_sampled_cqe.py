@@ -22,12 +22,16 @@ Noise models (all frozen at the FCI ground state, the linearization point of the
   are the axis-aligned D2h orbitals of ``systems.n2`` (reproducible), and the cache keys hold the system.
 * Energy (E3): DF basis rotations with shifted leaves (``EnergyNoise`` scheme "df", ``shift=True``);
   untruncated pivoted-Cholesky leaves, except N2, which uses the leaves of the supermatrix
-  eigendecomposition (``first="eigh"``; invariant under rotations of the degenerate pi orbitals, workflow
-  B). The per-shot variance V(Psi) is evaluated once per CQE iteration at the current state and reused for
-  that iteration's candidates (``IterationEnergyNoise``; the library's ``variance="exact"`` evaluates it at
-  every candidate). E3 checks this on one run per optimizer and candidate set at (S_res, S_E) = (1e6, 1e5):
-  the run uses the variance at every estimate and records, with the same normals, what the per-iteration
-  variance would have given; if no choice differs, the per-iteration run is the same run.
+  eigendecomposition (``first="eigh"``, chosen while the N2 pi orientation was arbitrary: these leaves are
+  invariant under rotations of degenerate orbitals). Shifted-DF variances at FCI, Cholesky / eigh leaves
+  (Systems table; observed): 0.614 / 0.597 (H4), 1.23 / 1.19 (H6 at 1.0 A), 0.606 / 0.905 (LiH), 0.844 /
+  0.906 Ha^2 (N2), so the leaves used carry 3% (H4, H6) and 7% (N2) more variance than the cheaper split
+  and the cheaper one for LiH. The per-shot variance V(Psi) is evaluated once per CQE iteration at the
+  current state and reused for that iteration's candidates (``IterationEnergyNoise``; the library's
+  ``variance="exact"`` evaluates it at every candidate). E3 checks this on one run per optimizer and
+  candidate set at (S_res, S_E) = (1e6, 1e5): the run uses the variance at every estimate and records, with
+  the same normals, what the per-iteration variance would have given; if no choice differs, the
+  per-iteration run is the same run (observed: 1 of 900 checked iterations, in LiH, has a different choice).
 * Symmetry projection (E6): ``grading_mask`` finds the Z2 symmetries (gradings) of the integrals, the
   abelian point-group operations under which every orbital is even or odd (g/u for the H chains, C2v for
   LiH, D2h for N2), and the pair-order entries (p,q,r,s) on which the residual of a symmetric state can be
@@ -39,12 +43,12 @@ Noise models (all frozen at the FCI ground state, the linearization point of the
   (its estimate is the zero candidate's). run_cqe also requests a current-state estimate when the set has no
   zero; with e_tol = 0 it is never used, so it is drawn (common random numbers) but charged 0 shots. Per
   iteration: pos11 11, pos11+0 12, pos5+0 6, eq11 11, dbl23 23 estimates. One ``ShotLedger`` per run.
-* L-BFGS: every noisy run passes ``curvature_tol=1e-2`` (``LBFGS_TOL``): a pair (s, y) is stored only if
-  <s, y> > 1e-2 ||s|| ||y||. With the library default 1e-12, noise-dominated, nearly orthogonal pairs drive
-  the initial scaling gamma to 1e-5..1e-8 and the direction to hundreds of times |g|, and single steps
-  raise E by up to Ha (E3 ablation, which reruns L-BFGS with 1e-12 on the same streams). Exact runs are
-  unchanged by the option on these systems (observed: iteration counts and errors after 40 and 60 steps
-  of the exact line search and of pos11).
+* L-BFGS: every run passes ``curvature_tol=1e-2`` explicitly (``LBFGS_TOL``; also the library default
+  since M2): a pair (s, y) is stored only if <s, y> > 1e-2 ||s|| ||y||. With the earlier default 1e-12,
+  noise-dominated, nearly orthogonal pairs drive the initial scaling gamma to 1e-5..1e-8 and the
+  direction to hundreds of times |g|, and single steps raise E by up to Ha (E3 ablation, which reruns
+  L-BFGS with 1e-12 on the same streams). Exact runs are unchanged by the option on these systems
+  (observed: iteration counts and errors after 40 and 60 steps of the exact line search and of pos11).
 * Seeds: every run draws from ``SeedSequence([--seed, crc32(key)])``; the key holds the experiment, the
   system and the seed index but not the shots, the optimizer or the candidate set (common random
   numbers: paired comparisons). Validation runs use the seed indices after the screening seeds (fresh).
@@ -165,6 +169,8 @@ Usage:
     python benchmarks/run_sampled_cqe.py --summary-only --out results/
     python benchmarks/run_sampled_cqe.py --threads 1 --experiments e3 --e3-sets pos11,pos11+0 \\
         --e3-grid 3e5:1e4,3e5:3e4,1e6:1e4,1e6:3e4 --out results/refine
+    python benchmarks/run_sampled_cqe.py --threads 1 --experiments e2,e6 --e2-shots 1e5,1e7,1e8 \\
+        --e6-shots 1e5,1e7,1e8 --out results/e6_highS      # the projection at other S_res (supplementary)
 """
 
 from __future__ import annotations
@@ -193,8 +199,8 @@ CANDIDATE_SETS = {
     "dbl23": (0.0,) + POS11 + tuple(-x for x in POS11),
 }
 OPTIMIZERS = ("sd", "cg", "lbfgs")
-LBFGS_TOL = 1e-2                # L-BFGS curvature_tol of every noisy run (the library default 1e-12 is the ablation)
-LBFGS_TOL_ABLATION = 1e-12
+LBFGS_TOL = 1e-2                # L-BFGS curvature_tol of every run (passed explicitly; the library default since M2)
+LBFGS_TOL_ABLATION = 1e-12      # the earlier library default (E3 ablation)
 NULL_RTOL = 1e-10               # null modes: lambda <= NULL_RTOL * lambda_max (LinearizedCQE.null_modes)
 SOFT_RTOL = 1e-3                # soft modes: lambda < SOFT_RTOL * lambda_max (docs/m2-results.md)
 FAST_P = 0.98                   # fast modes: |1 - eps lambda / 2| < FAST_P
@@ -1982,8 +1988,8 @@ def md_e3(results: dict) -> list[str]:
     w = st0.get("conv_window", CONV_WINDOW)
     costs = "; ".join(f"{s_} {_n_est(s_)}" for s_ in sets)
     lines = ["## E3: noisy residuals and noisy DF energies with fixed step candidates", "",
-             f"From HF, {H} iterations on the screening grid; L-BFGS with curvature_tol {LBFGS_TOL:g} (the library "
-             f"default {LBFGS_TOL_ABLATION:g} is the ablation below). Candidate sets: pos11 = 0.00625 * 2^k "
+             f"From HF, {H} iterations on the screening grid; L-BFGS with curvature_tol {LBFGS_TOL:g} (the earlier "
+             f"library default {LBFGS_TOL_ABLATION:g} is the ablation below). Candidate sets: pos11 = 0.00625 * 2^k "
              "(k = 0..10); pos11+0 = pos11 and 0; pos5+0 = 0 and {0.0125, 0.05, 0.2, 0.8, 3.2} (the positive "
              "magnitudes of eq11: the control for adding negatives); eq11 = 0, +-{0.0125, 0.05, 0.2, 0.8, 3.2} "
              "(negatives and a factor-4 grid, the cost of pos11); dbl23 = 0, +-pos11. Energy estimates charged per "
@@ -2155,8 +2161,9 @@ def _md_ablation(results: dict) -> list[str]:
     if not have:
         return []
     lines = ["", "### L-BFGS curvature_tol ablation", "",
-             f"The same L-BFGS runs (same seeds and draws) with curvature_tol {LBFGS_TOL_ABLATION:g} (library default) "
-             f"and {LBFGS_TOL:g} (this benchmark), at the ablation grid points. A pair (s, y) is stored only if "
+             f"The same L-BFGS runs (same seeds and draws) with curvature_tol {LBFGS_TOL_ABLATION:g} (the earlier library "
+             f"default) and {LBFGS_TOL:g} (this benchmark and the current default), at the ablation grid points. A pair "
+             "(s, y) is stored only if "
              "<s, y> > tol ||s|| ||y||. big rises: single steps that raise E - E_FCI by more than 10 mHa (runs with "
              "one / total); final > 10 mHa: runs ending above 10 mHa; ratios: geometric mean of paired late-mean "
              "ratios [95% cluster interval] (lower/equal/higher).", "",
