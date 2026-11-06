@@ -1723,3 +1723,103 @@ def test_default_runs_reproduce_stored_m2_energies(h4, opt, mode):
                   eps_candidates=BENCH_CANDS if mode == "cands" else None)
     assert res.energies.shape == stored.shape
     assert np.allclose(res.energies, stored, rtol=0.0, atol=1e-12 if mode == "cands" else 1e-8)
+
+
+# ------------------------------------------------------------------ forced first step (first_eps)
+def _dense_step(active, g, eps):
+    """(E, psi) of exp(eps G) |HF> by a dense matrix exponential on the CI space, independent of
+    the Krylov propagator and the line search."""
+    ham = Hamiltonian(active)
+    space = ham.space
+    gmat = _dense(space, lambda v: two_body(space, g, v))
+    psi = scipy.linalg.expm(eps * gmat) @ space.hf().ravel()
+    psi /= np.linalg.norm(psi)
+    return float(np.real(np.vdot(psi, _dense(space, ham.apply) @ psi))) + ham.ecore, psi
+
+
+@pytest.mark.parametrize("metric", ["spin_free", "spin_orbital"])
+@pytest.mark.parametrize("opt", ["sd", "cg", "lbfgs"])
+def test_first_eps_takes_the_given_first_step(h4, opt, metric):
+    """Step 0 of run_cqe(first_eps=x) is exp(x D_0)|HF> whatever the line search would choose:
+    eps == x exactly, one energy evaluation, and the energy and state equal a dense matrix
+    exponential of the recorded generator to 1e-9. x is 0.6 and 1.3 times the exact first
+    step, one short of the minimum and one beyond it, so both energies lie above the
+    line-search minimum."""
+    plain = run_cqe(h4, max_iter=1, optimizer=opt, metric=metric)
+    for factor in (0.6, 1.3):
+        x = factor * plain.steps[0].eps
+        res = run_cqe(h4, max_iter=1, optimizer=opt, metric=metric, first_eps=x, keep_generators=True)
+        st = res.steps[0]
+        assert st.eps == x and st.n_energy_evals == 1
+        e_ref, psi_ref = _dense_step(h4, st.generator, x)
+        assert abs(st.energy_after - e_ref) < 1e-9
+        assert abs(abs(np.vdot(psi_ref, res.ci.ravel())) - 1.0) < 1e-9
+        assert st.energy_after > plain.steps[0].energy_after
+
+
+@pytest.mark.parametrize("metric", ["spin_free", "spin_orbital"])
+@pytest.mark.parametrize("opt", ["sd", "cg", "lbfgs"])
+def test_first_eps_at_the_exact_step_reproduces_the_plain_run(h4, opt, metric):
+    """With first_eps equal to the exact first step, the 10-step run equals the plain run to
+    1e-10 Ha in every energy and 1e-8 relative in every step size. The two runs build different
+    Krylov spaces for step 0, so they agree only to the Krylov tolerance in general; on H4
+    they were measured to agree bit for bit."""
+    plain = run_cqe(h4, max_iter=10, optimizer=opt, metric=metric)
+    res = run_cqe(h4, max_iter=10, optimizer=opt, metric=metric, first_eps=plain.steps[0].eps)
+    assert len(res.steps) == len(plain.steps)
+    assert np.max(np.abs(res.energies - plain.energies)) < 1e-10
+    for a, b in zip(res.steps, plain.steps):
+        assert abs(a.eps - b.eps) <= 1e-8 * abs(b.eps)
+
+
+@pytest.mark.parametrize("opt, metric, factor", [
+    ("cg", "spin_free", 1.3), ("lbfgs", "spin_free", 0.6), ("lbfgs", "spin_orbital", 0.6),
+])
+def test_first_eps_keeps_the_step0_history(h4, opt, metric, factor):
+    """After a forced first step the optimizer keeps its step-0 history, which a restart from
+    Psi_1 would lose:
+    - every recorded direction equals the independent dense CG / L-BFGS rebuild from the
+      records, whose s_0 = eps_0 d_0 uses the forced eps, to 1e-8 relative;
+    - the step-1 direction differs from the first direction of a run restarted at Psi_1 (the
+      steepest-descent direction there).
+    Measured on H4: the step-1 directions of L-BFGS differ by 84% (spin-free) and 77%
+    (spin-orbital). The CG factor is 1.3 because at 0.6 the PR+ beta of step 1 is clipped to
+    zero (raw value -0.055), which makes CG's step 1 the steepest-descent direction there."""
+    plain = run_cqe(h4, max_iter=1, optimizer=opt, metric=metric)
+    x = factor * plain.steps[0].eps
+    res = run_cqe(h4, max_iter=6, optimizer=opt, metric=metric, first_eps=x,
+                  keep_generators=True, keep_residuals=True)
+    assert len(res.steps) == 6 and res.steps[0].eps == x
+    m = None if metric == "spin_free" else _dense_spin_orbital_metric(h4.norb, False)
+    if opt == "cg":
+        dirs = _audit_cg(res.steps, "pr+", m=m)
+        assert res.steps[1].optimizer_info["beta"] > 0.0
+    else:
+        dirs, n_pairs = _audit_lbfgs(res.steps, 10, m=m)
+        assert n_pairs[1] == 1
+    for d, s in zip(dirs, res.steps):
+        rec = _real_coords(s.generator)
+        assert np.linalg.norm(d - rec) <= 1e-8 * np.linalg.norm(rec)
+    psi1 = run_cqe(h4, max_iter=1, optimizer=opt, metric=metric, first_eps=x).ci
+    restart = run_cqe(h4, ci0=psi1, max_iter=1, optimizer=opt, metric=metric, keep_generators=True)
+    d1, d1_restart = res.steps[1].generator, restart.steps[0].generator
+    assert np.linalg.norm(d1 - d1_restart) > 0.1 * np.linalg.norm(d1_restart)
+
+
+def test_first_eps_with_estimators_and_validation(h4):
+    """With an energy_estimator the forced step is the only candidate of iteration 0 (one
+    "candidate" call); later iterations search over eps_candidates. Non-finite first_eps
+    raises ValueError."""
+    calls = []
+
+    def est(e, ci, ctx):
+        calls.append(ctx)
+        return e
+
+    res = run_cqe(h4, max_iter=3, eps_candidates=CANDS, energy_estimator=est, first_eps=0.07)
+    assert res.steps[0].eps == 0.07 and res.steps[1].eps in CANDS
+    assert calls[:2] == ["current", "candidate"] and calls[2] == "current"
+    assert calls.count("candidate") == 1 + 2 * len(CANDS)
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="first_eps"):
+            run_cqe(h4, max_iter=1, first_eps=bad)

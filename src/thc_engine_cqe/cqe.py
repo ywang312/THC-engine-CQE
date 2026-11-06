@@ -316,7 +316,7 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             optimizer_options: Mapping | None = None,
             residual_estimator: ResidualEstimator | None = None,
             energy_estimator: EnergyEstimator | None = None,
-            metric: str = "spin_free") -> CQEResult:
+            metric: str = "spin_free", first_eps: float | None = None) -> CQEResult:
     """Run the exact CQE from ``ci0`` (default: the Hartree-Fock determinant).
 
     With the default arguments this is the M1 steepest-descent CQE, bit for bit.
@@ -433,6 +433,18 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             |E_est(current) - E_est(chosen)| < e_tol. Exact energies stay in
             energy / energy_after; the estimates are recorded in energy_est /
             energy_after_est.
+        first_eps: optional step size of iteration 0, taken instead of its line
+            search (exact or over eps_candidates): Psi_1 = exp(first_eps D_0)
+            Psi_0 whatever its energy, with one energy evaluation (also through
+            energy_estimator, as the only candidate, if one is given). Later
+            iterations search as usual. The optimizer records the step like any
+            other, so "cg" and "lbfgs" keep the step-0 pair (s_0 = first_eps d_0,
+            y_0 = g_1 - g_0): this is the run that starts the measured loop after
+            a classically computed first step, e.g. the second-order step of
+            ft.trajectory.second_order_step. A restart from Psi_1 would instead
+            lose the step-0 pair. With first_eps equal to the exact first step
+            the run equals the plain run up to the Krylov tolerance (the two
+            build different Krylov spaces). Must be finite.
 
     Per iteration the hooks are called in this order: residual_estimator,
     energy_estimator("current"), then (unless the run stops) one
@@ -450,6 +462,10 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             raise ValueError("energy_estimator requires eps_candidates: the exact line search "
                              "has no estimated-energy version")
         _candidate_steps(eps_candidates)
+    if first_eps is not None:
+        first_eps = float(first_eps)
+        if not np.isfinite(first_eps):
+            raise ValueError(f"first_eps must be finite, got {first_eps}")
     ham = Hamiltonian(active)
     space = ham.space
     psi = space.hf() if ci0 is None else normalize(np.asarray(ci0).reshape(space.shape))
@@ -497,8 +513,9 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
         # Krylov space. It is conservative: the optimum is typically at 0.5-30% of it,
         # and _krylov_step doubles it if the minimum lands on the edge.
         eps_max = 1.5 / max(gnorm, 1e-12)
+        cands = eps_candidates if (first_eps is None or it > 0) else (first_eps,)
         eps, e_new, psi_new, n_evals, e_new_est = _krylov_step(ham, g, psi, eps_max, krylov_tol,
-                                                               eps_candidates, energy_estimator,
+                                                               cands, energy_estimator,
                                                                rd.energy, e_cur_est)
         opt.step_taken(eps)
         step = CQEStep(it, rd.energy, rd.variance, rd.residual_norm, slope, full_slope, eps,
