@@ -1,12 +1,14 @@
 """Tests of the surface-code layer (``thc_engine_cqe.ft.physical``, F18, F19).
 
-References independent of the module: OpenFermion's ``physical_costing.cost_estimator`` (the source
-F18 transcribes; tests that need it start with importorskip), the physical numbers of the M3
-specification (Appendix A, recomputed by the critic's ``phys_check.py`` with OpenFermion's own
-``AlgorithmParameters.estimate_cost``), and closed forms of the cycle counts and of the wall-clock
-model evaluated here.
+References independent of the module: OpenFermion's ``physical_costing`` (the source F18 transcribes:
+``cost_estimator``, ``iter_known_factories``, and its ``AlgorithmParameters.estimate_cost`` scanned at
+other budgets as cost_estimator scans at 0.1; tests that need it start with importorskip), the physical
+numbers of the M3 specification (Appendix A, recomputed by the critic's ``phys_check.py`` with
+OpenFermion's own objects), and closed forms of the cycle counts and of the wall-clock model evaluated
+here.
 """
 
+import datetime
 import math
 
 import numpy as np
@@ -17,11 +19,34 @@ from thc_engine_cqe.ft import physical as ph
 OF_MODEL = ph.SurfaceCodeModel(distances=tuple(range(7, 35, 2)))      # cost_estimator's settings
 
 
-def _cost_estimator():
+def _physical_costing():
     pytest.importorskip("openfermion")
     from openfermion.resource_estimates.surface_code_compilation import physical_costing
 
-    return physical_costing.cost_estimator
+    return physical_costing
+
+
+def _cost_estimator():
+    return _physical_costing().cost_estimator
+
+
+def _openfermion_layout(q: int, n: int, budget: float, p: float = 1e-3, distances=range(7, 45, 2)):
+    """cost_estimator's loop with OpenFermion's own objects at any budget: (distance, factory details)."""
+    pc = _physical_costing()
+    best = None
+    for fac in pc.iter_known_factories(p):
+        for d in distances:
+            prm = pc.AlgorithmParameters(
+                physical_error_rate=p, surface_code_cycle_time=datetime.timedelta(microseconds=1),
+                logical_data_qubit_distance=d, magic_state_factory=fac, toffoli_count=n,
+                max_allocated_logical_qubits=q, factory_count=4, routing_overhead_proportion=0.5)
+            c = prm.estimate_cost()
+            if c.algorithm_failure_probability > budget:
+                continue
+            key = c.physical_qubit_count * c.duration
+            if best is None or key < best[0]:
+                best = (key, prm)
+    return best[1].logical_data_qubit_distance, best[1].magic_state_factory.details
 
 
 def test_matches_openfermion_cost_estimator():
@@ -46,6 +71,28 @@ def test_matches_openfermion_cost_estimator():
         assert mine.failure == cost.algorithm_failure_probability
         compared += 1
     assert compared >= 55
+
+
+def test_factories_and_layouts_match_openfermion_at_other_error_rates():
+    """The factory list equals OpenFermion's iter_known_factories (footprint, cycles per state, failure per
+    state, in order) at p = 1e-3, where it starts with the two-level T factory, and at 2e-3 and 1e-4, where it
+    does not; it includes the AutoCCZ(l1, l1 + 2) factories with l1 >= 15, whose depth 5.75 l1 / l2 exceeds 5.
+    At p = 2e-3 the layout equals cost_estimator's (physical qubits, distance, seconds) on four circuits."""
+    pc = _physical_costing()
+    for p in (1e-3, 2e-3, 1e-4):
+        mine, ref = ph._known_factories(p), list(pc.iter_known_factories(p))
+        assert [(f.footprint, f.rounds, f.failure) for f in mine] == \
+            [(f.physical_qubit_footprint, f.rounds, f.failure_rate) for f in ref]
+        assert mine[0].name.startswith("two-level T") == (p == 1e-3)
+        deep = [f for f in mine
+                if f.name.startswith("AutoCCZ") and f.rounds > 5 * int(f.name.split("l2=")[1][:-1])]
+        assert [f.name for f in deep] == [f"AutoCCZ(l1={l1}, l2={l1 + 2})" for l1 in (15, 17, 19, 21, 23)]
+    model = ph.SurfaceCodeModel(p_phys=2e-3, distances=tuple(range(7, 35, 2)))
+    for q, n in ((100, 10 ** 6), (100, 10 ** 8), (233, 2 * 10 ** 7), (83, 43_427)):
+        cost, params = pc.cost_estimator(q, n, physical_error_rate=2e-3)
+        mine = ph.surface_code_cost(q, n, fail_budget=0.1, model=model)
+        assert (mine.physical_qubits, mine.distance, mine.seconds) == \
+            (cost.physical_qubit_count, params.logical_data_qubit_distance, cost.duration.total_seconds())
 
 
 def test_appendix_a_physical_numbers():
@@ -113,11 +160,14 @@ def test_objective_is_monotone_in_toffolis_and_budget():
             assert all(x <= y for x, y in zip(obj, obj[1:])) and math.isfinite(obj[0])
 
 
-def test_distance_is_not_monotone_in_toffolis_and_openfermion_agrees():
-    """The specification's 'd is non-decreasing in N_Tof' does not hold for the area x time optimum:
-    233 qubits at budget 0.1 take d = 15 (AutoCCZ(9, 15)) for 562 Toffolis and d = 13 (the faster
-    AutoCCZ(11, 13), shorter run, less data failure) for 1000. OpenFermion's cost_estimator makes the
-    same choice, so this is the model, not the transcription."""
+def test_distance_is_not_monotone_in_toffolis_or_budget_and_openfermion_agrees():
+    """Specification section 7's 'd is non-decreasing in N_Tof and in 1/budget' holds for neither: 233
+    qubits at budget 0.1 take d = 15 (AutoCCZ(9, 15)) for 562 Toffolis and d = 13 (the faster
+    AutoCCZ(11, 13), shorter run, less data failure) for 1000; 83 qubits and 5623 Toffolis take d = 25
+    (AutoCCZ(13, 23)) at budget 3e-5 and d = 23 (the cleaner AutoCCZ(15, 23), which leaves more of the
+    budget to the data block) at 1e-5, as a circuit and as a shot. OpenFermion's own objects (cost_estimator
+    at 0.1, its estimate_cost scanned at the other budgets) make the same choices, so this is the model,
+    not the transcription."""
     cost_estimator = _cost_estimator()
     a = ph.surface_code_cost(233, 562, fail_budget=0.1, model=OF_MODEL)
     b = ph.surface_code_cost(233, 1000, fail_budget=0.1, model=OF_MODEL)
@@ -125,17 +175,32 @@ def test_distance_is_not_monotone_in_toffolis_and_openfermion_agrees():
     assert (b.distance, b.factory) == (13, "AutoCCZ(l1=11, l2=13)")
     for n, d in ((562, 15), (1000, 13)):
         assert cost_estimator(233, n)[1].logical_data_qubit_distance == d
+    for budget, d, (l1, l2) in ((3e-5, 25, (13, 23)), (1e-5, 23, (15, 23))):
+        for shot in (False, True):
+            c = ph.surface_code_cost(83, 5623, fail_budget=budget, shot=shot)
+            assert (c.distance, c.factory) == (d, f"AutoCCZ(l1={l1}, l2={l2})")
+        d_of, details = _openfermion_layout(83, 5623, budget)
+        assert d_of == d and details.endswith(f"l1_distance={l1},l2_distance={l2}")
 
 
-def test_reaction_floor_binds_when_set():
-    """With a reaction time t_r the run lasts at least ceil(depth t_r / t_cycle) cycles: for the H6 shot
-    with t_r = 100 us and the sequential depth 43,427 that is 4.3427 s (instead of 1.249 s), and the
-    floor is inactive for a shallow depth or without reaction_us."""
-    free = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, shot=True)
-    model = ph.SurfaceCodeModel(reaction_us=100.0)
+@pytest.mark.parametrize("cycle_us", [1.0, 2.5])
+def test_reaction_floor_binds_when_set(cycle_us):
+    """With a reaction time t_r the Toffolis last at least ceil(depth t_r / t_cycle) cycles, and the 2d
+    readout cycles of a shot follow them: for the H6 shot with t_r = 100 us and the sequential depth 43,427
+    that is 4.3427 s plus 2d cycles (instead of 1.249 s), at a 1 us and a 2.5 us cycle (the floor converts
+    microseconds to cycles); the data failure is that of those cycles; the floor is inactive for a shallow
+    depth or without reaction_us."""
+    free = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, shot=True,
+                                model=ph.SurfaceCodeModel(cycle_us=cycle_us))
+    model = ph.SurfaceCodeModel(reaction_us=100.0, cycle_us=cycle_us)
     floored = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, shot=True, model=model)
-    assert floored.seconds == pytest.approx(43_427 * 100e-6, rel=1e-12) and floored.failure <= 1e-5
+    cycles = math.ceil(43_427 * 100.0 / cycle_us) + 2 * floored.distance
+    assert floored.seconds == pytest.approx(cycles * cycle_us * 1e-6, rel=1e-12)
+    data_failure = 0.1 * 0.1 ** ((floored.distance + 1) / 2) * math.ceil(1.5 * 83) * cycles
+    assert data_failure <= floored.failure <= 1e-5
     assert floored.seconds > free.seconds and floored.distance >= free.distance
+    circuit = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, model=model)
+    assert circuit.seconds == pytest.approx(math.ceil(43_427 * 100.0 / cycle_us) * cycle_us * 1e-6, rel=1e-12)
     shallow = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, shot=True, model=model, toffoli_depth=100)
     assert shallow == free
     with pytest.raises(ValueError):
@@ -159,33 +224,41 @@ def test_clifford_only_shot_lasts_two_d_cycles(cycle_us):
 
 
 def test_campaign_seconds_and_machines():
-    """T(n, M) = t_run max(n / M, min(n, 1)) (F19, fluid share, a run is not split), inf for inf runs; the
-    machines for a deadline are the smallest M with T(n, M) <= D, and none suffice when one run exceeds
-    D or the runs are infinite."""
+    """T(n, M) = t_run ceil(n / M) (F19): whole runs, each on one machine, so 5 runs on 4 machines take
+    2 t_run (the fluid share would say 1.25) and a fraction of a run is a whole run; inf for inf runs, 0 for
+    none. The machines for a deadline D are the smallest M with T(n, M) <= D, ceil(n / floor(D / t_run)):
+    4 for 1e5 runs when one machine fits 33,333 of them in D (the fluid share would say 3), 10 for ten runs
+    of 3.9 days in a week (the fluid share would say 6); None when one run exceeds D or the runs are
+    infinite."""
     run = ph.surface_code_cost(83, 43_427, fail_budget=1e-5, shot=True)
     t = run.seconds
-    for n, m in ((1e6, 1), (1e6, 7), (0.3, 1), (0.3, 5), (2.5, 4), (0.0, 3)):
-        assert ph.campaign_seconds(n, run, m) == pytest.approx(t * max(n / m, min(n, 1.0)), rel=1e-15)
+    for n, m, runs in ((1e6, 1, 1e6), (1e6, 7, 142_858), (0.3, 1, 1), (0.3, 5, 1), (2.5, 4, 1), (0.0, 3, 0),
+                       (5, 4, 2), (8, 7, 2), (7, 7, 1), (2.5, 1, 3)):
+        assert ph.campaign_seconds(n, run, m) == t * runs
     assert ph.campaign_seconds(math.inf, run, 10) == math.inf
     week = 7 * 86400
     for n in (1.0, 1e5, 4.84e5, 4.85e5, 1e9, 3.7e12):
         m = ph.machines_for(n, run)
         assert ph.campaign_seconds(n, run, m) <= week
         assert m == 1 or ph.campaign_seconds(n, run, m - 1) > week
-    assert ph.machines_for(1e5, run, deadline_s=t * 1e5 / 3.0) == 3
+        assert m == math.ceil(n / math.floor(week / t))
+    assert ph.machines_for(1e5, run, deadline_s=t * 33_333.5) == 4
+    assert ph.machines_for(1e5, run, deadline_s=t * 33_334.5) == 3
+    assert ph.machines_for(0, run) == 1 and ph.machines_for(10, run, deadline_s=math.inf) == 1
     long_run = ph.surface_code_cost(233, 1e10, fail_budget=0.1)            # 3.9 days per run
-    assert 2 * 86400 < long_run.seconds < 4 * 86400
-    assert ph.machines_for(10, long_run) == math.ceil(10 * long_run.seconds / week) == 6
-    assert ph.machines_for(1, long_run) == 1 and ph.machines_for(0.5, long_run, deadline_s=2 * 86400) == 1
-    with pytest.raises(ValueError):
-        ph.machines_for(1, long_run, deadline_s=86400.0)
-    with pytest.raises(ValueError):
-        ph.machines_for(math.inf, run)
-    for bad in (-1.0, math.nan):
+    assert 3.5 * 86400 < long_run.seconds < 4 * 86400
+    assert ph.machines_for(10, long_run) == 10 and ph.campaign_seconds(10, long_run, 10) <= week
+    assert ph.campaign_seconds(10, long_run, 9) > week
+    assert ph.machines_for(1, long_run) == 1 and ph.machines_for(0.5, long_run, deadline_s=2 * 86400) is None
+    assert ph.machines_for(1, long_run, deadline_s=86400.0) is None
+    assert ph.machines_for(math.inf, run) is None
+    for bad in (-1.0, math.nan, 1j, "10"):
         with pytest.raises(ValueError):
             ph.campaign_seconds(bad, run)
     with pytest.raises(ValueError):
         ph.campaign_seconds(10, run, 0)
+    with pytest.raises(ValueError):
+        ph.machines_for(10, run, deadline_s=0.0)
 
 
 def test_input_validation():
@@ -198,6 +271,11 @@ def test_input_validation():
     assert ph.SurfaceCodeModel(distances=[7, 9]).distances == (7, 9)
     for args, kwargs in (((0, 100), {"fail_budget": 0.1}), ((10.5, 100), {"fail_budget": 0.1}),
                          ((10, -1), {"fail_budget": 0.1}), ((10, math.inf), {"fail_budget": 0.1}),
-                         ((10, 100), {"fail_budget": 0.0}), ((10, 100), {"fail_budget": 1.5})):
+                         ((10, 100), {"fail_budget": 0.0}), ((10, 100), {"fail_budget": 1.5}),
+                         ((10, 0.5), {"fail_budget": 0.1}), ((10, 1e-9), {"fail_budget": 0.1}),
+                         ((10, 1 + 0j), {"fail_budget": 0.1}), ((10j, 100), {"fail_budget": 0.1}),
+                         ((10, 100), {"fail_budget": 0.1j}), ((10, "100"), {"fail_budget": 0.1}),
+                         ((math.nan, 100), {"fail_budget": 0.1})):
         with pytest.raises(ValueError):
             ph.surface_code_cost(*args, **kwargs)
+    assert ph.surface_code_cost(10, 1, fail_budget=0.1).seconds > 0.0          # one Toffoli is not free

@@ -17,12 +17,15 @@ with fixed signs):
     n2s   N2, 2.0 A                  D2h          CAS(6,6)
 
 They describe the same molecules as the current builders (``systems.hydrogen_chain``,
-``systems.lih``, ``systems.n2``): E_HF and E_FCI agree to 1e-10 Ha (tested for all
-seven; observed <= 1.1e-14 on one thread). Only basis-dependent quantities differ,
-because orbitals of a symmetry-adapted RHF each belong to one irrep: the degenerate
-pi pairs of N2 come out axis-aligned (pi_x in B3u and B2g, pi_y in B2u and B3g; tested
-on the AO coefficients). ``benchmark_system(name, symmetry=False)`` gives the plain
-RHF orbitals of the same geometry, which for N2 have an arbitrary pi orientation.
+``systems.lih``, ``systems.n2``) and give the same E_HF and E_FCI as plain
+(unsymmetrized) RHF orbitals of the same geometry, to 1e-10 Ha (tested for all seven;
+observed on one thread <= 7.1e-14 for n2 and n2s and <= 7.1e-15 for the others;
+``systems.n2`` is itself a D2h build, so for N2 the plain RHF is the independent
+reference). Only basis-dependent quantities differ, because orbitals of a
+symmetry-adapted RHF each belong to one irrep: the degenerate pi pairs of N2 come out
+axis-aligned (pi_x in B3u and B2g, pi_y in B2u and B3g; tested on the AO
+coefficients). ``benchmark_system(name, symmetry=False)`` gives the plain RHF orbitals
+of the same geometry, which for N2 have an arbitrary pi orientation.
 
 Orbital irreps (:func:`orbital_irreps`)
 ---------------------------------------
@@ -56,14 +59,15 @@ elements are <= 1e-10 max|A|, and the states have the HF irrep with weight > 1 -
 (:func:`ci_irrep`), as have the L-BFGS iterates up to k* + 2.
 
 In floating point the forbidden entries carry round-off, and exact runs amplify it
-(docs/m2-results.md, section 2). Observed along 20 exact L-BFGS steps: for N2 the
-forbidden entries grow by 10-100x per step from the third step on and are comparable to
-max|A| within 11 steps (n2 and n2s); the weight outside the HF irrep reaches 7e-8 (n2)
-and 2e-4 (n2s), against <= 1e-12 for the chains and LiH. Projecting the residual,
-``run_cqe(..., residual_estimator=lambda rd, ci, it: mask_pair_tensor(rd.A, irreps))``,
-keeps both at round-off (forbidden entries <= 4e-15 and 1 - weight <= 1e-15 on h4,
-h6a, h6s, n2 and n2s; tested on n2s). For the same reason :func:`mask_pair_tensor` is
-applied to directions before compilation (F3).
+(docs/m2-results.md, section 2). Observed along 20 exact L-BFGS steps (one thread; the
+values follow the round-off history, which depends on the BLAS thread count): for N2
+the forbidden entries grow by 10-150x per step from the third step on and reach max|A|
+at step 11 (n2 and n2s); the weight outside the HF irrep reaches 1.8e-7 (n2, step 10)
+and 1.9e-4 (n2s), against <= 6.4e-13 for the chains, LiH and h8. Projecting the
+residual, ``run_cqe(..., residual_estimator=lambda rd, ci, it: mask_pair_tensor(rd.A,
+irreps))``, keeps both at round-off on all seven systems (forbidden entries
+<= 6.3e-15 Ha and 1 - weight <= 3.7e-15; tested on n2s). For the same reason
+:func:`mask_pair_tensor` is applied to directions before compilation (F2a, F3).
 
 Allowed elements, allowed / all (spin-free; spin-orbital), tested:
 
@@ -83,6 +87,8 @@ norm); tested against ``pyscf.fci.addons.symmetrize_wfn``.
 """
 
 from __future__ import annotations
+
+from typing import Sequence
 
 import numpy as np
 
@@ -170,7 +176,7 @@ def orbital_irreps(active: ActiveSpace) -> np.ndarray:
     return np.asarray(ids, dtype=np.int64)
 
 
-def _check_irreps(irreps) -> np.ndarray:
+def _check_irreps(irreps: np.ndarray | Sequence[int]) -> np.ndarray:
     ir = np.asarray(irreps)
     if ir.ndim != 1 or ir.size == 0:
         raise ValueError(f"irreps must be a non-empty 1-D array, got shape {ir.shape}")
@@ -182,7 +188,7 @@ def _check_irreps(irreps) -> np.ndarray:
     return ir
 
 
-def pair_mask(irreps) -> np.ndarray:
+def pair_mask(irreps: np.ndarray | Sequence[int]) -> np.ndarray:
     """(N, N, N, N) bool: True where irrep(p) XOR irrep(q) XOR irrep(r) XOR irrep(s) == 0 (F2a).
 
     The allowed entries of every pair-order tensor of e_{pq,rs} (residual, direction).
@@ -193,7 +199,7 @@ def pair_mask(irreps) -> np.ndarray:
     return x == 0
 
 
-def element_mask(irreps, elements, kind: str) -> np.ndarray:
+def element_mask(irreps: np.ndarray | Sequence[int], elements: np.ndarray, kind: str) -> np.ndarray:
     """(K,) bool: the symmetry-allowed rows of an element array (F2a).
 
     ``elements`` has the format of ``measure.targets.element_set``: (K, 4) orbitals
@@ -222,7 +228,7 @@ def element_mask(irreps, elements, kind: str) -> np.ndarray:
     return (g[:, 0] ^ g[:, 1] ^ g[:, 2] ^ g[:, 3]) == 0
 
 
-def mask_pair_tensor(t: np.ndarray, irreps) -> np.ndarray:
+def mask_pair_tensor(t: np.ndarray, irreps: np.ndarray | Sequence[int]) -> np.ndarray:
     """Copy of the pair-order tensor ``t`` (N, N, N, N) with the forbidden entries set to zero (F2a)."""
     arr = np.asarray(t)
     mask = pair_mask(irreps)
@@ -242,12 +248,14 @@ def _string_irreps(norb: int, n_elec: int, ir: np.ndarray) -> np.ndarray:
     return out
 
 
-def ci_irrep(ci: np.ndarray, norb: int, nelec, irreps) -> tuple[int, float]:
+def ci_irrep(ci: np.ndarray, norb: int, nelec: int | tuple[int, int],
+             irreps: np.ndarray | Sequence[int]) -> tuple[int, float]:
     """Dominant irrep of a CI vector and its weight sum |c|^2 / sum |c|^2 over its determinants.
 
-    ``ci`` is a PySCF CI array (n_alpha_strings, n_beta_strings) for ``norb`` orbitals
-    with irrep ids ``irreps``; ``nelec`` is (n_alpha, n_beta) or a total (split as in
-    PySCF, n_alpha >= n_beta). A symmetry-pure state has weight 1.
+    ``ci`` is a PySCF CI array (n_alpha_strings, n_beta_strings), or its ravel, for
+    ``norb`` orbitals with irrep ids ``irreps``; ``nelec`` is (n_alpha, n_beta) or a total
+    (split as in PySCF, n_alpha = (n + n % 2) // 2 >= n_beta). A symmetry-pure state has
+    weight 1.
     """
     ir = _check_irreps(irreps)
     if ir.size != norb:
@@ -258,8 +266,9 @@ def ci_irrep(ci: np.ndarray, norb: int, nelec, irreps) -> tuple[int, float]:
     na, nb = (int(x) for x in nelec)
     ga, gb = _string_irreps(norb, na, ir), _string_irreps(norb, nb, ir)
     c = np.asarray(ci)
-    if c.size != ga.size * gb.size:
-        raise ValueError(f"ci has {c.size} entries, expected {ga.size} x {gb.size} determinants")
+    if c.shape not in ((ga.size, gb.size), (ga.size * gb.size,)):
+        raise ValueError(f"ci has shape {c.shape}, expected ({ga.size}, {gb.size}) alpha x beta strings "
+                         f"or its ravel")
     w = np.abs(c.reshape(ga.size, gb.size)) ** 2
     total = float(w.sum())
     if not total > 0.0:

@@ -13,7 +13,9 @@ and the tags [OF], [derived], [cited], [estimate], [assumption] are those of
 Units: Toffolis; A, its norms and biases in Hartree; per-shot variances v_e of the
 estimators of A_e in Ha^2. A *preparation* is one application of U_k or U_k^dagger
 (or of a circuit that contains it once). Shots and applications are real numbers, not
-rounded up, as in M2.
+rounded up, as in M2. Inputs are real: a complex number or array is accepted only if it
+is real to round-off (max |Im| <= 1e-13 max |x|, the tolerance of ``routes._real_ci``),
+and ValueError otherwise.
 
 Error target (F10) [derived; equals M2's ``routes.shots_for_relative_error``]
 ----------------------------------------------------------------------------
@@ -27,8 +29,10 @@ The variance budget is
 
 with the route bias (the aux routes' O(delta^2) term) and the factorization bias
 ||A[H'] - A[H]||_m of routes that use the block encoding of H' (``WalkParams.fact_bias_m``)
-combined by the triangle inequality. A route is infeasible (flag "infeasible", every
-count inf) when B^2 <= 1e-12 r^2 ||A||_m^2, the round-off rule of M2.
+combined by the triangle inequality. A route is infeasible when B^2 <= 1e-12 r^2 ||A||_m^2,
+the round-off rule of M2. Its cost has the flag "infeasible", infinite preparations,
+Toffolis, longest run and runs, nan Toffolis per preparation and budget 0; its logical
+qubits are the route's (without an AE phase register).
 
 Sampling routes (F10)
 ---------------------
@@ -42,11 +46,13 @@ Sampling routes (F10)
   ``measure/routes.py``]. S(delta) = sum_e m_e w_e / (delta^2 B(delta)^2),
   T(delta) = S(delta) (C(Psi_k) + C_evol(delta)), minimized over ``params.aux_deltas``;
   bias ||b(delta)||_m (``ResidualProblem.aux_bias``) plus the factorization bias;
-  Q = Q(Psi_k) + Q_walk + 1 - 2N (the evolution's register shares the 2N system qubits).
+  Q = Q(Psi_k) + Q_walk + 1 - 2N (the evolution's register shares the 2N system qubits)
+  [estimate].
 
 Per-element amplitude estimation (F11) [derived; kappa verified]
 ---------------------------------------------------------------
-A Hadamard-test circuit 𝒜 with success probability p = (1 + <O_e>/alpha_e)/2 is iterated
+A Hadamard-test circuit 𝒜 on Q_A,e = Q(Psi_k) + Q_obs,e + 1 logical qubits (the last one
+the Hadamard-test qubit), with success probability p = (1 + <O_e>/alpha_e)/2, is iterated
 with G = 𝒜 S_0 𝒜^dagger S_good, whose reflections alone are controlled; sine-window phase
 estimation gives sigma(<O_e>) <= kappa pi alpha_e / M with M applications of G, i.e.
 N_e = 2 pi kappa alpha_e / eps_e applications of 𝒜 or 𝒜^dagger (``primitives.ae_applications``;
@@ -56,17 +62,22 @@ Minimizing sum_e N_e under sum_e m_e eps_e^2 = B^2 gives eps_e proportional to
 
     N = sum_e N_e = 2 pi kappa Gamma / B,      Gamma = (sum_e m_e^(1/3) alpha_e^(2/3))^(3/2).
 
-Element e is one coherent run of N_e applications on Q_run,e = Q(Psi_k) + Q_obs +
-ceil(log2(N_e / 2)) + 1 logical qubits (phase register, Hadamard-test qubit); each
-application costs C(Psi_k) + C_obs,e + Q_run,e / 2, the last term the reflection about
-|0> per application [estimate]. T = sum_e N_e (C(Psi_k) + C_obs,e + Q_run,e / 2), and
-the longest coherent run is the largest summand. The three observables
-(C_Q = 4 Toffolis for spin-orbital, 16 for spin-free Q_e [estimate]):
+Element e is one coherent run of N_e applications on Q_run,e = Q_A,e + ceil(log2(N_e / 2))
+logical qubits (the phase register). Each application costs C(Psi_k) + C_obs,e + Q_A,e / 2;
+the last term is the controlled reflection S_0 about |0> on the qubits of 𝒜, a
+multi-controlled Z of about Q_A,e Toffolis once per G, i.e. per two applications
+[estimate]. So T = sum_e N_e (C(Psi_k) + C_obs,e + Q_A,e / 2), and the longest coherent run
+is the largest summand. Deviation from specification F11 [derived]: F11 writes the
+reflection term as Q_run,e / 2, which also counts the phase register, on which S_0 does
+not act (half a Toffoli per register qubit and application more, at most 0.7% of an
+application at the H4 smoke-run states below); and its longest run, like the AE time of
+F19, leaves the term out, although its T contains it. The three observables (C_Q = 4
+Toffolis for spin-orbital, 16 for spin-free Q_e [estimate]; every Q_obs [estimate]):
 
-    route        alpha_e              C_obs,e               Q_obs               bias
-    ae_product   2 lambda_Q,e lambda  C_W + C_Q             Q_walk - 2N + 4     factorization
-    ae_x         alpha_X,e            2 L_X,e [estimate]    ceil(log2 L_X,e) + chi + 4    none
-    ae_aux       lambda_Q,e / delta   C_evol(delta) + C_Q   Q_walk + 1 - 2N + 4 b(delta) + factorization
+    route        alpha_e              C_obs,e               Q_obs                       bias
+    ae_product   2 lambda_Q,e lambda  C_W + C_Q             Q_walk - 2N + 4             factorization
+    ae_x         alpha_X,e            2 L_X,e [estimate]    ceil(log2 L_X,e) + chi + 4  none
+    ae_aux       lambda_Q,e / delta   C_evol(delta) + C_Q   Q_walk + 1 - 2N + 4         b(delta) + factorization
 
 * ``ae_product`` (b1): the Hadamard test on U_Q U_H (separate ancillas) gives
   Im <Q_e H> / (lambda_Q lambda) and, for real Psi, A_e = -2 Im <Q_e H> [derived; dense
@@ -85,8 +96,13 @@ alpha_e = lambda_Q,e / delta), for K elements in n_B equal blocks:
     N = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B,
     T = N (C(Psi_k) + C_evol(delta) + C_probe / n_B),   C_probe = K (2 b_theta + 2),
 
-plus ceil(K / n_B) b_theta logical qubits for the probe angles. kappa_g is unknown; the
-route is reported for the band ``params.kappa_g`` and never selected by :func:`best_route`.
+plus ceil(K / n_B) b_theta logical qubits for the probe angles (b_theta >= 3, the smallest
+phase-gradient adder). C_obs is C_evol(delta) alone: the Q_e enter only through the
+probe prod_e exp(-i x_e Q_e / lambda_Q,e), whose cost C_probe contains them [memo 2,
+route c2], so the C_Q of the Hadamard-test block encoding of b3 has no counterpart
+(specification F12 leaves C_obs implicit; with C_Q it would be 16 Toffolis more per
+query, below 0.1%). kappa_g is unknown; the route is reported for the band
+``params.kappa_g`` and never selected by :func:`best_route`.
 
 Line search and energies (F13)
 ------------------------------
@@ -101,25 +117,27 @@ One iteration (F14)
 -------------------
 :func:`compare_routes` evaluates every route (AE at ``params.kappa`` and
 ``params.kappa_practical``, gradient estimation at every ``params.kappa_g``) and
-:func:`best_route` picks the cheapest in Toffolis at one kappa. The iteration cost adds
-the line search; the classical first step and the loop sums are the pipeline's
-(``ft.pipeline``). :func:`crossover_norm` gives the ||A||_m at which two routes cost the
-same.
+:func:`best_route` picks the cheapest in Toffolis at one kappa (ValueError if an AE route
+has no cost at that kappa). The iteration cost adds the line search; the classical first
+step and the loop sums are the pipeline's (``ft.pipeline``). :func:`crossover_norm` gives
+the ||A||_m at which two routes cost the same.
 
 Observed on the exact H4 SD trajectory (1.8 bohr, D2h; 28 allowed spin-free elements,
 r = 0.3; C(Psi_k) from ``ft.stateprep``: 0, 160, 1352, 2468, 3622, 4814; DF walk at
 threshold 3e-3: lambda = 4.935, C_W = 868; one thread, 4 s with the inputs): direct
 sampling is cheapest at iterates 0-2 (0, 5.8e6, 2.0e8 Toffolis) and the X-LCU route from
-iterate 3 at kappa = 1 (4.4e8 against 5.2e8 for sampling; 1.4e9 against 4.2e9 at iterate
+iterate 3 at kappa = 1 (4.3e8 against 5.2e8 for sampling; 1.4e9 against 4.2e9 at iterate
 5), from iterate 4 at kappa = 2; the aux sampling route is last throughout. The line
 search (V_E = 0.56-0.61 Ha^2) costs 0.8e9-1.6e10 Toffolis, 11-605 times the cheapest
-residual at iterates 1-5. The reflection term Q_run / 2 is at most 10% of an AE
-application (ae_product at iterate 1), 3% for ae_x.
+residual at iterates 1-5. The reflection term Q_A / 2 is at most 9.6% of an AE
+application (ae_product at iterate 1), 2.6% for ae_x.
 
-Flags: "infeasible" (B = 0), "estimate" (a Toffoli or qubit count above is an estimate),
-"assumption" (gradient estimation), "no_aux_bias" (``aux_bias`` None: the aux routes
-are costed without their O(delta^2) bias, a lower bound), "qubits_upper_bound"
-(:func:`energy_ae` without N).
+Flags: "infeasible" (B = 0), "estimate" (a Toffoli or qubit count above is an estimate:
+every route but ``direct_mg`` and the sampled energies), "assumption" (gradient
+estimation), "no_aux_bias" (``aux_bias`` None: the aux routes are costed without their
+O(delta^2) bias, a lower bound), "qubits_upper_bound" (:func:`energy_ae` without N),
+"qubits_lower_bound" (:func:`line_search_cost` without the qubits of its circuits, which
+it then reports as Q(Psi_k)).
 """
 
 from __future__ import annotations
@@ -167,6 +185,10 @@ _CROSSOVER_ROUTES = ROUTES[:-1]
 _C_Q = {"spin_orbital": 4, "spin_free": 16}
 # Round-off rule of routes.shots_for_relative_error: infeasible if B^2 <= 1e-12 r^2 ||A||_m^2.
 _BUDGET_RTOL = 1e-12
+# Complex input must be real to this relative round-off (routes._real_ci).
+_IMAG_RTOL = 1e-13
+# best_route: an AE cost belongs to the requested kappa within this relative tolerance.
+_KAPPA_RTOL = 1e-9
 # crossover_norm: scale range (relative to ||A||_m), grid points per decade, bisection steps.
 _CROSS_DECADES = 4
 _CROSS_PER_DECADE = 20
@@ -174,25 +196,49 @@ _CROSS_BISECT = 60
 
 
 # ------------------------------------------------------------------------- validation
+def _as_real(name: str, values) -> np.ndarray:
+    """A float copy of the numeric ``values``; complex input must be real to round-off."""
+    a = np.asarray(values)
+    if a.dtype.kind not in "iufc":
+        raise TypeError(f"{name} must be numeric, got {a.dtype} ({values!r:.60})")
+    if a.dtype.kind == "c":
+        if not np.all(np.isfinite(a)) or np.any(np.abs(a.imag) > _IMAG_RTOL * np.max(np.abs(a), initial=0.0)):
+            raise ValueError(f"{name} must be real (to round-off) and finite, got complex values")
+        a = a.real
+    return np.array(a, dtype=float)
+
+
 def _real(name: str, value, *, positive: bool = False) -> float:
-    x = float(value)
+    a = _as_real(name, value)
+    if a.ndim != 0:
+        raise TypeError(f"{name} must be a scalar, got shape {a.shape}")
+    x = float(a)
     if not math.isfinite(x) or x < 0.0 or (positive and x == 0.0):
         raise ValueError(f"{name} must be {'positive' if positive else 'non-negative'} and finite, got {value!r}")
     return x
 
 
 def _count(name: str, value, least: int) -> int:
-    if isinstance(value, bool) or int(value) != value or int(value) < least:
+    try:
+        ok = (not isinstance(value, (bool, complex, np.complexfloating))
+              and int(value) == value and int(value) >= least)
+    except (TypeError, ValueError, OverflowError):
+        ok = False
+    if not ok:
         raise ValueError(f"{name} must be an integer >= {least}, got {value!r}")
     return int(value)
 
 
-def _frozen_vector(name: str, values, k: int, *, dtype=float, positive: bool = False) -> np.ndarray:
-    a = np.array(values, dtype=dtype)
+def _frozen_vector(name: str, values, k: int, *, integer: bool = False, positive: bool = False) -> np.ndarray:
+    a = _as_real(name, values)
     if a.shape != (k,):
         raise ValueError(f"{name} must have shape ({k},), got {a.shape}")
     if not np.all(np.isfinite(a)) or np.any(a < 0) or (positive and np.any(a == 0)):
         raise ValueError(f"{name} must be finite and {'positive' if positive else 'non-negative'}")
+    if integer:
+        if not np.array_equal(a, np.round(a)):
+            raise ValueError(f"{name} must hold integers")
+        a = a.astype(np.int64)
     a.setflags(write=False)
     return a
 
@@ -299,7 +345,7 @@ class ResidualProblem:
         object.__setattr__(self, "elements", el)
         k = el.shape[0]
         object.__setattr__(self, "m", _frozen_vector("m", self.m, k, positive=True))
-        a = np.array(self.A, dtype=float)
+        a = _as_real("A", self.A)
         if a.shape != (k,) or not np.all(np.isfinite(a)):
             raise ValueError(f"A must be a finite real array of shape ({k},)")
         a.setflags(write=False)
@@ -307,10 +353,7 @@ class ResidualProblem:
         for name in ("v_direct", "w_aux", "alpha_x"):
             object.__setattr__(self, name, _frozen_vector(name, getattr(self, name), k))
         object.__setattr__(self, "lam_q", _frozen_vector("lam_q", self.lam_q, k, positive=True))
-        nt = np.array(self.n_terms_x)
-        if nt.dtype.kind not in "iu" and not np.array_equal(nt, np.round(nt)):
-            raise ValueError("n_terms_x must hold integers")
-        object.__setattr__(self, "n_terms_x", _frozen_vector("n_terms_x", nt, k, dtype=np.int64))
+        object.__setattr__(self, "n_terms_x", _frozen_vector("n_terms_x", self.n_terms_x, k, integer=True))
         if self.aux_bias is not None and not callable(self.aux_bias):
             raise TypeError("aux_bias must be callable (delta -> ||b(delta)||_m) or None")
 
@@ -340,7 +383,8 @@ class RouteCost:
         logical_qubits: logical qubits of the largest run.
         params: route parameters and diagnostics: ``budget`` (B, Hartree), ``bias_m``,
             ``delta``, ``kappa``, ``kappa_g``, ``n_blocks``, ``c_obs``, ...
-        flags: "infeasible", "estimate", "assumption", "no_aux_bias", "qubits_upper_bound".
+        flags: "infeasible", "estimate", "assumption", "no_aux_bias", "qubits_upper_bound",
+            "qubits_lower_bound" (module docstring).
     """
 
     route: str
@@ -385,8 +429,8 @@ def ae_allocation(alpha: np.ndarray, m: np.ndarray, budget: float) -> tuple[floa
     Gamma / B = (sum_e m_e^(1/3) alpha_e^(2/3))^(3/2) / B. Elements with alpha_e = 0 get
     eps_e = 0 (they need no applications). Units: eps_e those of alpha_e and B.
     """
-    alpha = np.asarray(alpha, dtype=float)
-    m = np.asarray(m, dtype=float)
+    alpha = _as_real("alpha", alpha)
+    m = _as_real("m", m)
     if alpha.ndim != 1 or m.shape != alpha.shape:
         raise ValueError(f"alpha and m must be 1-D arrays of one shape, got {alpha.shape} and {m.shape}")
     if not (np.all(np.isfinite(alpha)) and np.all(alpha >= 0) and np.all(np.isfinite(m)) and np.all(m > 0)):
@@ -443,11 +487,12 @@ def sampling_aux(problem: ResidualProblem, prep: PrepParams, walk: WalkParams, *
 
     S(delta) = sum_e m_e w_e / (delta^2 B(delta)^2) shots of C(Psi_k) + C_evol(delta)
     Toffolis, B(delta) with the bias ||b(delta)||_m + ``walk.fact_bias_m``; the delta of
-    ``params.aux_deltas`` with the fewest Toffolis is taken. Q = Q(Psi_k) + Q_walk + 1 - 2N.
+    ``params.aux_deltas`` with the fewest Toffolis is taken. Q = Q(Psi_k) + Q_walk + 1 - 2N
+    [estimate].
     """
     w_m = float(np.sum(problem.m * problem.w_aux))
     q = prep.logical_qubits + walk.logical_qubits + 1 - 2 * problem.norb
-    flags = _aux_flags(problem)
+    flags = ("estimate",) + _aux_flags(problem)
     info = {"r": params.r, "w_m": w_m, "walk_kind": walk.kind, "fact_bias_m": walk.fact_bias_m}
     costs = []
     for delta in params.aux_deltas:
@@ -474,20 +519,23 @@ def _ae_route(route: str, problem: ResidualProblem, prep: PrepParams, *, alpha: 
     kappa = _real("kappa", kappa, positive=True)
     k = problem.n_elements
     c_obs = np.broadcast_to(np.asarray(c_obs, dtype=float), (k,))
-    q_base = prep.logical_qubits + np.broadcast_to(np.asarray(q_obs, dtype=np.int64), (k,)) + 1
+    # Q_A: the qubits of the Hadamard-test circuit 𝒜 (state, observable, Hadamard-test qubit).
+    q_circuit = prep.logical_qubits + np.broadcast_to(np.asarray(q_obs, dtype=np.int64), (k,)) + 1
     info = dict(info, kappa=kappa, bias_m=bias_m, c_obs=float(np.mean(c_obs)))
     budget = variance_budget(problem.norm_a_m, params.r, bias_m)
     if budget == 0.0:
-        return _infeasible(route, int(q_base.max()), info, flags)
+        return _infeasible(route, int(q_circuit.max()), info, flags)
     gamma_over_b, eps = ae_allocation(alpha, problem.m, budget)
     n_e = np.divide(2.0 * math.pi * kappa * alpha, eps, out=np.zeros(k), where=eps > 0)
     register = np.where(n_e > 2.0, np.ceil(np.log2(np.maximum(n_e, 2.0) / 2.0)), 0.0).astype(np.int64)
-    q_run = q_base + register
-    run = n_e * (prep.toffolis + c_obs + 0.5 * q_run)
+    q_run = q_circuit + register
+    run = n_e * (prep.toffolis + c_obs + 0.5 * q_circuit)      # S_0 reflects 𝒜's qubits, not the register
     n_total, t_total = float(n_e.sum()), float(run.sum())
+    runs = n_e > 0                                             # alpha_e = 0: nothing to estimate
     info.update(budget=budget, gamma=gamma_over_b * budget, max_applications=float(n_e.max()))
     return RouteCost(route, n_total, t_total, t_total / n_total if n_total > 0 else math.nan,
-                     float(run.max()), float(np.count_nonzero(n_e)), int(q_run.max()), info, flags)
+                     float(run.max()), float(np.count_nonzero(runs)),
+                     int(q_run[runs].max() if runs.any() else q_circuit.max()), info, flags)
 
 
 def ae_product(problem: ResidualProblem, prep: PrepParams, walk: WalkParams, *,
@@ -549,18 +597,20 @@ def gradient_estimation(problem: ResidualProblem, prep: PrepParams, walk: WalkPa
 
     N = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B with
     alpha_e = lambda_Q,e / delta; T = N (C(Psi_k) + C_evol(delta) + C_probe / n_B),
-    C_probe = K (2 b_theta + 2). Each of the n_B blocks is one coherent run of N / n_B
-    preparations; Q = Q(Psi_k) + Q_walk + 1 - 2N + ceil(K / n_B) b_theta.
+    C_probe = K (2 b_theta + 2), which contains the Q_e (no separate C_Q; module
+    docstring). Each of the n_B blocks is one coherent run of N / n_B preparations;
+    Q = Q(Psi_k) + Q_walk + 1 - 2N + ceil(K / n_B) b_theta [estimate]. ``b_theta``, the
+    bits of a probe angle, must be at least 3 (a phase-gradient adder, F1).
     """
     kappa_g = _real("kappa_g", kappa_g, positive=True)
     k = problem.n_elements
     n_blocks = _count("n_blocks", n_blocks, 1)
     if n_blocks > k:
         raise ValueError(f"n_blocks must be at most K = {k}, got {n_blocks}")
-    b_theta = _count("b_theta", b_theta, 1)
+    b_theta = _count("b_theta", b_theta, 3)
     c_probe = k * (2 * b_theta + 2)
     q = prep.logical_qubits + walk.logical_qubits + 1 - 2 * problem.norb + math.ceil(k / n_blocks) * b_theta
-    flags = ("assumption",) + _aux_flags(problem)
+    flags = ("estimate", "assumption") + _aux_flags(problem)
     info = {"kappa_g": kappa_g, "n_blocks": n_blocks, "b_theta": b_theta, "c_probe": c_probe,
             "walk_kind": walk.kind, "fact_bias_m": walk.fact_bias_m}
     costs = []
@@ -600,11 +650,23 @@ def best_route(costs: Sequence[RouteCost], *, exclude: tuple[str, ...] = ("gaw",
                kappa: float = 1.0) -> RouteCost:
     """The cheapest cost in Toffolis among ``costs`` (first on ties), F14.
 
-    Routes in ``exclude`` are skipped, and so are AE routes evaluated at another kappa
-    (``params["kappa"] != kappa``); the sampling routes carry no kappa and always compete.
-    Infeasible routes cost inf. ValueError if nothing is left.
+    Routes in ``exclude`` are skipped, and so are AE costs evaluated at another kappa
+    (``params["kappa"]`` differs from ``kappa`` by more than 1e-9 relative); the sampling
+    routes carry no kappa and always compete. Infeasible routes cost inf. ValueError if an
+    AE route of ``costs`` (not excluded) has no cost at ``kappa``, which would silently
+    leave it out of the comparison (e.g. ``compare_routes`` with ``params.kappa`` != 1 and
+    the default ``kappa``), or if nothing is left.
     """
-    candidates = [c for c in costs if c.route not in exclude and c.params.get("kappa", kappa) == kappa]
+    kappa = _real("kappa", kappa, positive=True)
+    pool = [c for c in costs if c.route not in exclude]
+    candidates = [c for c in pool
+                  if "kappa" not in c.params or math.isclose(c.params["kappa"], kappa, rel_tol=_KAPPA_RTOL)]
+    missing = sorted({c.route for c in pool if "kappa" in c.params}
+                     - {c.route for c in candidates if "kappa" in c.params})
+    if missing:
+        present = sorted({c.params["kappa"] for c in pool if "kappa" in c.params})
+        raise ValueError(f"no {', '.join(missing)} cost at kappa = {kappa} (the AE costs have kappa in "
+                         f"{present}); pass one of these, e.g. params.kappa")
     if not candidates:
         raise ValueError(f"no route left to compare (exclude={exclude}, kappa={kappa})")
     return min(candidates, key=lambda c: c.toffolis)
@@ -640,22 +702,27 @@ def line_search_cost(energy_variance: float, prep: PrepParams, candidate_step_to
         prep: the circuit of Psi_k.
         candidate_step_toffolis: C_step(k; eps_c) for every candidate (``stateprep.candidate_step_toffolis``).
         readout_toffolis: C_rot of the DF readout rotation (``stateprep.readout_rotation_toffolis``).
-        logical_qubits: qubits of the line-search circuits (default ``prep.logical_qubits``;
-            pass the maximum over Q(Psi_k), the candidate steps and the readout rotation).
+        logical_qubits: qubits of the line-search circuits, the maximum over Q(Psi_k), the
+            candidate steps (``stateprep.elementwise_step_cost(...).logical_qubits``) and the
+            readout rotation. Without it Q(Psi_k) is reported, a lower bound (flag
+            "qubits_lower_bound"): a candidate step can need more (H4 SD k = 0: 8 against 61).
     """
     v = _real("energy_variance", energy_variance)
-    steps = np.asarray(candidate_step_toffolis, dtype=float)
+    steps = _as_real("candidate_step_toffolis", candidate_step_toffolis)
     if steps.ndim != 1 or steps.size == 0 or not np.all(np.isfinite(steps)) or np.any(steps < 0):
         raise ValueError("candidate_step_toffolis must be a non-empty 1-D array of non-negative Toffoli counts")
     c_rot = _count("readout_toffolis", readout_toffolis, 0)
-    q = prep.logical_qubits if logical_qubits is None else _count("logical_qubits", logical_qubits, 1)
+    if logical_qubits is None:
+        q, flags = prep.logical_qubits, ("qubits_lower_bound",)
+    else:
+        q, flags = _count("logical_qubits", logical_qubits, 1), ()
     shots = v / params.eps_ls ** 2
     per_shot = prep.toffolis + steps + c_rot
     n = shots * steps.size
     t = shots * float(per_shot.sum())
     return RouteCost("line_search", n, t, t / n if n > 0 else math.nan, float(per_shot.max()), n, q,
                      {"n_candidates": int(steps.size), "shots_per_candidate": shots, "eps": params.eps_ls,
-                      "energy_variance": v, "readout_toffolis": c_rot})
+                      "energy_variance": v, "readout_toffolis": c_rot}, flags)
 
 
 def energy_ae(walk: WalkParams, prep: PrepParams, *, eps: float, kappa: float = 1.0,
@@ -663,12 +730,13 @@ def energy_ae(walk: WalkParams, prep: PrepParams, *, eps: float, kappa: float = 
     """Amplitude-estimated energy of H' to RMS error ``eps`` (Hartree), F13 option.
 
     The Hadamard test on the controlled walk step has alpha = lambda, so
-    N = 2 pi kappa lambda / eps applications (F11) of C(Psi_k) + C_W + Q_run / 2 Toffolis,
-    one coherent run on Q_run = Q(Psi_k) + Q_walk - 2N + ceil(log2(N / 2)) + 1 qubits
-    (phase register and Hadamard-test qubit; ``norb`` = N, the state and the walk share
-    the 2N system qubits). ``norb=None`` counts the system register twice (an upper
-    bound by 2N, flag "qubits_upper_bound"). The estimate is the energy of H' (bias
-    E(H') - E(H), not counted).
+    N = 2 pi kappa lambda / eps applications (F11) of C(Psi_k) + C_W + Q_A / 2 Toffolis
+    (the reflection S_0 on the Q_A = Q(Psi_k) + Q_walk - 2N + 1 qubits of the Hadamard-test
+    circuit), one coherent run on Q_run = Q_A + ceil(log2(N / 2)) qubits (with the phase
+    register; ``norb`` = N, the state and the walk share the 2N system qubits).
+    ``norb=None`` counts the system register twice (an upper bound by 2N, flag
+    "qubits_upper_bound"). The estimate is the energy of H' (bias E(H') - E(H), not
+    counted).
     """
     kappa = _real("kappa", kappa, positive=True)
     eps = _real("eps", eps, positive=True)
@@ -677,9 +745,9 @@ def energy_ae(walk: WalkParams, prep: PrepParams, *, eps: float, kappa: float = 
     else:
         shared, flags = 2 * _count("norb", norb, 1), ("estimate",)
     n = 2.0 * math.pi * kappa * walk.lam / eps
-    q_run = (prep.logical_qubits + walk.logical_qubits - shared
-             + (math.ceil(math.log2(n / 2.0)) if n > 2.0 else 0) + 1)
-    per = prep.toffolis + walk.toffoli_per_step + 0.5 * q_run
+    q_circuit = prep.logical_qubits + walk.logical_qubits - shared + 1
+    q_run = q_circuit + (math.ceil(math.log2(n / 2.0)) if n > 2.0 else 0)
+    per = prep.toffolis + walk.toffoli_per_step + 0.5 * q_circuit
     return RouteCost("energy_ae", n, n * per, per, n * per, 1.0, q_run,
                      {"eps": eps, "kappa": kappa, "walk_kind": walk.kind}, flags)
 
@@ -710,10 +778,12 @@ def crossover_norm(problem: ResidualProblem, prep: PrepParams, walk: WalkParams,
 
         ||A||*_m = V_m C(Psi_k) / (2 pi kappa Gamma r (C(Psi_k) + C_obs))
 
-    for uniform C_obs (C_obs including the reflection cost Q_run / 2). The crossing is
+    for uniform C_obs (C_obs including the reflection cost Q_A / 2). The crossing is
     searched for t in [1e-4, 1e4] on a grid of 20 points per decade and refined by
-    bisection in log t; with several crossings (biases), the largest ||A||_m is returned,
-    the first one met as the CQE converges.
+    bisection in log t. With a bias an AE route becomes infeasible as r ||A||_m falls to
+    the bias, so a sampling and a biased AE route can cross twice (H4 SD: direct_mg and
+    ae_product at every iterate 1-5); the largest ||A||_m is returned, the first crossing
+    met as the CQE converges. Two crossings within one grid interval are not resolved.
     """
     for route in (route_a, route_b):
         if route not in _CROSSOVER_ROUTES:

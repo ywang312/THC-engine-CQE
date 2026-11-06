@@ -19,7 +19,10 @@ lambda_Q,e and alpha_X,e are the Pauli 1-norms (identity excluded, ``PauliSum.no
 of Q_e = (Gamma_e - Gamma_e^dagger)/(2i) (``targets.aux_targets``) and of
 X_e = i [Q_e, H] (``targets.direct_targets``), and L_X,e the number of non-identity
 Pauli terms of X_e. They are the LCU normalizations of the AE routes b1-b3 of
-``ft.residual``. A Pauli 1-norm of a fermionic operator does not depend on the
+``ft.residual``. Both operators are traceless (Gamma_e is a real matrix in the
+Jordan-Wigner basis, so tr Q_e = Im tr Gamma_e = 0, and X_e is a commutator), so
+``targets`` gives them no identity term and the exclusion removes nothing [derived;
+tested]. A Pauli 1-norm of a fermionic operator does not depend on the
 Jordan-Wigner order, because reordering the modes only changes the signs of its
 Majorana coefficients [derived]. Every spin-orbital Q_e has lambda_Q = 1/2: with four
 distinct modes Gamma_e has 16 Pauli terms of modulus 1/16, Gamma_e - Gamma_e^dagger
@@ -30,22 +33,32 @@ L_X = 698 (H4, 28 elements); lambda_Q = 1.67 and alpha_X = 13.0 Ha with L_X = 49
 (H6 at 1.0 A, 153 elements). The 1-norm is loose: ||X_e|| on the (2, 2) sector is
 0.16-0.50 alpha_X (median 0.25) for H4. Dense Pauli-LCU block encodings of H2 with these
 normalizations reproduce A_e through the Hadamard tests of b1, b2 and b3 to 1e-10
-(tests/test_ft_residual_inputs.py, slow).
+(tests/test_ft_residual_inputs.py).
 
 Per-shot variances (:func:`element_variances`; F10) [M2]
 -------------------------------------------------------
-* v_direct: ``routes.direct_residual_variance`` under matchgate shadows, by exact pair
-  sums for N <= 4 and by Rao-Blackwellized sampling of ``params.n_settings`` matchings
-  (seed ``params.seed``) otherwise; the standard errors are returned.
+* v_direct: ``routes.direct_residual_variance`` under matchgate shadows, on the weighted
+  targets sqrt(m_e) X_e, so the scheme's total is V_m = sum_e m_e v_e, the numerator of
+  the direct route's shot count, and its standard error is that of V_m, correlations
+  between the elements included. Exact pair sums are used when the pair count
+  sum_e L_e (L_e + 1) / 2 (the count of the schemes' ``method="auto"``) is at most 5e7,
+  Rao-Blackwellized sampling of ``params.n_settings`` matchings (seed ``params.seed``)
+  above. On the allowed spin-free sets: H4 7.6e6 pairs and N2 2.8e7 (exact), LiH 3.5e8 and
+  H6 2.2e9 (RB). The specification (sections 3 and 6.7) has exact sums for N <= 4 only;
+  that would give N2 a seed-dependent estimate (3730 +- 50 at seed 7, against the exact
+  3751.1) to save 2 s, so the pair count decides instead [deviation].
 * w_aux = delta^2 x ``routes.aux_residual_variance(delta=0.1, "exact", ...,
   "matchgate_shadow")``: the aux-route variance at delta is w_aux / delta^2 to O(delta^2)
   (``measure/routes.py``, "Shot cost of the routes").
 
-Observed at SD iterate 1 (spin-free, allowed set, one thread): V_m = sum_e m_e v_e =
-1216.7 Ha^2 and W_m = sum_e m_e w_e = 816.2 for H4 (exact, 2.1 s); V_m = 25126 Ha^2
-(RB, 5000 settings, standard error 33) and W_m = 11173 for H6 at 1.0 A (2.5 s). Memo 2
-had 1219 / 816 and 25138 / 11174 at SD iterate 5, so the variances are
-state-independent to about 0.2% there; a test checks H4 iterates 1 and 4 against 3%.
+Observed at SD iterate 1 (spin-free, allowed set, one thread), V_m and W_m = sum_e m_e w_e:
+H4 1216.7 Ha^2 and 816.2 (exact, 1.3 s); N2 3751.1 Ha^2 and 2117.7 (exact, 3.5 s); LiH
+37783 +- 396 Ha^2 and 7037 (RB, 5000 settings, seed 7, 1.8 s); H6 at 1.0 A 25126 +- 113 Ha^2
+and 11173 (RB, 2.9 s), against the exact 25288.5 (1.1e9 commuting pairs, 272 s).
+Computed once per system: the exact V_m at HF and SD iterates 1, 3 and 5 is 1220.2 /
+1216.7 / 1218.5 / 1218.8 for H4 and 3761.1 / 3751.1 / 3750.7 / 3750.7 for N2, and v_e
+moves by at most 1.9% (H4) and 2.5% (N2) per element from iterate 1 to HF; a test checks
+H4 iterates 1 and 4 against 3%.
 
 Biases
 ------
@@ -64,9 +77,18 @@ Energy variances (:func:`energy_variances`; F13)
 The per-shot variance of DF basis-rotation grouping (``schemes.df_variance``) in the
 four splits of M2 (:data:`DF_VARIANTS`: leaves from pivoted Cholesky or from the
 supermatrix eigendecomposition, each unshifted or shifted to E_pq - delta_pq), and the
-lowest. F13 picks the variant at HF and keeps it along the trajectory. Observed at H4
-SD iterate 1: 2.51 / 1.68 / 0.631 / 0.610 Ha^2 (eigh_shift lowest); H6 at 1.0 A:
-5.38 / 3.40 / 1.230 / 1.214 Ha^2.
+lowest. F13 picks the variant at HF and keeps it along the trajectory. Observed
+(cholesky / eigh / cholesky_shift / eigh_shift, Ha^2), at HF and at SD iterate 1:
+
+    H4         3.153 / 2.093 / 0.487 / 0.461 (eigh_shift)   2.509 / 1.677 / 0.631 / 0.610
+    H6 1.0 A   6.558 / 4.168 / 0.992 / 1.022 (chol._shift)  5.384 / 3.403 / 1.230 / 1.214
+    N2         0.573 / 0.657 / 0.573 / 0.657 (chol._shift)  0.993 / 0.918 / 0.827 / 0.906
+    LiH        2.216 / 1.559 / 0.619 / 0.962 (chol._shift)  2.192 / 1.564 / 0.672 / 1.006
+
+The HF choice is not always the lowest later (H6: eigh_shift is 0.7-3.2% lower along the
+SD and L-BFGS iterates 1-6). For N2 the two Cholesky splits tie exactly at HF; a tie goes
+to the shifted split, which is 14-20% lower along those iterates, where the dict order of
+the splits would have kept the unshifted one.
 """
 
 from __future__ import annotations
@@ -83,7 +105,7 @@ from ..measure import routes, schemes, targets
 from ..measure.pauli import PauliSum, QubitMapping
 from . import symmetry
 from .primitives import FTParameters
-from .residual import ResidualProblem
+from .residual import ResidualProblem, _as_real, _real
 
 __all__ = [
     "DF_VARIANTS",
@@ -104,11 +126,16 @@ DF_VARIANTS: dict[str, tuple[dict, bool]] = {
     "cholesky_shift": ({}, True),
     "eigh_shift": ({"first": "eigh"}, True),
 }
+# energy_variances: variances within this relative tolerance of the lowest tie; ties go to
+# the first split in _TIE_ORDER (shifted first).
+_TIE_RTOL = 1e-9
+_TIE_ORDER = ("cholesky_shift", "eigh_shift", "cholesky", "eigh")
 
 # delta at which the aux-route variance is evaluated (w_aux = delta^2 v_aux; M3 specification 6.7).
 _W_DELTA = 0.1
-# Exact pair sums for the direct-route variances up to this many orbitals, RB above.
-_EXACT_MAX_NORB = 4
+# Direct-route variances by exact matchgate pair sums up to this many term pairs
+# (sum_e L_e (L_e + 1) / 2, the count of the schemes' method="auto"), Rao-Blackwellized above.
+_EXACT_MAX_PAIRS = 5e7
 # Floor of log-log interpolation (an exactly zero bias interpolates to ~0).
 _TINY = np.finfo(float).tiny
 
@@ -148,8 +175,8 @@ class AuxBiasCurve:
     values: np.ndarray
 
     def __post_init__(self) -> None:
-        d = np.array(self.deltas, dtype=float).ravel()
-        v = np.array(self.values, dtype=float).ravel()
+        d = _as_real("deltas", self.deltas).ravel()
+        v = _as_real("values", self.values).ravel()
         if d.size == 0 or d.shape != v.shape:
             raise ValueError(f"deltas and values must be non-empty and of one shape, got {d.shape} and {v.shape}")
         if not (np.all(np.isfinite(d)) and np.all(d > 0) and np.all(np.isfinite(v)) and np.all(v >= 0)):
@@ -164,9 +191,7 @@ class AuxBiasCurve:
         object.__setattr__(self, "values", v)
 
     def __call__(self, delta: float) -> float:
-        delta = float(delta)
-        if not (math.isfinite(delta) and delta > 0):
-            raise ValueError(f"delta must be positive and finite, got {delta!r}")
+        delta = _real("delta", delta, positive=True)
         x, y = np.log(self.deltas), np.log(np.maximum(self.values, _TINY))
         t = math.log(delta)
         if x.size == 1:
@@ -205,10 +230,10 @@ def element_normalizations(active: ActiveSpace, elements, kind: str,
                            mapping: QubitMapping | None = None) -> dict:
     """LCU normalizations of the AE routes: {"lam_q", "alpha_x", "n_terms_x", "order"}.
 
-    ``lam_q`` (K,) and ``alpha_x`` (K,) (Hartree) are the Pauli 1-norms without the identity
-    term of Q_e (``targets.aux_targets``) and X_e (``targets.direct_targets``), ``n_terms_x``
-    (K,) the numbers of non-identity Pauli terms of X_e; ``order`` is the qubit order of
-    ``mapping`` (default blocked; the norms do not depend on it).
+    ``lam_q`` (K,, dimensionless) and ``alpha_x`` (K,, Hartree) are the Pauli 1-norms without
+    the identity term of Q_e (``targets.aux_targets``) and X_e (``targets.direct_targets``),
+    ``n_terms_x`` (K,) the numbers of non-identity Pauli terms of X_e; ``order`` is the qubit
+    order of ``mapping`` (default blocked; the norms do not depend on it).
     """
     el = _elements(active, elements, kind)
     mapping = QubitMapping(active.norb) if mapping is None else mapping
@@ -224,26 +249,40 @@ def element_variances(active: ActiveSpace, ci: np.ndarray, elements, kind: str, 
                       params: FTParameters = FTParameters()) -> dict:
     """Per-shot variances of the two residual routes under matchgate shadows at the state ``ci``.
 
-    Returns {"v_direct", "w_aux", "stderr", "stderr_total", "method", "n_settings", "seed",
-    "delta_aux"}: ``v_direct`` (K,) the direct-route variances (Ha^2; exact pair sums for
-    N <= 4, else RB over ``params.n_settings`` matchings with ``params.seed``), ``stderr``
-    (K,) and ``stderr_total`` their standard errors (0 for exact sums), ``w_aux`` (K,)
-    delta^2 times the aux-route variances at delta = ``delta_aux`` = 0.1 (dimensionless).
+    Returns {"v_direct", "stderr", "variance_m", "stderr_m", "w_aux", "method", "n_settings",
+    "seed", "delta_aux"}:
+
+    * ``v_direct`` (K,): the direct-route variances (Ha^2), and ``stderr`` (K,) their
+      standard errors;
+    * ``variance_m``: V_m = sum_e m_e v_e (Ha^2), the numerator of the direct route's shot
+      count, and ``stderr_m`` its standard error, correlations between the elements
+      included;
+    * ``method``: "exact" (pair sums; standard errors 0) when the pair count
+      sum_e L_e (L_e + 1) / 2 is at most 5e7, else "rb" over ``params.n_settings``
+      matchings with ``params.seed`` (``n_settings`` the settings used and ``seed``; both
+      None for exact sums);
+    * ``w_aux`` (K,): delta^2 times the aux-route variances at delta = ``delta_aux`` = 0.1
+      (dimensionless).
+
+    The direct route is evaluated on the weighted targets sqrt(m_e) X_e, so the scheme's
+    total is V_m and its standard error that of V_m (from the per-setting totals); the
+    per-element values are divided by m_e.
     """
     el = _elements(active, elements, kind)
-    if active.norb <= _EXACT_MAX_NORB:
-        opts = {"method": "exact"}
-    else:
-        opts = {"method": "rb", "n_settings": params.n_settings, "seed": params.seed}
-    dv = routes.direct_residual_variance(active, ci, el, kind, "matchgate_shadow", **opts)
+    m = targets.element_multiplicities(el, kind, active.norb).astype(float)
+    mapping = QubitMapping(active.norb)
+    weighted = [x * math.sqrt(w) for x, w in zip(targets.direct_targets(el, active, mapping, kind), m)]
+    dv = routes.direct_residual_variance(active, ci, el, kind, "matchgate_shadow", mapping=mapping,
+                                         targets=weighted, method="auto", max_pairs=_EXACT_MAX_PAIRS,
+                                         n_settings=params.n_settings, seed=params.seed)
     av = routes.aux_residual_variance(active, ci, _W_DELTA, "exact", el, kind, "matchgate_shadow")
-    k = el.shape[0]
-    stderr = np.zeros(k) if dv.per_target_stderr is None else np.asarray(dv.per_target_stderr, dtype=float)
-    return {"v_direct": np.asarray(dv.per_target, dtype=float),
+    rb = dv.method == "rb"
+    return {"v_direct": np.asarray(dv.per_target, dtype=float) / m,
+            "stderr": np.asarray(dv.per_target_stderr, dtype=float) / m if rb else np.zeros(m.size),
+            "variance_m": float(dv.total), "stderr_m": float(dv.stderr) if rb else 0.0,
             "w_aux": _W_DELTA ** 2 * np.asarray(av.per_target, dtype=float),
-            "stderr": stderr, "stderr_total": 0.0 if dv.stderr is None else float(dv.stderr),
-            "method": dv.method, "n_settings": opts.get("n_settings"), "seed": opts.get("seed"),
-            "delta_aux": _W_DELTA}
+            "method": dv.method, "n_settings": int(dv.n_samples) if rb else None,
+            "seed": params.seed if rb else None, "delta_aux": _W_DELTA}
 
 
 # ------------------------------------------------------------------------- biases
@@ -280,14 +319,19 @@ def energy_variances(active: ActiveSpace, ci: np.ndarray) -> dict:
     """Per-shot energy variances (Ha^2) of the four DF splits of :data:`DF_VARIANTS`, and the lowest.
 
     Returns {"cholesky", "eigh", "cholesky_shift", "eigh_shift": ``schemes.df_variance(...).total``,
-    "best": the name of the lowest, "variance": its value}.
+    "best": the name of the lowest, "variance": its value}. Variances within 1e-9 relative
+    of the lowest tie, and a tie goes to a shifted split (cholesky_shift, then eigh_shift):
+    at HF the shift can change nothing (N2 CAS(6,6): every totally symmetric leaf is
+    diagonal, HF is its eigenstate, and cholesky and cholesky_shift agree to the last bit),
+    while away from HF the shifted split is the lower one (module docstring).
     """
     space = FCISpace(active.norb, active.nelec)
     c = np.asarray(ci).reshape(space.shape)
     c = c / np.linalg.norm(c)
     out: dict = {name: float(schemes.df_variance(active, c, shift=shift, **opts).total)
                  for name, (opts, shift) in DF_VARIANTS.items()}
-    best = min(DF_VARIANTS, key=out.__getitem__)
+    lowest = min(out.values())
+    best = next(name for name in _TIE_ORDER if out[name] <= lowest * (1.0 + _TIE_RTOL))
     out.update(best=best, variance=out[best])
     return out
 

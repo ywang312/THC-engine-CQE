@@ -84,7 +84,8 @@ def test_appendix_a_elementwise_regressions(name):
     """Exact L-BFGS steps on the symmetry-adapted builds reproduce Appendix A: the trajectory (E - E_FCI
     to 1e-3 mHa, overlaps to 1e-4), the masked elementwise counts n_d / n_s, b, C_step and C(Psi_k).
     The table was computed by the critic's own expansion and fixed point (traj_check.py); the
-    rounding bound stays within delta_step and no step is flagged."""
+    rounding bound stays within delta_step, and every step carries only the product-formula flag (it
+    compiles more than one excitation)."""
     ref = APPENDIX_A[name]
     tr = trajectory(name)
     prep = sp.prep_cost(tr["d"][:len(ref)], tr["eps"][:len(ref)], irreps=tr["irreps"])
@@ -97,7 +98,7 @@ def test_appendix_a_elementwise_regressions(name):
         assert (s.n_double, s.n_single, s.n_diagonal, s.bits, s.toffolis) == (nd, ns, 0, b, c)
         assert prep.cumulative[k + 1] == cum
         assert s.logical_qubits == 2 * tr["active"].norb + 3 * b + 8
-        assert s.flags == () and s.rounding_bound <= 1e-3
+        assert s.flags == ("product-formula error not in budget",) and s.rounding_bound <= 1e-3
     if name == "h6a":
         assert prep.logical_qubits[6] == 83          # the H6 Psi_6 shot of Appendix A (83 qubits, 43,427)
 
@@ -154,6 +155,73 @@ def test_masking_keeps_h6_step1_and_removes_late_n2_roundoff():
     assert any(gain > 0 and n_masked > 0 for gain, n_masked in gains)
 
 
+def test_prep_cost_and_candidates_mask_the_late_n2_steps():
+    """On the 12-step N2 L-BFGS trajectory, whose late directions carry amplified round-off in the
+    forbidden entries (docs/m2-results.md, section 2): prep_cost with and without irreps is the running
+    sum of the masked and of the unmasked step costs; the masked cumulative is never higher, and lower
+    after the first step whose forbidden excitations survive the rounding (k = 9; C(Psi_12) = 11082
+    against 12854 Toffolis when this test was written, one thread). candidate_step_toffolis with irreps
+    equals the masked step cost of every candidate and is below the unmasked one for some candidate of
+    each of those steps. Q(Psi_k) is the running maximum of the step qubits, which differs from the last
+    step's at step 10 (b = 17: 71 qubits, after 74). Without the mask (n_masked = 0) and at eps = 0
+    nothing is counted as masked or dropped."""
+    tr = trajectory("n2")
+    ir, d, e = tr["irreps"], tr["d"], tr["eps"]
+    masked, plain = sp.prep_cost(d, e, irreps=ir), sp.prep_cost(d, e)
+    m_steps = [sp.elementwise_step_cost(x, y, irreps=ir, step=k) for k, (x, y) in enumerate(zip(d, e))]
+    p_steps = [sp.elementwise_step_cost(x, y, step=k) for k, (x, y) in enumerate(zip(d, e))]
+    assert masked.steps == tuple(m_steps) and plain.steps == tuple(p_steps)
+    assert list(masked.cumulative) == [0] + list(np.cumsum([s.toffolis for s in m_steps]))
+    assert list(plain.cumulative) == [0] + list(np.cumsum([s.toffolis for s in p_steps]))
+    assert np.all(masked.cumulative <= plain.cumulative)
+    first = next(k for k, (m, p) in enumerate(zip(m_steps, p_steps)) if p.toffolis > m.toffolis)
+    assert 8 <= first < len(d) - 1 and m_steps[first].n_masked > 0 == p_steps[first].n_masked
+    assert np.all(masked.cumulative[first + 1:] < plain.cumulative[first + 1:])
+    cands = FTParameters().eps_candidates
+    for k in range(first, len(d)):
+        cm, cp = (sp.candidate_step_toffolis(d[k], cands, irreps=ir), sp.candidate_step_toffolis(d[k], cands))
+        assert list(cm) == [sp.elementwise_step_cost(d[k], c, irreps=ir).toffolis for c in cands]
+        assert list(cp) == [sp.elementwise_step_cost(d[k], c).toffolis for c in cands]
+        assert np.all(cm <= cp) and np.any(cm < cp)
+    q = [2 * tr["active"].norb] + [s.logical_qubits for s in m_steps]
+    assert list(masked.logical_qubits) == [max(q[:k + 1]) for k in range(len(q))]
+    assert any(s.logical_qubits < masked.logical_qubits[k] for k, s in enumerate(m_steps))
+    zero = sp.elementwise_step_cost(d[first], 0.0, irreps=ir)
+    assert (zero.toffolis, zero.n_dropped, zero.n_masked, zero.flags) == (0, 0, 0, ())
+    assert zero.logical_qubits == 2 * tr["active"].norb
+
+
+def test_flags_mark_the_product_and_rounding_caveats():
+    """"product-formula error not in budget" is set iff two or more excitations are kept (one exponential
+    is exact: the pair excitation e_{20,20} - e_{02,02}, one spin-orbital double by
+    spin_orbital_excitations, carries no flag), and "rounding bound above delta_step" iff A pi / 2^b plus
+    the dropped angles exceeds delta_step. On the H4 step-1 direction the second fires at eps = 0.004,
+    where the fixed point of F3 drops all 64 excitations: the step compiles to the identity, and the
+    bound is the sum of their angles eps sum |t_x| (from the expansion of the masked direction here)."""
+    pair = np.zeros((4,) * 4)
+    pair[2, 0, 2, 0], pair[0, 2, 0, 2] = 0.3, -0.3
+    assert len(spin_orbital_excitations(pair, tol=1e-12)) == 1
+    one = sp.elementwise_step_cost(pair, 0.5)
+    assert (one.n_double, one.toffolis, one.flags) == (1, 13, ())
+    tr = trajectory("h4")
+    d, ir = tr["d"][1], tr["irreps"]
+    seen = set()
+    for eps in np.geomspace(1e-3, 1.0, 31):
+        s = sp.elementwise_step_cost(d, float(eps), irreps=ir)
+        n_keep = s.n_double + s.n_single + s.n_diagonal
+        expected = ((("product-formula error not in budget",) if n_keep >= 2 else ())
+                    + (("rounding bound above delta_step",) if s.rounding_bound > 1e-3 else ()))
+        assert s.flags == expected
+        seen.update(s.flags)
+    assert seen == {"product-formula error not in budget", "rounding bound above delta_step"}
+    collapsed = sp.elementwise_step_cost(d, 0.004, irreps=ir)
+    expansion = spin_orbital_excitations(sym.mask_pair_tensor(d, ir), tol=1e-12)
+    angles = 0.004 * sum(abs(x.amplitude) for x in expansion)
+    assert (collapsed.toffolis, collapsed.n_dropped) == (0, len(expansion)) == (0, 64)
+    assert collapsed.flags == ("rounding bound above delta_step",)
+    assert collapsed.rounding_bound == pytest.approx(angles, rel=1e-12) and angles > 1e-3
+
+
 def test_mask_removes_injected_forbidden_components():
     """Deterministic version of the late-N2 effect: a forbidden component (pair-symmetric,
     anti-Hermitian, 1e-3 of max|d|) added to the H6 step-1 direction raises the unmasked cost, while
@@ -193,6 +261,13 @@ def test_complex_directions_raise_and_real_complex_dtype_is_accepted():
         sp.elementwise_step_cost(d[0], eps)
     with pytest.raises(ValueError):
         sp.elementwise_step_cost(d, float("nan"))
+    for bad in (0.1 + 0j, np.complex128(0.1), "0.1", None):              # ValueError, not TypeError
+        with pytest.raises(ValueError):
+            sp.elementwise_step_cost(d, bad)
+    with pytest.raises(ValueError):
+        sp.leaf_step_cost(d, 0.1 + 0.2j)
+    with pytest.raises(ValueError):
+        sp.candidate_step_toffolis(d, [0.1, 0.2j])
 
 
 # ------------------------------------------------------------------------------- leaves
@@ -258,8 +333,10 @@ def test_leaf_step_cost_options():
 # ------------------------------------------------------------------------- cumulative
 def test_prep_cost_cumulative_sums_and_qubits():
     """C(Psi_0) = 0 and C(Psi_k) is the running sum of the step costs; Q(Psi_k) is the running maximum of
-    the step qubits, 2N at k = 0. A leaf circuit adds its final complex rotation, at its own budget
-    b_f = F2(N(N-1)) (555 Toffolis at N = 6, b_f = 17), to every k >= 1. Steps with eps = 0 cost nothing."""
+    the step qubits, 2N at k = 0, also when a later step needs fewer qubits (the H6 steps 1 and 0 in that
+    order: 83, then 74). A leaf circuit adds its final complex rotation, at its own budget
+    b_f = F2(N(N-1)) (555 Toffolis at N = 6, b_f = 17), to every k >= 1. Steps with eps = 0 cost nothing
+    and count nothing as dropped."""
     tr = trajectory("h6a")
     d, eps = tr["d"][:6], tr["eps"][:6]
     for method in sp.METHODS:
@@ -272,6 +349,9 @@ def test_prep_cost_cumulative_sums_and_qubits():
         assert prep.cumulative[0] == 0 and prep.logical_qubits[0] == 12
         with pytest.raises(ValueError):
             prep.cumulative[1] = 0                                        # read-only
+    swapped = sp.prep_cost(d[1::-1], eps[1::-1], irreps=tr["irreps"])
+    assert [s.logical_qubits for s in swapped.steps] == [83, 74]
+    assert list(swapped.logical_qubits) == [12, 83, 83]
     leaves = sp.prep_cost(d, eps, method="leaves")
     b_f = _bits(30)
     assert b_f == 17 and leaves.final_rotation == 30 * (b_f - 2) + 7 * 15 == 555
@@ -280,6 +360,7 @@ def test_prep_cost_cumulative_sums_and_qubits():
     zero = sp.prep_cost(tr["d"][:2], [0.0, tr["eps"][1]], irreps=tr["irreps"])
     assert zero.steps[0].toffolis == 0 and zero.cumulative[2] == sp.elementwise_step_cost(
         tr["d"][1], tr["eps"][1], irreps=tr["irreps"]).toffolis
+    assert (zero.steps[0].n_dropped, zero.steps[0].n_masked, zero.steps[0].flags) == (0, 0, ())
     with pytest.raises(ValueError):
         sp.prep_cost(d, eps, method="qsp")
     with pytest.raises(ValueError):

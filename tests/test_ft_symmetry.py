@@ -2,7 +2,8 @@
 orbitals, orbital irreps, the point-group masks of F2a and determinant irreps.
 
 References independent of the module: the current builders of ``systems`` (plain RHF for the chains
-and LiH), the AO labels of PySCF, PySCF's character tables (not the XOR rule), the allowed-element
+and LiH) and plain-RHF builds of N2 (``systems.n2`` is itself the D2h build), the AO labels of PySCF,
+PySCF's character tables (not the XOR rule), the allowed-element
 counts of the M3 specification (Appendix A, from the critic's ``sym_check.py``), the exact residual of
 ``residual.compute_residual`` and of ``routes.exact_residual`` (PySCF transition RDMs), neither of
 which knows about symmetry, and ``pyscf.fci.addons.symmetrize_wfn``.
@@ -28,6 +29,14 @@ CURRENT_BUILDERS = {
     "lih": lambda: systems.lih(),
     "n2": lambda: systems.n2(1.098),
     "n2s": lambda: systems.n2(2.0),
+}
+
+# systems.n2 is itself a D2h build on canonical_orbitals, the same build as benchmark_system("n2"), so
+# for N2 the independent reference is the plain RHF of the same geometry (what systems.n2 built before
+# it was symmetry-adapted; its pi pairs have an arbitrary orientation).
+PLAIN_RHF_N2 = {
+    "n2": lambda: systems.molecule([("N", (0, 0, 0)), ("N", (0, 0, 1.098))], ncas=6, nelecas=6),
+    "n2s": lambda: systems.molecule([("N", (0, 0, 0)), ("N", (0, 0, 2.0))], ncas=6, nelecas=6),
 }
 
 # Appendix A of the M3 specification: allowed / all elements, spin-free and spin-orbital.
@@ -63,16 +72,22 @@ def _characters(group: str) -> dict:
 
 @pytest.mark.parametrize("name", list(CURRENT_BUILDERS))
 def test_symmetric_builds_reproduce_the_current_builders(name):
-    """E_HF (the active-space HF determinant) and E_FCI of the symmetry-adapted build equal those of the
-    current builder to 1e-10 Ha (the plain RHF for chains and LiH, and systems.n2), and the build is
-    labelled and in the point group of BENCHMARK_SYSTEMS."""
-    act, ref = sy.benchmark_system(name), CURRENT_BUILDERS[name]()
+    """E_HF (the active-space HF determinant) and E_FCI of the symmetry-adapted build equal those of
+    plain-RHF builds of the same geometry to 1e-10 Ha: the current builder for the chains and LiH, and for
+    n2 and n2s a plain systems.molecule build (systems.n2 is now the same D2h build, so it only checks the
+    geometry and the active space). The build is labelled and in the point group of BENCHMARK_SYSTEMS."""
+    act = sy.benchmark_system(name)
     assert act.label == name
     assert act.mol.groupname == sy.BENCHMARK_SYSTEMS[name]["symmetry"]
-    assert (act.norb, act.nelec) == (ref.norb, ref.nelec)
-    h_sym, h_ref = Hamiltonian(act), Hamiltonian(ref)
-    assert abs(h_sym.energy(h_sym.space.hf()) - h_ref.energy(h_ref.space.hf())) <= 1e-10
-    assert abs(act.fci()[0] - ref.fci()[0]) <= 1e-10
+    refs = [CURRENT_BUILDERS[name]()] + ([PLAIN_RHF_N2[name]()] if name in PLAIN_RHF_N2 else [])
+    assert not refs[-1].mol.symmetry                          # at least one reference is unsymmetrized
+    h_sym = Hamiltonian(act)
+    e_hf, e_fci = h_sym.energy(h_sym.space.hf()), act.fci()[0]
+    for ref in refs:
+        assert (act.norb, act.nelec) == (ref.norb, ref.nelec)
+        h_ref = Hamiltonian(ref)
+        assert abs(e_hf - h_ref.energy(h_ref.space.hf())) <= 1e-10
+        assert abs(e_fci - ref.fci()[0]) <= 1e-10
 
 
 def test_unsymmetrized_build_has_no_irreps():
@@ -252,6 +267,24 @@ def test_ci_irrep_matches_pyscf_symmetrize_wfn(builds):
         sy.ci_irrep(np.zeros_like(hf), n, nelec, ir)
     with pytest.raises(ValueError):
         sy.ci_irrep(hf[:-1], n, nelec, ir)
+
+
+def test_ci_irrep_splits_an_odd_electron_count_as_pyscf():
+    """A total electron count splits as PySCF's fci.addons._unpack_nelec does (5 -> (3, 2)): a 4 x 6 CI
+    array of 4 orbitals with ids (0, 1, 2, 3) is accepted, and the determinant alpha {1, 2, 3},
+    beta {0, 1} (addresses from cistring.str2addr) has the irrep (1 ^ 2 ^ 3) ^ (0 ^ 1) = 1, as with the
+    explicit (3, 2); the transposed 6 x 4 array, the layout of the split (2, 3), is rejected."""
+    from pyscf.fci import addons, cistring
+
+    assert addons._unpack_nelec(5) == (3, 2)
+    ir = np.array([0, 1, 2, 3])
+    ci = np.zeros((cistring.num_strings(4, 3), cistring.num_strings(4, 2)))
+    ci[cistring.str2addr(4, 3, 0b1110), cistring.str2addr(4, 2, 0b0011)] = 1.0
+    assert ci.shape == (4, 6)
+    assert sy.ci_irrep(ci, 4, 5, ir) == (1, 1.0) == sy.ci_irrep(ci, 4, (3, 2), ir)
+    assert sy.ci_irrep(ci.ravel(), 4, 5, ir) == (1, 1.0)
+    with pytest.raises(ValueError):
+        sy.ci_irrep(ci.T, 4, 5, ir)
 
 
 def test_mask_helpers_and_validation(builds):

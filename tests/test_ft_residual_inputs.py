@@ -4,9 +4,10 @@ References independent of the module: the symmetry-blind full residual tensor of
 ``residual.compute_residual`` (it knows neither element sets nor multiplicities), dense
 diagonalization of the CI Hamiltonian for the exact ground state, the Pauli coefficients
 and dense matrices of the M2 targets, ``scipy.linalg.expm`` on the qubit space, dense
-Pauli-LCU block encodings and Hadamard tests built here from the Pauli terms, and the
+Pauli-LCU block encodings and Hadamard tests built here from the Pauli terms, the
 independently computed numbers of the M3 specification (Appendix A, the critic's
-``var_check.py``) and of memo 2.
+``var_check.py``) and of memo 2, and exact matchgate pair sums of ``measure.routes`` on the
+unweighted X_e (the H6 and N2 V_m, computed once outside the suite).
 """
 
 import math
@@ -87,7 +88,8 @@ def test_lambda_q_is_one_half_for_every_spin_orbital_element(h4):
 
 def test_alpha_x_is_the_pauli_one_norm_and_bounds_the_sector_norm(h4):
     """alpha_X and L_X are the 1-norm and the number of non-identity Pauli terms of direct_targets'
-    X_e (from their coefficients), lambda_Q that of aux_targets' Q_e; neither depends on the qubit
+    X_e (from their coefficients), lambda_Q that of aux_targets' Q_e; Q_e and X_e are traceless, so
+    they have no identity term and its exclusion changes nothing; neither norm depends on the qubit
     order; and ||X_e|| on the (2, 2) sector, from the dense matrix, is at most alpha_X (here well
     below it: the 1-norm is loose, specification section 11)."""
     act, el, norms = h4["act"], h4["el"], h4["norms"]
@@ -99,6 +101,7 @@ def test_alpha_x_is_the_pauli_one_norm_and_bounds_the_sector_norm(h4):
         assert norms["alpha_x"][e] == pytest.approx(np.abs(x.coeffs[keep]).sum(), rel=1e-14)
         assert norms["n_terms_x"][e] == keep.sum()
         assert norms["lam_q"][e] == pytest.approx(np.abs(q.coeffs[(q.xs | q.zs) != 0]).sum(), rel=1e-14)
+        assert keep.all() and np.all((q.xs | q.zs) != 0)           # traceless: no identity term
     inter = ri.element_normalizations(act, el, "spin_free", QubitMapping(act.norb, "interleaved"))
     assert inter["order"] == "interleaved"
     for key in ("lam_q", "alpha_x"):
@@ -114,13 +117,15 @@ def test_alpha_x_is_the_pauli_one_norm_and_bounds_the_sector_norm(h4):
 
 # ----------------------------------------------------------------------- variances
 def test_element_variances_exact_branch(h4):
-    """N <= 4: exact matchgate pair sums (no standard errors); w_aux is 0.01 x the aux-route variance at
-    delta = 0.1. V_m = sum m v at iterate 1 agrees within 1% with the critic's independent value at SD
-    iterate 2 (Appendix A: 1220) and W_m with memo 2's 816 (iterate 5): the variances barely move."""
+    """H4 (7.6e6 term pairs): exact matchgate pair sums (no standard errors, no settings); w_aux is 0.01 x
+    the aux-route variance at delta = 0.1. V_m = sum m v at iterate 1 agrees within 1% with the critic's
+    independent value at SD iterate 2 (Appendix A: 1220) and W_m with memo 2's 816 (iterate 5): the
+    variances barely move."""
     act, el, var = h4["act"], h4["el"], h4["var"]
     m = _m(act, el)
-    assert var["method"] == "exact" and var["n_settings"] is None and var["delta_aux"] == 0.1
-    assert np.all(var["stderr"] == 0) and var["stderr_total"] == 0.0
+    assert (var["method"], var["n_settings"], var["seed"], var["delta_aux"]) == ("exact", None, None, 0.1)
+    assert np.all(var["stderr"] == 0) and var["stderr_m"] == 0.0
+    assert var["variance_m"] == pytest.approx(np.sum(m * var["v_direct"]), rel=1e-13)
     av = routes.aux_residual_variance(act, h4["states"][0], 0.1, "exact", el, "spin_free", "matchgate_shadow")
     assert np.allclose(var["w_aux"], 0.01 * av.per_target, rtol=1e-14, atol=0)
     assert np.sum(m * var["v_direct"]) == pytest.approx(1220, rel=0.01)
@@ -128,20 +133,62 @@ def test_element_variances_exact_branch(h4):
 
 
 def test_element_variances_rb_branch():
-    """N > 4: Rao-Blackwellized matchgate variances with params.n_settings and params.seed, with
-    standard errors; at 200 settings V_m of H6 (1.0 A) agrees with the critic's 5000-setting value at
-    SD iterate 2 (Appendix A: 2.515e4) within two standard errors, the standard error of V_m bounded
-    by sum_e m_e sigma_e (valid for any correlation between the elements' estimates; observed
-    V_m = 24465, bound 2714)."""
+    """H6 at 1.0 A (153 allowed elements, 2.2e9 term pairs): Rao-Blackwellized matchgate variances with
+    the default 5000 settings and seed 7, with standard errors. V_m at SD iterate 1 lies within three of
+    its standard errors of the exact pair sum 25288.53 Ha^2, computed once through measure.routes alone
+    on the unweighted X_e (method="exact", 1.12e9 commuting pairs, 272 s; observed RB 25126 +- 113,
+    -1.4 sigma). The standard error of V_m includes the correlations of the elements' estimates, which
+    share the settings: it lies well below sum_e m_e sigma_e, the bound for any correlation (observed
+    113 against 598; fully correlated errors would reach it)."""
     act = sy.benchmark_system("h6a")
     states = []
     run_cqe(act, max_iter=1, optimizer="sd", callback=lambda st, ci: states.append(ci.copy()))
     el, _ = ri.allowed_elements(act, "spin_free", sy.orbital_irreps(act))
-    var = ri.element_variances(act, states[0], el, "spin_free", params=FTParameters(n_settings=200, seed=3))
-    assert (var["method"], var["n_settings"], var["seed"]) == ("rb", 200, 3)
-    assert np.all(np.isfinite(var["stderr"])) and 0 < var["stderr_total"] < math.inf
+    var = ri.element_variances(act, states[0], el, "spin_free")
+    assert (var["method"], var["n_settings"], var["seed"]) == ("rb", 5000, 7)
     m = _m(act, el)
-    assert abs(np.sum(m * var["v_direct"]) - 2.515e4) <= 2 * (np.sum(m * var["stderr"]) + 33.0)
+    assert np.all(np.isfinite(var["stderr"]) & (var["stderr"] > 0))
+    assert var["variance_m"] == pytest.approx(np.sum(m * var["v_direct"]), rel=1e-12)
+    assert 0 < var["stderr_m"] <= 0.5 * np.sum(m * var["stderr"])
+    assert abs(var["variance_m"] - 25288.53) <= 3 * var["stderr_m"]
+
+
+def test_rb_variances_agree_with_the_exact_pair_sums(h4, monkeypatch):
+    """With the exact-sum limit lowered to 0, H4 takes the Rao-Blackwellized branch (2000 settings,
+    seed 7): every per-element variance agrees with the fixture's exact pair sum within 4 of its
+    standard errors and the z-scores have a spread near 1 (observed 1.01, max |z| 2.1), and V_m agrees
+    within 3 standard errors of V_m (observed +0.76): the weighted targets and their division by m_e
+    are consistent with the exact branch, and the standard errors are calibrated. The settings and the
+    seed reach the sampler: 200 settings are reported as used, and at equal settings another seed
+    gives other values."""
+    act, el, exact = h4["act"], h4["el"], h4["var"]
+    monkeypatch.setattr(ri, "_EXACT_MAX_PAIRS", 0.0)
+    ci = h4["states"][0]
+    rb = ri.element_variances(act, ci, el, "spin_free", params=FTParameters(n_settings=2000, seed=7))
+    assert (rb["method"], rb["n_settings"], rb["seed"]) == ("rb", 2000, 7)
+    z = (rb["v_direct"] - exact["v_direct"]) / rb["stderr"]
+    assert np.max(np.abs(z)) <= 4 and 0.6 <= np.std(z) <= 1.5
+    assert abs(rb["variance_m"] - exact["variance_m"]) <= 3 * rb["stderr_m"]
+    assert np.array_equal(rb["w_aux"], exact["w_aux"])
+    few = [ri.element_variances(act, ci, el, "spin_free", params=FTParameters(n_settings=200, seed=seed))
+           for seed in (7, 8)]
+    assert [(f["n_settings"], f["seed"]) for f in few] == [(200, 7), (200, 8)]
+    assert not np.allclose(few[0]["v_direct"], few[1]["v_direct"], rtol=1e-6, atol=0)
+
+
+@pytest.mark.slow
+def test_n2_variances_use_exact_pair_sums():
+    """N2 CAS(6,6) has 2.8e7 term pairs on its 33 allowed elements, below the 5e7 limit, so its variances
+    are exact pair sums (seed-independent; the specification's N <= 4 rule would sample them): V_m at SD
+    iterate 1 is 3751.08 Ha^2, the value of an independent exact sum through measure.routes alone on the
+    unweighted X_e (method="exact", 1.47e7 commuting pairs, computed once outside the suite)."""
+    act = sy.benchmark_system("n2")
+    states = []
+    run_cqe(act, max_iter=1, optimizer="sd", callback=lambda st, ci: states.append(ci.copy()))
+    el, _ = ri.allowed_elements(act, "spin_free", sy.orbital_irreps(act))
+    var = ri.element_variances(act, states[0], el, "spin_free")
+    assert (var["method"], var["n_settings"], var["seed"], var["stderr_m"]) == ("exact", None, None, 0.0)
+    assert var["variance_m"] == pytest.approx(3751.08, abs=0.01)
 
 
 # ----------------------------------------------------------------------- biases
@@ -190,7 +237,8 @@ def test_factorization_bias_at_the_ground_state_and_linearity(h4):
 
 def test_aux_bias_curve_interpolation():
     """AuxBiasCurve interpolates linearly in log-log, so it reproduces a power law exactly inside and
-    outside the grid; a one-point grid extends with delta^2; zeros give ~0; bad grids raise."""
+    outside the grid; a one-point grid extends with delta^2; zeros give ~0; bad grids, complex values
+    (beyond round-off) and non-positive deltas raise."""
     d = np.array([0.1, 0.3, 0.9])
     curve = ri.AuxBiasCurve(d, 0.7 * d ** 2)
     for x in (0.05, 0.1, 0.2, 0.5, 0.9, 1.5):
@@ -199,11 +247,14 @@ def test_aux_bias_curve_interpolation():
     assert cubic(0.2) == pytest.approx(2.0 * 0.2 ** 3, rel=1e-12)
     assert ri.AuxBiasCurve([0.2], [0.04])(0.4) == pytest.approx(0.16, rel=1e-12)
     assert ri.AuxBiasCurve(d, [0.0, 0.0, 0.0])(0.5) < 1e-300
-    for bad in (([0.1, -0.2], [1.0, 1.0]), ([0.1, 0.1], [1.0, 2.0]), ([0.1, 0.2], [1.0, -1.0]), ([], [])):
+    for bad in (([0.1, -0.2], [1.0, 1.0]), ([0.1, 0.1], [1.0, 2.0]), ([0.1, 0.2], [1.0, -1.0]), ([], []),
+                ([0.1, 0.2], [1.0, 1.0 + 0.1j])):
         with pytest.raises(ValueError):
             ri.AuxBiasCurve(*bad)
-    with pytest.raises(ValueError):
-        curve(0.0)
+    assert ri.AuxBiasCurve(d + 0j, 0.7 * d ** 2)(0.2) == pytest.approx(0.7 * 0.2 ** 2, rel=1e-12)
+    for bad_delta in (0.0, -0.1, math.inf, 0.1 + 0.1j):
+        with pytest.raises(ValueError):
+            curve(bad_delta)
 
 
 # ----------------------------------------------------------------------- problem
@@ -225,8 +276,10 @@ def test_norm_on_the_allowed_set_is_the_full_tensor_norm(h4):
 
 def test_build_problem_wiring(h4):
     """build_problem: A is routes.exact_residual on the elements, m their multiplicities, the variances
-    and normalizations pass through, N is the active space's, and aux_bias reproduces aux_bias_curve
-    on its grid (default: FTParameters().aux_deltas)."""
+    and normalizations pass through, N is the active space's (also for a subset of elements that misses
+    an orbital), and aux_bias reproduces aux_bias_curve on its grid: FTParameters().aux_deltas by
+    default, else the given deltas (here points the default grid lacks, where its interpolation would
+    differ)."""
     act, el, ci = h4["act"], h4["el"], h4["states"][3]
     problem = ri.build_problem(act, ci, el, "spin_free", variances=h4["var"], normalizations=h4["norms"])
     assert problem.kind == "spin_free" and problem.norb == act.norb and np.array_equal(problem.elements, el)
@@ -239,11 +292,24 @@ def test_build_problem_wiring(h4):
     grid = FTParameters().aux_deltas
     ref = ri.aux_bias_curve(act, ci, el, "spin_free", grid)
     assert np.allclose([problem.aux_bias(d) for d in grid], ref, rtol=1e-12, atol=0)
+    custom = (0.07, 0.35, 0.9)
+    own = ri.build_problem(act, ci, el, "spin_free", variances=h4["var"], normalizations=h4["norms"],
+                           deltas=custom)
+    ref = ri.aux_bias_curve(act, ci, el, "spin_free", custom)
+    assert np.allclose([own.aux_bias(d) for d in custom], ref, rtol=1e-12, atol=0)
+    assert not np.allclose([problem.aux_bias(d) for d in custom], ref, rtol=1e-6, atol=0)
+    sub = np.flatnonzero(np.all(el < act.norb - 1, axis=1))
+    assert sub.size > 0
+    part = ri.build_problem(act, ci, el[sub], "spin_free", deltas=custom, normalizations={
+        key: h4["norms"][key][sub] for key in ("lam_q", "alpha_x", "n_terms_x")},
+        variances={key: h4["var"][key][sub] for key in ("v_direct", "w_aux")})
+    assert part.norb == act.norb and part.n_elements == sub.size
 
 
 def test_energy_variances_pick_the_lowest_df_split(h4):
     """The four DF splits are schemes.df_variance totals and the lowest is chosen; at H4 SD iterate 1
-    the shifted splits are about 3x lower than the unshifted ones (S6), eigh_shift lowest."""
+    the shifted splits are about 3x lower than the unshifted ones (S6), eigh_shift lowest, as at HF,
+    where F13 makes the choice; a state given with a factor (-3 Psi) is normalized first."""
     act, ci = h4["act"], h4["states"][0]
     out = ri.energy_variances(act, ci)
     for name, (opts, shift) in ri.DF_VARIANTS.items():
@@ -251,9 +317,31 @@ def test_energy_variances_pick_the_lowest_df_split(h4):
     assert out["best"] == min(ri.DF_VARIANTS, key=out.__getitem__) == "eigh_shift"
     assert out["variance"] == out["eigh_shift"]
     assert out["cholesky"] / out["cholesky_shift"] > 3 and out["eigh"] / out["eigh_shift"] > 2.5
+    assert ri.energy_variances(act, FCISpace(act.norb, act.nelec).hf())["best"] == "eigh_shift"
+    scaled = ri.energy_variances(act, -3.0 * ci)                 # the state is normalized first
+    assert all(scaled[name] == pytest.approx(out[name], rel=1e-12) for name in ri.DF_VARIANTS)
 
 
-# ----------------------------------------------------------------------- slow
+def test_energy_variance_tie_goes_to_the_shifted_split():
+    """N2 CAS(6,6) has one orbital per irrep, so every totally symmetric DF leaf is diagonal and HF is
+    its eigenstate: at HF the shift changes nothing, and cholesky and cholesky_shift agree (to round-off,
+    by schemes.df_variance itself). The tie goes to the shifted split, which F13 then keeps, and which is
+    the lower one at SD iterate 1 (observed 0.827 against 0.993 Ha^2)."""
+    act = sy.benchmark_system("n2")
+    hf = FCISpace(act.norb, act.nelec).hf()
+    out = ri.energy_variances(act, hf)
+    ref = {name: schemes.df_variance(act, hf, shift=shift, **opts).total
+           for name, (opts, shift) in ri.DF_VARIANTS.items()}
+    assert ref["cholesky"] == pytest.approx(ref["cholesky_shift"], rel=1e-12)
+    assert min(ref.values()) == pytest.approx(ref["cholesky"], rel=1e-12)
+    assert out["best"] == "cholesky_shift" and out["variance"] == out["cholesky_shift"]
+    states = []
+    run_cqe(act, max_iter=1, optimizer="sd", callback=lambda st, ci: states.append(ci.copy()))
+    later = ri.energy_variances(act, states[0])
+    assert later["cholesky_shift"] < 0.9 * later["cholesky"]
+
+
+# ----------------------------------------------------------------------- state independence
 @pytest.mark.slow
 def test_direct_variances_are_state_independent(h4):
     """M2 found the per-element matchgate variances state-independent to about 1%, which is why they
@@ -269,6 +357,7 @@ def test_direct_variances_are_state_independent(h4):
     assert np.sum(m * v4) == pytest.approx(np.sum(m * var["v_direct"]), rel=0.03)
 
 
+# ----------------------------------------------------------------------- dense block encodings
 def _lcu(op: PauliSum):
     """Dense Pauli LCU of ``op`` without its identity term: PREPARE (real orthogonal, first column
     sqrt(|c_j| / alpha)), the SELECT blocks sign(c_j) P_j (identity on padding) and alpha."""
@@ -299,7 +388,6 @@ def _hadamard_p0(apply_u, phi: np.ndarray, imaginary: bool) -> float:
     return float(np.linalg.norm(phi + (-1j if imaginary else 1.0) * apply_u(phi)) ** 2 / 4)
 
 
-@pytest.mark.slow
 @pytest.mark.parametrize("kind", ["spin_free", "spin_orbital"])
 def test_dense_block_encodings_reproduce_the_residual(kind):
     """H2 (4 qubits), a random real state, every element: dense Pauli-LCU block encodings built from

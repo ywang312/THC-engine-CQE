@@ -29,8 +29,16 @@ delta, with worst-case linear accumulation, needs (F2)
 
     b = max(b_min, ceil(log2(pi A / delta)))                      (phase_gradient_bits)
 
-bits [derived]. Phase-gradient rotations are the only rotation primitive of M3;
-synthesized rotations are out of scope.
+bits [derived], with b_min >= 3 (an adder needs 3 bits). Phase-gradient rotations are
+the only rotation primitive of M3; synthesized rotations are out of scope.
+
+The register is a catalyst [assumption; OpenFermion's convention]: it is prepared once
+per machine and reused across additions, steps and shots, since an addition leaves
+|Phi_b> unchanged, and its top b' qubits are |Phi_b'> (|Phi_b> is the product state
+of the qubits (|0> + exp(-2 pi i 2^(k-b))|1>)/sqrt2), so one register of the largest
+b serves every smaller b. Its b qubits are counted in the logical qubits of a circuit
+(``stateprep``: Q_prep = 2N + 3b + 8); its one-time preparation (b single-qubit
+rotations) is not counted.
 
 Time evolution by GQSP (F8)
 ---------------------------
@@ -52,10 +60,15 @@ Hence [derived]
     calls         = 2R                                                (gqsp_walk_calls)
     C_evol        = 2R C_W + 3 (2R + 1)(beta - 2)                     (evolution_toffolis)
 
-with three beta-bit phase rotations per GQSP layer (:func:`gqsp_rotation_toffolis`) and
-C_W the Toffolis of one controlled walk step (OpenFermion's step cost includes the
-control [OF]). Reference values: R(0.79, 1e-4) = 5, R(1.16, 1e-4) = 6,
-R(6.81, 1e-6) = 17 (tests/test_ft_primitives.py).
+with C_W the Toffolis of one controlled walk step (OpenFermion's step cost includes the
+control [OF]) and three beta-bit phase rotations per GQSP layer
+(:func:`gqsp_rotation_toffolis`) [estimate, upper bound: in the parametrization of
+Motlagh and Wiebe, (prod_{j=1..d} R(theta_j, phi_j, 0) A) R(theta_0, phi_0, lambda), a
+degree-d polynomial has 2d + 3 angles, d fewer than 3(d + 1); the overcount d (beta - 2)
+is about (beta - 2) / C_W = 1% of C_evol, 476 of 45976 Toffolis for H6 at t = 0.7].
+R = 0, i.e. exp(-i tau x) within delta of the identity, costs nothing; F8 read literally
+would still charge one layer, 3 (beta - 2) Toffolis. Reference values: R(0.79, 1e-4) = 5,
+R(1.16, 1e-4) = 6, R(6.81, 1e-6) = 17 (tests/test_ft_primitives.py).
 
 Amplitude estimation (F11)
 --------------------------
@@ -198,10 +211,10 @@ class FTParameters:
         return tuple(_LS_EPS_BASE * 2.0 ** j for j in range(self.n_candidates))
 
 
-def _check_bits(bits: int, least: int) -> int:
+def _check_bits(bits: int, least: int, name: str = "bits") -> int:
     b = int(bits)
     if b != bits or b < least:
-        raise ValueError(f"bits must be an integer >= {least}, got {bits!r}")
+        raise ValueError(f"{name} must be an integer >= {least}, got {bits!r}")
     return b
 
 
@@ -218,21 +231,22 @@ def phase_gradient_bits(n_additions: int, delta: float, b_min: int = 4) -> int:
 
     The smallest b >= b_min with A pi / 2^b <= delta: the worst-case sum of the A
     per-addition operator-norm errors pi / 2^b stays within ``delta`` (radians of
-    operator norm). A = 0 gives b_min.
+    operator norm). A = 0 gives b_min. Raises ValueError for b_min < 3, the smallest
+    register an addition accepts (:func:`addition_toffolis`).
     """
     a = int(n_additions)
     if a != n_additions or a < 0:
         raise ValueError(f"n_additions must be a non-negative integer, got {n_additions!r}")
     if not delta > 0.0:
         raise ValueError(f"delta must be positive, got {delta!r}")
-    b = _check_bits(b_min, 1)
+    b_lo = _check_bits(b_min, 3, "b_min")
     if a == 0:
-        return b
-    b = max(b, math.ceil(math.log2(math.pi * a / delta)))
+        return b_lo
+    b = max(b_lo, math.ceil(math.log2(math.pi * a / delta)))
     # Guard the ceil(log2) against floating-point round-off at exact powers of two.
     while math.pi * a / 2.0 ** b > delta:
         b += 1
-    while b > b_min and math.pi * a / 2.0 ** (b - 1) <= delta:
+    while b > b_lo and math.pi * a / 2.0 ** (b - 1) <= delta:
         b -= 1
     return b
 
@@ -285,7 +299,8 @@ def gqsp_walk_calls(tau: float, delta: float) -> int:
 def gqsp_rotation_toffolis(n_calls: int, bits: int) -> int:
     """Toffolis of the GQSP phase rotations: 3 (n_calls + 1)(bits - 2) (F8).
 
-    n_calls + 1 layers of three ``bits``-bit phase-gradient rotations.
+    n_calls + 1 layers of three ``bits``-bit phase-gradient rotations [estimate, upper
+    bound: the GQSP parametrization needs 2 n_calls + 3 angles; module docstring].
     """
     n = int(n_calls)
     if n != n_calls or n < 0:
@@ -304,7 +319,8 @@ def evolution_toffolis(lam: float, t: float, toffoli_per_step: int, *, delta: fl
         delta: truncation error of the Jacobi-Anger series (operator norm).
         beta: bits of the GQSP phase rotations.
 
-    R = 0 (tau so small that exp(-i tau x) is the identity within delta) costs 0.
+    R = 0 (tau so small that exp(-i tau x) is the identity within delta) costs 0, not the
+    one GQSP layer, 3 (beta - 2), of F8 read literally (module docstring).
     """
     if not lam > 0.0:
         raise ValueError(f"lam must be positive, got {lam!r}")

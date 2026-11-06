@@ -4,9 +4,9 @@ The routes are pure functions of numbers and arrays, so most tests use synthetic
 (random per-element inputs on the H4 element sets) and compare with references that do not
 use the module: the formulas of the M3 specification evaluated by hand in the test
 (including the GQSP degree, recomputed here from Bessel functions rather than taken from
-``ft.primitives``), ``scipy.optimize`` for the optimal AE allocation, M2's shot rule
-``routes.shots_for_relative_error``, and a direct simulation of sine-window phase estimation
-for the amplitude-estimation constant.
+``ft.primitives``), ``scipy.optimize`` for the optimal AE allocation and for the roots of
+the hand-evaluated cost curves, M2's shot rule ``routes.shots_for_relative_error``, and a
+direct simulation of sine-window phase estimation for the amplitude-estimation constant.
 """
 
 import dataclasses
@@ -27,6 +27,7 @@ PREP = rs.PrepParams(toffolis=2506.0, logical_qubits=70)
 # 188 logical qubits of the QPE minus its 2 ceil(log2(7753)) - 1 = 25 control qubits.
 WALK = rs.WalkParams(lam=4.935, toffoli_per_step=868, logical_qubits=163, kind="df")
 C_Q = {"spin_free": 16, "spin_orbital": 4}       # F11 [estimate]
+AE_ROUTES = ("ae_product", "ae_x", "ae_aux")
 
 
 def make_problem(k: int = 12, *, kind: str = "spin_free", seed: int = 0, aux_bias=None,
@@ -68,15 +69,16 @@ def budget_ref(problem: rs.ResidualProblem, r: float, bias: float = 0.0) -> floa
     return None if b2 <= 1e-12 * target else math.sqrt(b2)
 
 
-def ae_ref(alpha, m, budget, kappa, c_prep, c_obs, q0):
-    """F11 by hand: eps_e = t (alpha_e/m_e)^(1/3), N_e = 2 pi kappa alpha_e / eps_e,
-    Q_run = q0 + ceil(log2(N_e/2)) + 1, T = sum_e N_e (c_prep + c_obs,e + Q_run,e / 2).
-    Returns (sum N_e, T, max_e run, max Q_run)."""
+def ae_ref(alpha, m, budget, kappa, c_prep, c_obs, q_circuit):
+    """F11 by hand: eps_e = t (alpha_e/m_e)^(1/3), N_e = 2 pi kappa alpha_e / eps_e, the Hadamard-test
+    circuit on q_circuit = Q(Psi_k) + Q_obs + 1 qubits, Q_run = q_circuit + ceil(log2(N_e/2)) with the
+    phase register, T = sum_e N_e (c_prep + c_obs,e + q_circuit,e / 2) (the reflection S_0 acts on the
+    circuit, not on the phase register). Returns (sum N_e, T, max_e run, max Q_run)."""
     s = np.sum(np.cbrt(m) * np.cbrt(alpha) ** 2)
     eps = budget / math.sqrt(s) * np.cbrt(alpha / m)
     n = 2 * math.pi * kappa * alpha / eps
-    q_run = q0 + np.ceil(np.log2(n / 2)) + 1
-    run = n * (c_prep + c_obs + q_run / 2)
+    q_run = q_circuit + np.ceil(np.log2(n / 2))
+    run = n * (c_prep + c_obs + q_circuit / 2)
     return n.sum(), run.sum(), run.max(), int(q_run.max())
 
 
@@ -145,18 +147,20 @@ def test_sampling_direct_equals_m2_shot_rule(kind):
     each shot costs C(Psi_k) Toffolis (Clifford readout), on Q(Psi_k) qubits."""
     p = make_problem(10, kind=kind, seed=3)
     params = pm.FTParameters(r=0.3)
-    c = rs.sampling_direct(p, PREP, params=params)
+    prep = rs.PrepParams(toffolis=1352.0, logical_qubits=61)
+    c = rs.sampling_direct(p, prep, params=params)
     assert c.n_prep == routes.shots_for_relative_error(p.v_direct, p.A, 0.3, weights=p.m)
-    assert c.toffolis == c.n_prep * PREP.toffolis
-    assert c.toffolis_per_prep == c.coherent_toffolis == PREP.toffolis
-    assert c.n_runs == c.n_prep and c.logical_qubits == PREP.logical_qubits and c.flags == ()
+    assert c.toffolis == c.n_prep * prep.toffolis
+    assert c.toffolis_per_prep == c.coherent_toffolis == prep.toffolis
+    assert c.n_runs == c.n_prep and c.logical_qubits == prep.logical_qubits and c.flags == ()
     assert c.params["budget"] == pytest.approx(0.3 * p.norm_a_m, rel=1e-15)
 
 
 def test_sampling_aux_minimizes_over_the_delta_grid():
     """aux_mg: S(delta) = W_m / (delta^2 B(delta)^2) shots of C(Psi_k) + C_evol(delta), B(delta) with
     the aux bias plus the factorization bias (triangle inequality), minimized over aux_deltas; the
-    reference evaluates F10 and F8 by hand for every delta; Q = Q(Psi_k) + Q_walk + 1 - 2N."""
+    reference evaluates F10 and F8 by hand for every delta; Q = Q(Psi_k) + Q_walk + 1 - 2N, an
+    estimate (flagged)."""
     p0 = make_problem(12, seed=4)
     p = dataclasses.replace(p0, aux_bias=quadratic_bias(0.4, p0))
     walk = dataclasses.replace(WALK, fact_bias_m=0.02 * p.norm_a_m)
@@ -175,16 +179,19 @@ def test_sampling_aux_minimizes_over_the_delta_grid():
     assert c.params["delta"] == d_best
     assert c.params["c_evol"] == evolution_ref(walk.lam, d_best, walk.toffoli_per_step)
     assert c.logical_qubits == PREP.logical_qubits + walk.logical_qubits + 1 - 2 * NORB
-    assert c.flags == ()
+    assert c.flags == ("estimate",)
 
 
 # ----------------------------------------------------------------------- F11 amplitude estimation
-def test_ae_routes_follow_f11():
+@pytest.mark.parametrize("kind", ["spin_free", "spin_orbital"])
+def test_ae_routes_follow_f11(kind):
     """ae_product (alpha = 2 lambda_Q lambda, C_obs = C_W + C_Q), ae_x (alpha_X, 2 L_X) and ae_aux
-    (lambda_Q / delta, C_evol(delta) + C_Q) at one delta: applications, Toffolis (with the reflection
-    cost Q_run / 2 per application), longest run, runs and qubits of F11, evaluated by hand; the
-    biases enter the budget (factorization for b1 and b3, b(delta) for b3, none for b2)."""
-    p0 = make_problem(9, seed=5)
+    (lambda_Q / delta, C_evol(delta) + C_Q) at one delta, on both element sets (C_Q = 16 spin-free,
+    4 spin-orbital; m = 8 for every spin-orbital element): applications, Toffolis (with the reflection
+    of the Hadamard-test circuit, Q_A / 2 per application), longest run, runs and qubits of F11,
+    evaluated by hand; the biases enter the budget (factorization for b1 and b3, b(delta) for b3,
+    none for b2)."""
+    p0 = make_problem(9, kind=kind, seed=5)
     p = dataclasses.replace(p0, aux_bias=quadratic_bias(0.3, p0))
     walk = dataclasses.replace(WALK, fact_bias_m=0.01 * p.norm_a_m)
     delta = 0.5
@@ -192,17 +199,19 @@ def test_ae_routes_follow_f11():
     c_evol = evolution_ref(walk.lam, delta, walk.toffoli_per_step)
     cases = {
         "ae_product": (rs.ae_product(p, PREP, walk, kappa=1.5, params=params), 2 * p.lam_q * walk.lam,
-                       walk.toffoli_per_step + C_Q["spin_free"], walk.logical_qubits - 2 * NORB + 4,
+                       walk.toffoli_per_step + C_Q[kind], walk.logical_qubits - 2 * NORB + 4,
                        walk.fact_bias_m),
         "ae_x": (rs.ae_x_lcu(p, PREP, kappa=1.5, params=params), p.alpha_x, 2.0 * p.n_terms_x,
                  np.ceil(np.log2(p.n_terms_x)) + params.chi + 4, 0.0),
         "ae_aux": (rs.ae_aux(p, PREP, walk, kappa=1.5, params=params), p.lam_q / delta,
-                   c_evol + C_Q["spin_free"], walk.logical_qubits + 1 - 2 * NORB + 4,
+                   c_evol + C_Q[kind], walk.logical_qubits + 1 - 2 * NORB + 4,
                    p.aux_bias(delta) + walk.fact_bias_m),
     }
+    if kind == "spin_orbital":
+        assert np.all(p.m == 8)
     for route, (c, alpha, c_obs, q_obs, bias) in cases.items():
         budget = budget_ref(p, params.r, bias)
-        n, t, run, q = ae_ref(alpha, p.m, budget, 1.5, PREP.toffolis, c_obs, PREP.logical_qubits + q_obs)
+        n, t, run, q = ae_ref(alpha, p.m, budget, 1.5, PREP.toffolis, c_obs, PREP.logical_qubits + q_obs + 1)
         assert c.route == route
         assert c.n_prep == pytest.approx(n, rel=1e-12)
         assert c.toffolis == pytest.approx(t, rel=1e-12)
@@ -214,15 +223,40 @@ def test_ae_routes_follow_f11():
     assert cases["ae_aux"][0].params["delta"] == delta
 
 
+def test_element_with_zero_alpha_needs_no_applications():
+    """An element whose X_e vanishes (alpha_X = 0, L_X = 0, A_e = 0) gets eps_e = 0 from the allocation
+    and no applications: ae_x then costs exactly F11 on the other elements (by hand), with finite
+    totals, one run fewer, and the qubits of the elements that run."""
+    p0 = make_problem(9, seed=14)
+    alpha, n_terms, a = p0.alpha_x.copy(), p0.n_terms_x.copy(), p0.A.copy()
+    alpha[0], n_terms[0], a[0] = 0.0, 0, 0.0
+    p = dataclasses.replace(p0, alpha_x=alpha, n_terms_x=n_terms, A=a)
+    params = pm.FTParameters()
+    c = rs.ae_x_lcu(p, PREP, params=params)
+    rest = slice(1, None)
+    budget = params.r * p.norm_a_m
+    q_obs = np.ceil(np.log2(n_terms[rest])) + params.chi + 4
+    n, t, run, q = ae_ref(alpha[rest], p.m[rest], budget, 1.0, PREP.toffolis, 2.0 * n_terms[rest],
+                          PREP.logical_qubits + q_obs + 1)
+    assert math.isfinite(c.toffolis) and math.isfinite(c.toffolis_per_prep)
+    assert c.n_prep == pytest.approx(n, rel=1e-12) and c.toffolis == pytest.approx(t, rel=1e-12)
+    assert c.coherent_toffolis == pytest.approx(run, rel=1e-12)
+    assert c.n_runs == p.n_elements - 1 and c.logical_qubits == q
+    g_over_b, eps = rs.ae_allocation(alpha, p.m, budget)
+    assert eps[0] == 0.0 and np.all(eps[rest] > 0)
+
+
 def test_kappa_scales_the_applications():
     """compare_routes evaluates each AE route at kappa and kappa_practical; N is proportional to kappa
-    (F11), so the applications double from kappa = 1 to 2, and the qubits grow by the extra phase bit."""
+    (F11), so the applications double from kappa = 1 to 2, the cost per application stays (the
+    reflection does not act on the phase register) and the qubits grow by the extra phase bit."""
     p = make_problem(8, seed=6)
     costs = rs.compare_routes(p, PREP, WALK, params=pm.FTParameters(kappa=1.0, kappa_practical=2.0))
-    for route in ("ae_product", "ae_x", "ae_aux"):
+    for route in AE_ROUTES:
         c1, c2 = (c for c in costs if c.route == route)
         assert (c1.params["kappa"], c2.params["kappa"]) == (1.0, 2.0)
         assert c2.n_prep == pytest.approx(2 * c1.n_prep, rel=1e-12)
+        assert c2.toffolis_per_prep == pytest.approx(c1.toffolis_per_prep, rel=1e-12)
         assert c2.logical_qubits == c1.logical_qubits + 1
 
 
@@ -231,7 +265,8 @@ def test_kappa_scales_the_applications():
 def test_gradient_estimation_follows_f12(n_blocks):
     """gaw: N = 2 pi kappa_g sqrt(K n_B) (sum_e m_e alpha_e^2)^(1/2) / B with alpha_e = lambda_Q,e/delta,
     T = N (C(Psi_k) + C_evol + K (2 b_theta + 2) / n_B), n_B coherent blocks, ceil(K/n_B) b_theta extra
-    qubits over the aux route, evaluated by hand; flagged as an assumption."""
+    qubits over the aux route, evaluated by hand; flagged as an assumption (and an estimate). A probe
+    angle needs at least 3 bits (a phase-gradient adder)."""
     p0 = make_problem(9, seed=7)
     p = dataclasses.replace(p0, aux_bias=quadratic_bias(0.3, p0))
     delta, k = 0.6, p.n_elements
@@ -245,26 +280,35 @@ def test_gradient_estimation_follows_f12(n_blocks):
     assert c.coherent_toffolis == pytest.approx(n * per / n_blocks, rel=1e-12)
     assert c.n_runs == n_blocks
     assert c.logical_qubits == PREP.logical_qubits + WALK.logical_qubits + 1 - 2 * NORB + math.ceil(k / n_blocks) * 12
-    assert "assumption" in c.flags and c.params["kappa_g"] == 10.0
+    assert {"assumption", "estimate"} <= set(c.flags) and c.params["kappa_g"] == 10.0
     with pytest.raises(ValueError):
         rs.gradient_estimation(p, PREP, WALK, kappa_g=1.0, n_blocks=k + 1)
+    for bits in (1, 2):
+        with pytest.raises(ValueError):
+            rs.gradient_estimation(p, PREP, WALK, kappa_g=1.0, b_theta=bits)
+    assert math.isfinite(rs.gradient_estimation(p, PREP, WALK, kappa_g=1.0, b_theta=3, params=params).toffolis)
 
 
 # ----------------------------------------------------------------------- biases, r, C(Psi_k)
 def test_infeasible_bias_gives_the_flag_and_infinite_cost():
     """A factorization bias above r ||A||_m makes every route that uses H' infeasible (flag, inf
-    applications and Toffolis); the direct route and the X-LCU route, which use the exact H, are
-    unaffected. An aux bias above the target at every delta makes the aux routes infeasible."""
+    applications and Toffolis, the route's qubits without an AE phase register); the direct route and
+    the X-LCU route, which use the exact H, are unaffected. An aux bias above the target at every delta
+    makes the aux routes infeasible."""
     p = make_problem(10, seed=8)
     params = pm.FTParameters(r=0.3)
     walk = dataclasses.replace(WALK, fact_bias_m=0.3 * p.norm_a_m * 1.01)
     costs = rs.compare_routes(p, PREP, walk, params=params)
+    q_aux = PREP.logical_qubits + walk.logical_qubits + 1 - 2 * NORB
+    qubits = {"aux_mg": q_aux, "ae_product": q_aux - 1 + 4 + 1, "ae_aux": q_aux + 4 + 1, "gaw": q_aux + 10 * 16}
     for c in costs:
         if c.route in ("direct_mg", "ae_x"):
             assert "infeasible" not in c.flags and math.isfinite(c.toffolis)
         else:
             assert "infeasible" in c.flags
-            assert c.toffolis == c.n_prep == math.inf and c.params["budget"] == 0.0
+            assert c.toffolis == c.n_prep == c.coherent_toffolis == c.n_runs == math.inf
+            assert math.isnan(c.toffolis_per_prep) and c.params["budget"] == 0.0
+            assert c.logical_qubits == qubits[c.route]
     assert rs.best_route(costs).route in ("direct_mg", "ae_x")
     huge = dataclasses.replace(p, aux_bias=lambda d: 10.0 * p.norm_a_m)
     for c in (rs.sampling_aux(huge, PREP, WALK, params=params), rs.ae_aux(huge, PREP, WALK, params=params)):
@@ -291,115 +335,191 @@ def test_costs_fall_with_r_and_rise_with_the_state_cost():
 
 def test_crossover_norm_matches_the_closed_form():
     """Without biases T_direct = V_m C / (r^2 ||A||^2) and T_AE = 2 pi kappa Gamma (C + C_obs) / (r ||A||),
-    so they cross at ||A||* = V_m C / (2 pi kappa Gamma r (C + C_obs)); C_obs includes the reflection
-    cost Q_run/2 at the crossing (uniform for uniform alpha and m). crossover_norm (a grid search and
-    bisection on the routes) agrees to 1e-9, and both routes cost the same there. At C(Psi_k) = 0
-    sampling is free, so there is no crossing (nan)."""
+    so they cross at ||A||* = V_m C / (2 pi kappa Gamma r (C + C_obs)), with C_obs = 2 L_X + Q_A / 2
+    here (uniform alpha, m and L_X; Q_A = Q(Psi_k) + ceil(log2 L_X) + chi + 4 + 1, the reflected
+    qubits). crossover_norm (a grid search and bisection on the routes) agrees to 1e-9, and both routes
+    cost the same there. At C(Psi_k) = 0 sampling is free, so there is no crossing (nan)."""
     p = make_problem(12, seed=10, uniform=True)
     params = pm.FTParameters(r=0.3, kappa=1.0)
     a_star = rs.crossover_norm(p, PREP, WALK, "direct_mg", "ae_x", params=params)
-    at = dataclasses.replace(p, A=p.A * a_star / p.norm_a_m)
-    ae = rs.ae_x_lcu(at, PREP, params=params)
-    c_obs = ae.toffolis_per_prep - PREP.toffolis                  # 2 L_X + Q_run / 2
-    assert c_obs == pytest.approx(2 * 500 + ae.logical_qubits / 2, rel=1e-12)
+    c_obs = 2 * 500 + (PREP.logical_qubits + math.ceil(math.log2(500)) + params.chi + 4 + 1) / 2
     v_m, gamma = np.sum(p.m * p.v_direct), (np.sum(np.cbrt(p.m) * np.cbrt(p.alpha_x) ** 2)) ** 1.5
     closed = v_m * PREP.toffolis / (2 * math.pi * gamma * params.r * (PREP.toffolis + c_obs))
     assert a_star == pytest.approx(closed, rel=1e-9)
+    at = dataclasses.replace(p, A=p.A * a_star / p.norm_a_m)
+    ae = rs.ae_x_lcu(at, PREP, params=params)
+    assert ae.toffolis_per_prep == pytest.approx(PREP.toffolis + c_obs, rel=1e-12)
     assert rs.sampling_direct(at, PREP, params=params).toffolis == pytest.approx(ae.toffolis, rel=1e-9)
     hf = rs.PrepParams(0.0, 70)
     assert math.isnan(rs.crossover_norm(p, hf, WALK, "direct_mg", "ae_x", params=params))
     with pytest.raises(ValueError):
         rs.crossover_norm(p, PREP, WALK, "direct_mg", "gaw")
+    with pytest.raises(ValueError):
+        rs.crossover_norm(p, PREP, WALK, "ae_x", "ae_x")
+
+
+def test_crossover_norm_returns_the_larger_of_two_crossings():
+    """With a factorization bias b the product route is infeasible for r ||A||_m <= b and dear just
+    above, so sampling wins at both ends and the curves cross twice. The reference evaluates F10 and
+    F11 by hand on a fine grid of ||A||_m and refines every sign change with scipy's brentq: two
+    crossings (at 0.069 and 0.254 times the ||A||_m of the problem); crossover_norm returns the larger
+    one, the first met as the CQE converges, to 1e-9, and AE is the cheaper route between them."""
+    p = make_problem(12, seed=10, uniform=True)
+    params = pm.FTParameters()
+    bias = 0.02 * p.norm_a_m
+    walk = dataclasses.replace(WALK, fact_bias_m=bias)
+    v_m = np.sum(p.m * p.v_direct)
+    alpha = 2 * p.lam_q * walk.lam
+    c_obs = walk.toffoli_per_step + C_Q["spin_free"]
+    q_circuit = PREP.logical_qubits + walk.logical_qubits - 2 * NORB + 4 + 1
+
+    def log_gap(a):
+        """log T_direct - log T_ae_product at ||A||_m = a (-inf where the product route is infeasible)."""
+        b2 = (params.r * a) ** 2 - bias ** 2
+        if b2 <= 1e-12 * (params.r * a) ** 2:
+            return -math.inf
+        t_ae = ae_ref(alpha, p.m, math.sqrt(b2), 1.0, PREP.toffolis, c_obs, q_circuit)[1]
+        return math.log(v_m * PREP.toffolis / (params.r * a) ** 2) - math.log(t_ae)
+
+    grid = p.norm_a_m * np.logspace(-3, 1, 2001)
+    gaps = np.array([log_gap(a) for a in grid])
+    roots = [scipy.optimize.brentq(log_gap, grid[i], grid[i + 1], xtol=1e-15, rtol=1e-14)
+             for i in np.flatnonzero(np.sign(gaps[:-1]) != np.sign(gaps[1:])) if np.isfinite(gaps[i])]
+    assert len(roots) == 2 and bias / params.r < roots[0] < roots[1]
+    assert rs.crossover_norm(p, PREP, walk, "direct_mg", "ae_product", params=params) == pytest.approx(
+        roots[1], rel=1e-9)
+    between = dataclasses.replace(p, A=p.A * math.sqrt(roots[0] * roots[1]) / p.norm_a_m)
+    assert (rs.ae_product(between, PREP, walk, params=params).toffolis
+            < rs.sampling_direct(between, PREP, params=params).toffolis)
 
 
 # ----------------------------------------------------------------------- comparison
 def test_compare_routes_and_best_route():
     """compare_routes returns the routes in the documented order (sampling, AE at kappa and at
-    kappa_practical, GAW at each kappa_g); best_route takes the cheapest at one kappa, never GAW by
-    default, and lets the kappa-free sampling routes compete at every kappa."""
+    kappa_practical, GAW at each kappa_g); best_route takes the cheapest at one kappa (to 1e-9
+    relative), never GAW by default, and lets the kappa-free sampling routes compete at every
+    kappa."""
     p0 = make_problem(10, seed=11)
     p = dataclasses.replace(p0, aux_bias=quadratic_bias(0.3, p0))
     params = pm.FTParameters()
     costs = rs.compare_routes(p, PREP, WALK, params=params)
-    assert [c.route for c in costs] == ["direct_mg", "aux_mg"] + ["ae_product", "ae_x", "ae_aux"] * 2 + ["gaw"] * 3
+    assert [c.route for c in costs] == ["direct_mg", "aux_mg"] + list(AE_ROUTES) * 2 + ["gaw"] * 3
     assert [c.params["kappa_g"] for c in costs[-3:]] == list(params.kappa_g)
     for kappa in (1.0, 2.0):
         pool = [c for c in costs if c.route != "gaw" and c.params.get("kappa", kappa) == kappa]
-        assert rs.best_route(costs, kappa=kappa) is min(pool, key=lambda c: c.toffolis)
+        best = min(pool, key=lambda c: c.toffolis)
+        assert rs.best_route(costs, kappa=kappa) is best
+        assert rs.best_route(costs, kappa=kappa * (1 + 1e-12)) is best
     everything = rs.best_route(costs, exclude=())
     assert everything.toffolis == min(c.toffolis for c in costs if c.params.get("kappa", 1.0) == 1.0)
     with pytest.raises(ValueError):
         rs.best_route(costs, exclude=rs.ROUTES)
 
 
+def test_best_route_refuses_a_kappa_without_ae_costs():
+    """An AE route without a cost at the requested kappa must not drop out of the comparison silently
+    (F14 would then report a sampling route): with compare_routes at kappa = 1.5 and 3.0, best_route at
+    the default kappa = 1.0 raises, as does a list that lacks one AE route at that kappa; at 1.5 it
+    picks among the sampling routes and the AE costs at 1.5; with the AE routes excluded any kappa is
+    fine."""
+    p = make_problem(10, seed=15)
+    costs = rs.compare_routes(p, PREP, WALK, params=pm.FTParameters(kappa=1.5, kappa_practical=3.0))
+    with pytest.raises(ValueError, match="kappa"):
+        rs.best_route(costs)
+    pool = [c for c in costs if c.route in ("direct_mg", "aux_mg") or
+            (c.route in AE_ROUTES and c.params["kappa"] == 1.5)]
+    assert rs.best_route(costs, kappa=1.5) is min(pool, key=lambda c: c.toffolis)
+    sampling = rs.best_route(costs, kappa=2.0, exclude=("gaw",) + AE_ROUTES)
+    assert sampling is min(costs[:2], key=lambda c: c.toffolis)
+    partial = [c for c in costs if not (c.route == "ae_product" and c.params["kappa"] == 1.5)]
+    with pytest.raises(ValueError, match="ae_product"):
+        rs.best_route(partial, kappa=1.5)
+
+
 # ----------------------------------------------------------------------- F13 energies
 def test_line_search_cost_follows_f13():
-    """n_c candidates, each measured with V_E / eps_ls^2 shots of C(Psi_k) + C_step,c + C_rot: for
-    uniform candidates T = n_c V_E / eps^2 (C(Psi_k) + C_step + C_rot), and in general the sum over
-    the candidates; the longest shot is the dearest candidate."""
-    params = pm.FTParameters(eps_ls=1.6e-3)
+    """n_c candidates, each measured with V_E / eps_ls^2 shots of C(Psi_k) + C_step,c + C_rot (eps_ls,
+    not the chemical-accuracy target): for uniform candidates T = n_c V_E / eps_ls^2 (C(Psi_k) + C_step
+    + C_rot), and in general the sum over the candidates; the longest shot is the dearest candidate.
+    Without the qubits of the line-search circuits Q(Psi_k) is reported and flagged as a lower bound."""
+    params = pm.FTParameters(eps_ls=2e-3)
     c = rs.line_search_cost(0.61, PREP, [1154.0] * 11, 405, params=params)
-    assert c.toffolis == pytest.approx(11 * 0.61 / 1.6e-3 ** 2 * (PREP.toffolis + 1154 + 405), rel=1e-12)
-    assert c.n_prep == pytest.approx(11 * 0.61 / 1.6e-3 ** 2, rel=1e-12)
+    assert c.toffolis == pytest.approx(11 * 0.61 / 2e-3 ** 2 * (PREP.toffolis + 1154 + 405), rel=1e-12)
+    assert c.n_prep == pytest.approx(11 * 0.61 / 2e-3 ** 2, rel=1e-12)
+    assert c.logical_qubits == PREP.logical_qubits and c.flags == ("qubits_lower_bound",)
     steps = [160.0, 1192.0, 1154.0]
     c = rs.line_search_cost(0.61, PREP, steps, 405, params=params, logical_qubits=90)
-    assert c.toffolis == pytest.approx(0.61 / 1.6e-3 ** 2 * sum(PREP.toffolis + s + 405 for s in steps), rel=1e-12)
+    assert c.toffolis == pytest.approx(0.61 / 2e-3 ** 2 * sum(PREP.toffolis + s + 405 for s in steps), rel=1e-12)
     assert c.coherent_toffolis == PREP.toffolis + 1192 + 405
-    assert c.logical_qubits == 90 and c.params["n_candidates"] == 3
+    assert c.logical_qubits == 90 and c.params["n_candidates"] == 3 and c.flags == ()
     with pytest.raises(ValueError):
         rs.line_search_cost(0.61, PREP, [], 405)
 
 
 def test_energy_routes():
     """energy_sampling: V_E / eps^2 shots of the given cost. energy_ae: N = 2 pi kappa lambda / eps
-    applications of C(Psi_k) + C_W + Q_run/2 in one run (F11 with alpha = lambda); with N known the
-    state and the walk share the 2N system qubits, without it the count is an upper bound (flagged)."""
+    applications of C(Psi_k) + C_W + Q_A / 2 in one run (F11 with alpha = lambda; Q_A = Q(Psi_k) +
+    Q_walk - 2N + 1 the reflected qubits, Q_A + ceil(log2(N/2)) with the phase register); kappa = 2
+    doubles N at the same cost per application; with N known the state and the walk share the 2N
+    system qubits, without it the count is an upper bound (flagged)."""
     c = rs.energy_sampling(0.61, 3000.0, 70, eps=1.6e-3)
     assert c.n_prep == pytest.approx(0.61 / 1.6e-3 ** 2, rel=1e-14) and c.toffolis == pytest.approx(c.n_prep * 3000.0)
     e = rs.energy_ae(WALK, PREP, eps=1e-3, kappa=1.0, norb=NORB)
     n = 2 * math.pi * WALK.lam / 1e-3
-    q = PREP.logical_qubits + WALK.logical_qubits - 2 * NORB + math.ceil(math.log2(n / 2)) + 1
-    assert e.n_prep == pytest.approx(n, rel=1e-14) and e.logical_qubits == q and e.n_runs == 1
-    assert e.toffolis == pytest.approx(n * (PREP.toffolis + WALK.toffoli_per_step + q / 2), rel=1e-12)
+    q_a = PREP.logical_qubits + WALK.logical_qubits - 2 * NORB + 1
+    assert e.n_prep == pytest.approx(n, rel=1e-14) and e.n_runs == 1
+    assert e.logical_qubits == q_a + math.ceil(math.log2(n / 2))
+    assert e.toffolis == pytest.approx(n * (PREP.toffolis + WALK.toffoli_per_step + q_a / 2), rel=1e-12)
     assert e.coherent_toffolis == e.toffolis
+    e2 = rs.energy_ae(WALK, PREP, eps=1e-3, kappa=2.0, norb=NORB)
+    assert e2.n_prep == pytest.approx(2 * n, rel=1e-14) and e2.logical_qubits == e.logical_qubits + 1
+    assert e2.toffolis_per_prep == pytest.approx(e.toffolis_per_prep, rel=1e-14)
     upper = rs.energy_ae(WALK, PREP, eps=1e-3)
-    assert upper.logical_qubits == q + 2 * NORB and "qubits_upper_bound" in upper.flags
+    assert upper.logical_qubits == e.logical_qubits + 2 * NORB and "qubits_upper_bound" in upper.flags
 
 
 # ----------------------------------------------------------------------- data types
 def test_problem_validation_and_immutability():
     """ResidualProblem copies its arrays read-only, infers N from the elements when not given (never
-    below the largest orbital index + 1) and rejects malformed inputs; WalkParams and PrepParams
-    reject non-physical values."""
+    below the largest orbital index + 1) and rejects malformed inputs, including complex values that
+    are not real to round-off (the residual of a real state is real); WalkParams and PrepParams reject
+    non-physical and complex values."""
     p = make_problem(6, seed=12)
     a = np.array(p.A)
     q = dataclasses.replace(p, A=a, norb=None)
     a[0] = 99.0
     assert q.A[0] != 99.0 and not q.A.flags.writeable and not q.elements.flags.writeable
     assert q.norb == int(q.elements.max()) + 1
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, norb=1)                       # below the largest index + 1
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, v_direct=-p.v_direct)
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, m=np.zeros(6))
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, A=p.A[:-1])
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, elements=targets.element_set(NORB, "spin_orbital")[:6])
-    with pytest.raises(ValueError):
-        dataclasses.replace(p, kind="pauli")
+    real = dataclasses.replace(p, A=p.A + 0j, v_direct=p.v_direct * (1 + 1e-15j))
+    assert real.A.dtype == float and np.array_equal(real.A, p.A) and real.v_direct.dtype == float
+    bad = [{"norb": 1},                                   # below the largest index + 1
+           {"v_direct": -p.v_direct}, {"m": np.zeros(6)}, {"A": p.A[:-1]},
+           {"A": p.A + 0.05j}, {"A": list(p.A + 0.05j)}, {"v_direct": p.v_direct + 1j},
+           {"lam_q": p.lam_q + 1e-3j}, {"n_terms_x": p.n_terms_x + 0.5},
+           {"elements": targets.element_set(NORB, "spin_orbital")[:6]}, {"kind": "pauli"}]
+    for change in bad:
+        with pytest.raises(ValueError):
+            dataclasses.replace(p, **change)
     with pytest.raises(TypeError):
         dataclasses.replace(p, aux_bias=0.1)
+    with pytest.raises(TypeError):
+        dataclasses.replace(p, A=np.array(["0.1"] * 6))
     so = make_problem(6, kind="spin_orbital", seed=12)
     assert dataclasses.replace(so, norb=None).norb == int(so.elements[..., 0].max()) + 1
-    for bad in ({"lam": 0.0}, {"toffoli_per_step": 1.5}, {"logical_qubits": 0}, {"fact_bias_m": -1.0}):
+    for change in ({"lam": 0.0}, {"lam": np.complex128(4.9 + 0.1j)}, {"toffoli_per_step": 1.5},
+                   {"toffoli_per_step": np.complex64(868)}, {"logical_qubits": 0},
+                   {"logical_qubits": np.complex128(163)}, {"fact_bias_m": -1.0}):
         with pytest.raises(ValueError):
-            dataclasses.replace(WALK, **bad)
-    with pytest.raises(ValueError):
-        rs.PrepParams(toffolis=-1.0, logical_qubits=10)
+            dataclasses.replace(WALK, **change)
+    for change in ({"toffolis": -1.0}, {"toffolis": np.complex128(1.0 + 1.0j)}, {"logical_qubits": math.inf}):
+        with pytest.raises(ValueError):
+            dataclasses.replace(PREP, **change)
     with pytest.raises(ValueError):
         rs.ae_allocation(np.ones(3), np.ones(2), 0.1)
+    with pytest.raises(ValueError):
+        rs.ae_allocation(np.ones(3) + 1j, np.ones(3), 0.1)
+    with pytest.raises(ValueError):
+        rs.sampling_aux(dataclasses.replace(p, aux_bias=lambda d: 0.01 + 0.01j), PREP, WALK)
 
 
 def test_missing_aux_bias_is_flagged_as_a_lower_bound():

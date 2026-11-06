@@ -13,9 +13,13 @@ Phase-gradient excitations (:func:`pg_excitation_unitary`, F1, F3) [derived]
 ``diagnostics.cost.excitation_circuit`` compiles exp(t tau - conj(t) tau^dag) as a
 Clifford prefix P (the Jordan-Wigner parity ladder, a CZ that carries its sign, and the
 CNOT basis map), a multi-controlled R_y(phi) on a target qubit t with
-phi = -2 |t| sigma (sigma = <C|tau|D> = +-1), and P^dag, all between the phase gates
-p(-arg t) and p(arg t) on one qubit; its unitary is verified against the Fock-space
-oracle in tests/test_generator_rank.py. With R_y(phi) = S H R_z(phi) H S^dag,
+phi = -2 |t| sigma, and P^dag, all between the phase gates p(-arg t) and p(arg t) on one
+qubit; its unitary is verified against the Fock-space oracle in
+tests/test_generator_rank.py. Here sigma = <C|tau|D>, with only the modes C (D)
+occupied, is +1 for the sorted C and D of every ``Excitation``: in
+tau = a+_{c0} a+_{c1} a_{d1} a_{d0} no ladder operator passes an occupied mode below it
+(``diagnostics.cost._jw_sign`` gives +1 on all 4290 sorted doubles and singles of 12
+modes). With R_y(phi) = S H R_z(phi) H S^dag,
 
     U = p(arg t) P^dag (S H)_t  D  (H S^dag)_t P p(-arg t),
     D = exp(+i phi/2) on the cell c AND t,  exp(-i phi/2) on c AND NOT t,  1 elsewhere,
@@ -32,7 +36,8 @@ pi / 2^b of the exact one in operator norm. The phase gates p(-+arg t) are
 phase-gradient additions too (one cell each); for real t they are 1 or Z, exact at any
 b, and a complex t adds 2 pi / 2^b to the bound (F3 excludes complex directions). Every
 factor is diagonal or a basis map of the excitation's own two-dimensional subspaces, so
-N and S_z are conserved exactly, rounded or not.
+N and S_z are conserved exactly, rounded or not; S^2 is not, since a spin-orbital
+excitation does not commute with it.
 
 Phase kickback (:func:`kickback_check`, F1) [derived]
 -----------------------------------------------------
@@ -77,16 +82,30 @@ does: ||Psi~_rounded - Psi~_unrounded|| <= sum_j A_j pi / 2^{b_j}. Every factor 
 the Fock space and conserves N and S_z, so ||Psi~_k|| = 1 up to round-off, and a
 deficit would be leakage out of the (n_alpha, n_beta) sector. Directions are real
 (F3), so the kept excitations are doubles and singles with real amplitudes. The oracle
-is dense in 4^N and refuses N > 7, so H8 cannot be replayed.
+is dense in 4^N; ``testing.fock`` allows N <= 8, so all seven benchmark systems replay
+(H8, 65536 states, in about 0.35 s per RHF step).
 
 Observed (exact L-BFGS trajectories on the symmetry-adapted builds, rounded circuits,
-open loop; tests/test_ft_circuits.py): ||Psi~_1 - Psi_1|| after the RHF step is 1.1e-3
-(H4), 1.4e-3 (H6 at 1.0 A), 2.0e-3 (N2), 2.2e-4 (LiH), mostly product-formula error
-(rounding contributes <= 2.1e-4), and stays below 3.2e-3 up to k* + 2; the compiled
-circuits reach 1.6 mHa at the exact k* (3, 6, 3, 2). The stretched builds have a
-product-formula error 20-30 times larger at the RHF step, 2.7e-2 (H6 at 3 bohr) and
-3.1e-2 (N2 at 2.0 A), and on N2 at 2.0 A the compiled first step reaches the overlap
-0.2251 instead of 0.2314.
+open loop, one thread; tests/test_ft_circuits.py). After the RHF step:
+
+    system           ||Psi~_1 - Psi_1||   p_HF -> p_1 -> p~_1         <S^2>(Psi~_1)   quintet share
+    H4               1.12e-3              0.9455 -> 0.9802 -> 0.9801   2.0e-6          26%
+    H6 at 1.0 A      1.40e-3              0.9026 -> 0.9576 -> 0.9575   1.0e-6           9%
+    N2               1.98e-3              0.9257 -> 0.9635 -> 0.9632   1.5e-5          63%
+    LiH              2.18e-4              0.9743 -> 0.9940 -> 0.9940   1.5e-10         0 (0.2% triplet)
+    H8               1.27e-3              0.8864 -> 0.9454 -> 0.9452   1.2e-6          12%
+    H6 at 3 bohr     2.74e-2              0.5733 -> 0.8722 -> 0.8701   1.5e-3          34%
+    N2 at 2.0 A      3.13e-2              0.2528 -> 0.2314 -> 0.2251   3.9e-3          67%
+
+The error is mostly product-formula error (rounding contributes <= 2.1e-4). The exact
+Psi_1 has <S^2> = 0; the quintet share is the part of ||Psi~_1 - Psi_1||^2 in the S = 2
+sector (projectors from PySCF's S^2), and the rest is singlet, apart from the 0.2%
+triplet of LiH. The stretched builds have a product-formula error 20-30 times larger
+than the equilibrium ones, 27 and 31 times delta_step, which the elementwise cost model
+does not budget (``stateprep``: flag "product-formula error not in budget"); on N2 at
+2.0 A already the exact step lowers the overlap. On the core systems the open-loop
+error stays below 3.2e-3 up to k* + 2, and the compiled circuits reach 1.6 mHa at the
+exact k* (3, 6, 3, 2 for H4, H6, N2, LiH).
 """
 
 from __future__ import annotations
@@ -135,23 +154,6 @@ def _apply_1q(u: np.ndarray, q: int, m: np.ndarray) -> np.ndarray:
     return out
 
 
-def _jw_sign(exc: Excitation) -> int:
-    """sigma = <C| tau |D> for tau = a+_{c0} a+_{c1} a_{d1} a_{d0}, with only the modes C (D) occupied.
-
-    a_j and a+_j carry (-1)^(number of occupied modes below j) (Jordan-Wigner, as in testing.fock).
-    """
-    occ = set(exc.annihilators)
-    sign = 1
-    (c0, c1), (d0, d1) = exc.creators, exc.annihilators
-    for kind, j in (("a", d0), ("a", d1), ("c", c1), ("c", c0)):      # a_{d0} acts first
-        sign *= -1 if sum(1 for m in occ if m < j) % 2 else 1
-        if kind == "a":
-            occ.remove(j)
-        else:
-            occ.add(j)
-    return sign
-
-
 def pg_excitation_unitary(exc: Excitation, n_qubits: int, bits: int | None) -> np.ndarray:
     """Dense unitary of the phase-gradient compilation of one excitation (module docstring).
 
@@ -168,6 +170,9 @@ def pg_excitation_unitary(exc: Excitation, n_qubits: int, bits: int | None) -> n
     n = int(n_qubits)
     if n != n_qubits or n < 1 or min(exc.modes) < 0 or max(exc.modes) >= n:
         raise ValueError(f"excitation on modes {exc.modes} does not fit on {n_qubits!r} qubits")
+    for pair in (exc.creators, exc.annihilators):
+        if not pair[0] < pair[1]:
+            raise ValueError(f"creators and annihilators must be sorted and distinct, got {exc}")
     if bits is not None and (int(bits) != bits or bits < 1):
         raise ValueError(f"bits must be a positive integer or None, got {bits!r}")
     idx = np.arange(1 << n)
@@ -197,7 +202,7 @@ def pg_excitation_unitary(exc: Excitation, n_qubits: int, bits: int | None) -> n
     if string:
         pq = string[0]
         clifford = [("cx", j, pq) for j in string[1:]] + [("cz", pq, target)] + clifford
-    half = -abs(t) * _jw_sign(exc)                 # phi / 2 of the reference R_y(phi)
+    half = -abs(t)                  # phi / 2 of the reference R_y(phi); sigma = +1 (sorted modes)
     beta = float(np.angle(t))
     cells = np.zeros(1 << n)
     cells[control & occ(target)] = _cell_phase(half, bits)
@@ -326,7 +331,7 @@ def replay_elementwise(active: ActiveSpace, directions: Sequence[np.ndarray], ep
     """CI vectors Psi~_0 .. Psi~_K of the compiled elementwise circuits, from HF (module docstring).
 
     Args:
-        active: the system (N <= 7 orbitals: the Fock-space oracle is dense in 4^N).
+        active: the system (N <= 8 orbitals: the Fock-space oracle is dense in 4^N).
         directions, eps: real directions and step sizes of the K steps.
         irreps: orbital irreps for the mask (F2a); None: no mask.
         rounded: rotate by the b-bit rounded angles (the compiled circuit) or by the exact ones.

@@ -4,9 +4,9 @@ phase kickback, Givens decompositions and the compiled elementwise replay.
 References independent of the module: M1's verified excitation circuits
 (``diagnostics.cost.excitation_circuit`` / ``circuit_unitary``, checked against the Fock-space oracle in
 tests/test_generator_rank.py), the defining identity of the phase-gradient state (evaluated with numpy),
-random unitaries from QR decompositions, the exact CQE trajectory and FCI states (PySCF), and dense
-sparse-matrix exponentials (``scipy.sparse.linalg.expm_multiply``) of the excitation operators built on
-the Jordan-Wigner Fock space.
+random unitaries from QR decompositions, the exact CQE trajectory and FCI states (PySCF), sparse-matrix
+exponentials (``scipy.sparse.linalg.expm_multiply``) of the excitation operators built on the
+Jordan-Wigner Fock space, and PySCF's S^2 (``fci.spin_op``).
 """
 
 import math
@@ -14,6 +14,7 @@ import math
 import numpy as np
 import pytest
 import scipy.sparse.linalg as spla
+from pyscf.fci import spin_op
 
 from thc_engine_cqe.cqe import run_cqe
 from thc_engine_cqe.diagnostics.cost import Excitation, circuit_unitary, excitation_circuit
@@ -100,6 +101,8 @@ def test_pg_complex_amplitudes_and_diagonal_terms():
         cc.pg_excitation_unitary(cases[0][0], 6, None)
     with pytest.raises(ValueError):
         cc.pg_excitation_unitary(cases[0][0], N_QUBITS, 0)
+    with pytest.raises(ValueError):                         # the sign sigma = +1 needs sorted modes
+        cc.pg_excitation_unitary(Excitation("double", (6, 5), (1, 2), 0.3), N_QUBITS, None)
 
 
 # --------------------------------------------------------------------------- kickback
@@ -173,6 +176,34 @@ def overlap(a: np.ndarray, b: np.ndarray) -> float:
     return float(abs(np.vdot(a.ravel(), b.ravel())) ** 2)
 
 
+def expm_product(act, directions, eps, irreps, rounded: bool) -> np.ndarray:
+    """CI vector of HF followed by expm_multiply of theta sign(t) (tau - tau^dag), tau built from the
+    Fock-space annihilators, for every kept excitation in the order of stateprep.elementwise_excitations
+    (theta = |eps t|, rounded to b bits if asked)."""
+    n, nelec = act.norb, tuple(act.nelec)
+    fock = FockSpace(n)
+    a = [fock.a(m % n, m // n) for m in range(2 * n)]
+    v = fock.from_ci(FCISpace.of(act).hf(), nelec)
+    for d, e in zip(directions, eps):
+        kept, b = sp.elementwise_excitations(d, e, irreps=irreps)
+        for x in kept:
+            (c0, c1), (d0, d1) = x.creators, x.annihilators
+            tau = a[c0].T @ a[c1].T @ a[d1] @ a[d0]
+            theta = rounded_angle(abs(x.amplitude), b) if rounded else abs(x.amplitude)
+            v = spla.expm_multiply(math.copysign(theta, x.amplitude) * (tau - tau.T), v)
+    return fock.to_ci(v, nelec)
+
+
+def spin_weight(c: np.ndarray, norb: int, nelec: tuple[int, int], s: int) -> float:
+    """||P_S c||^2, P_S the projector on total spin S in the M_S = 0 block: the product over the other
+    S' of (S^2 - S'(S'+1)) / (S(S+1) - S'(S'+1)), with S^2 applied by PySCF's spin_op.contract_ss."""
+    out = c
+    for t in range(min(sum(nelec), 2 * norb - sum(nelec)) // 2 + 1):
+        if t != s:
+            out = (spin_op.contract_ss(out, norb, nelec) - t * (t + 1) * out) / (s * (s + 1) - t * (t + 1))
+    return float(np.linalg.norm(out) ** 2)
+
+
 @pytest.mark.parametrize("name", ["h4", "h6a"])
 def test_replay_first_three_steps(name):
     """Compiled replay of the first three exact L-BFGS steps: the rounded and unrounded circuits differ by
@@ -200,24 +231,10 @@ def test_replay_equals_product_of_sparse_exponentials():
     the same order (the first two H4 steps, rounded and unrounded angles)."""
     tr = trajectory("h4", 2)
     act, ir = tr["active"], tr["irreps"]
-    n, nelec = act.norb, tuple(act.nelec)
-    fock = FockSpace(n)
-    a = [fock.a(m % n, m // n) for m in range(2 * n)]
-
-    def op(exc: Excitation, theta: float):
-        (c0, c1), (d0, d1) = exc.creators, exc.annihilators
-        tau = a[c0].T @ a[c1].T @ a[d1] @ a[d0]
-        return math.copysign(theta, exc.amplitude) * (tau - tau.T)
-
     for rounded in (False, True):
-        v = fock.from_ci(FCISpace.of(act).hf(), nelec)
-        for d, eps in zip(tr["d"], tr["eps"]):
-            kept, b = sp.elementwise_excitations(d, eps, irreps=ir)
-            for x in kept:
-                theta = rounded_angle(abs(x.amplitude), b) if rounded else abs(x.amplitude)
-                v = spla.expm_multiply(op(x, theta), v)
+        ref = expm_product(act, tr["d"], tr["eps"], ir, rounded)
         replay = cc.replay_elementwise(act, tr["d"], tr["eps"], irreps=ir, rounded=rounded)[-1]
-        assert np.abs(fock.to_ci(v, nelec) - replay).max() < 1e-12
+        assert np.abs(ref - replay).max() < 1e-12
 
 
 def test_compiled_replay_reaches_chemical_accuracy_at_k_star():
@@ -236,18 +253,35 @@ def test_compiled_replay_reaches_chemical_accuracy_at_k_star():
             assert abs(overlap(tr["ci0"], replay[k]) - overlap(tr["ci0"], tr["states"][k - 1])) <= 1e-3
 
 
-@pytest.mark.parametrize("name, error, p_compiled", [
-    ("h4", 1.12e-3, 0.98013), ("h6a", 1.40e-3, 0.95745), ("n2", 1.98e-3, 0.96324), ("lih", 2.18e-4, 0.99399),
-    ("h6s", 2.74e-2, 0.87015), ("n2s", 3.13e-2, 0.22507)])
-def test_first_step_product_error_on_every_replayable_system(name, error, p_compiled):
-    """Regression of the compiled RHF step on the six systems with N <= 7 (the replay values recorded in
-    the circuits module docstring, to 3%): the state error against the exact Psi_1 and the ground-state
-    overlap of the compiled state. The stretched builds (h6s, n2s) have a product-formula error 20-30
-    times larger than the equilibrium ones, which the elementwise cost model does not budget."""
+@pytest.mark.parametrize("name, error, p_compiled, s2, quintet", [
+    ("h4", 1.1242e-3, 0.98013, 1.99e-6, 0.263), ("h6a", 1.3954e-3, 0.95745, 1.03e-6, 0.088),
+    ("n2", 1.9785e-3, 0.96324, 1.47e-5, 0.626), ("lih", 2.1828e-4, 0.99399, 1.47e-10, 0.0),
+    ("h8", 1.2661e-3, 0.94525, 1.17e-6, 0.121), ("h6s", 2.7407e-2, 0.87015, 1.545e-3, 0.343),
+    ("n2s", 3.1296e-2, 0.22507, 3.925e-3, 0.668)])
+def test_first_step_product_error_and_spin_contamination(name, error, p_compiled, s2, quintet):
+    """The compiled RHF step on all seven systems (H8 too: testing.fock allows 8 orbitals). The replay equals
+    expm_multiply of the kept excitations at the rounded angles (an independent reference) to 1e-12. Against
+    the exact Psi_1 of run_cqe, the regression values of the circuits module docstring, which the reviewer's
+    own replay (own expansion, character mask and F3) reproduced: the state error (rel 1e-3), the
+    ground-state overlap of the compiled state (1e-5), <S^2> from PySCF's spin_square (2%; 0 for the exact
+    Psi_1) and the quintet share of ||Psi~_1 - Psi_1||^2 (projectors from PySCF's S^2; 2e-3; the rest is
+    singlet, apart from 0.2% triplet for LiH). The stretched builds (h6s, n2s) have a product-formula error
+    20-30 times larger than the equilibrium ones, and the product breaks S^2: the elementwise cost model
+    budgets neither."""
     tr = trajectory(name, 1)
-    replay = cc.replay_elementwise(tr["active"], tr["d"], tr["eps"], irreps=tr["irreps"])
-    assert np.linalg.norm(replay[1] - tr["states"][0]) == pytest.approx(error, rel=3e-2)
+    act, ir = tr["active"], tr["irreps"]
+    n, nelec = act.norb, tuple(act.nelec)
+    replay = cc.replay_elementwise(act, tr["d"], tr["eps"], irreps=ir)
+    assert np.abs(replay[1] - expm_product(act, tr["d"], tr["eps"], ir, rounded=True)).max() < 1e-12
+    err = replay[1] - tr["states"][0]
+    assert np.linalg.norm(err) == pytest.approx(error, rel=1e-3)
     assert overlap(tr["ci0"], replay[1]) == pytest.approx(p_compiled, abs=1e-5)
+    assert abs(spin_op.spin_square(tr["states"][0], n, nelec)[0]) <= 1e-12
+    assert spin_op.spin_square(replay[1], n, nelec)[0] == pytest.approx(s2, rel=2e-2)
+    weights = [spin_weight(err, n, nelec, k) for k in range(min(sum(nelec), 2 * n - sum(nelec)) // 2 + 1)]
+    assert sum(weights) == pytest.approx(np.linalg.norm(err) ** 2, rel=1e-9)
+    assert weights[2] / sum(weights) == pytest.approx(quintet, abs=2e-3)
+    assert weights[1] / sum(weights) <= (3e-3 if name == "lih" else 1e-3)
 
 
 def test_replay_validation():

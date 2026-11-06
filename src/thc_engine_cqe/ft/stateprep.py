@@ -5,11 +5,13 @@ to uncompute [cited: Gidney, Quantum 2, 74 (2018)]. Cliffords are free: Jordan-W
 parities, CNOT basis maps and the HF determinant (C(Psi_0) = 0). Every rotation is a
 phase-gradient addition of a classical constant (:mod:`thc_engine_cqe.ft.primitives`,
 F1): b - 2 Toffolis per addition [OF: ``cost4df = 4 n (beta - 2)``], the ANDs of its
-indicator cells, and a rounding error <= pi / 2^b per addition. Tags: [OF] OpenFermion
-1.8.1 source; [verified] reproduced by an explicit circuit in
-:mod:`thc_engine_cqe.ft.circuits` and tests/test_ft_circuits.py; [derived], [cited],
-[estimate] and [assumption] as in the M3 specification. Formula tags F1-F19 are those of
-the specification.
+indicator cells, and a rounding error <= pi / 2^b per addition. The gradient register
+is a catalyst, prepared once per machine and kept across steps and shots; its b qubits
+are part of Q_prep, its preparation is not counted [assumption; OpenFermion's
+convention; primitives module docstring]. Tags: [OF] OpenFermion 1.8.1 source;
+[verified] reproduced by an explicit circuit in :mod:`thc_engine_cqe.ft.circuits` and
+tests/test_ft_circuits.py; [derived], [cited], [estimate] and [assumption] as in the M3
+specification. Formula tags F1-F19 are those of the specification.
 
 Primitive counts (:class:`PrimitiveCounts`)
 -------------------------------------------
@@ -55,7 +57,8 @@ optional orbital irreps (F2a, :mod:`thc_engine_cqe.ft.symmetry`):
 4. C_step = A (b - 2) + 3 n_d + 2 n_s + n_g and Q_prep = 2N + 3b + 8 logical qubits
    (system, gradient register, summand, b - 1 adder carries and the AND ancillas)
    [derived; memo 1, specification S8]. A step without kept excitations costs 0 and
-   needs 2N qubits.
+   needs 2N qubits; so does eps = 0, whose expansion is empty (nothing is dropped or
+   masked).
 
 Rounding. Each kept excitation is realized as exp(theta~ K) with theta~ the angle
 rounded to a multiple of 2 pi / 2^b (both cell constants round symmetrically), so it
@@ -63,12 +66,21 @@ errs by <= pi / 2^b in operator norm; a dropped one by <= theta_x. The compiled 
 therefore within ``StepCost.rounding_bound`` = A pi / 2^b + sum_dropped theta_x of the
 product of the exact exponentials of X; F3 budgets only the first term, and the flag
 "rounding bound above delta_step" marks steps where the dropped angles push the sum
-above delta_step. The product-formula (Trotter) error of the elementwise product is not
-in the budget [memo 1 section 2.4: 1.2e-3 to 2.0e-3 state error at the RHF step and
-<= 1.8e-3 at the next L-BFGS step for H4, H6 and N2, and closed-loop compiled runs
-needed no extra step]; ``circuits.replay_elementwise`` measures it, and finds it 20-30
-times larger at the RHF step of the stretched builds (2.7e-2 for H6 at 3 bohr, 3.1e-2
-for N2 at 2.0 A).
+above delta_step.
+
+Product-formula error. The product of the A exponentials differs from exp(eps D) at
+second order in eps, and F3 does not budget it: every step that compiles two or more
+excitations carries the flag "product-formula error not in budget" (the leaf steps carry
+its order-1 Trotter analogue, F6). The product conserves N, S_z and the point group
+exactly, but not S^2: a spin-free double is a sum of alpha-alpha, beta-beta and
+alpha-beta excitations, which do not commute with S^2 one by one (F1's S^2 statement
+holds for one phase function, not for a product of them). ``circuits.replay_elementwise``
+measures the error. After the exact L-BFGS step from RHF, ||Psi~_1 - Psi_1|| is 2.2e-4
+(LiH) to 2.0e-3 (N2) at equilibrium [memo 1 section 2.4: 1.2e-3 to 2.0e-3, <= 1.8e-3 at
+the next step, and closed-loop compiled runs needed no extra step], but 2.7e-2 (H6 at
+3 bohr) and 3.1e-2 (N2 at 2.0 A), 27 and 31 times delta_step, and <S^2> of Psi~_1 is
+<= 1.5e-5 at equilibrium but 1.5e-3 and 3.9e-3 on the stretched builds, against 0 for
+Psi_1 (circuits module docstring; tests/test_ft_circuits.py).
 
 Complex directions raise ValueError: a complex amplitude adds two Z rotations per
 excitation and complex states are out of scope (F3).
@@ -134,7 +146,11 @@ b = 15), 1192 (40 doubles and 24 singles, b = 18) and 1154 Toffolis, C(Psi_3) = 
 H6 at 1.0 A 969 (51 doubles, b = 18), then 8442-8526 (b = 21), C(Psi_6) = 43427 on
 83 logical qubits; N2 486 (27 doubles, b = 17) and 1045 (55 doubles, b = 18),
 C(Psi_3) = 2576. The leaf steps of the same directions cost 3.7k / 19k / 18k Toffolis at
-the RHF step and 5.6k / 37k / 25k later.
+the RHF step and 5.6k / 37k / 25k later. The mask matters on the late N2 steps, whose
+forbidden entries are amplified round-off (symmetry module docstring): unmasked, the
+forbidden excitations survive the rounding from k = 9 on, and C(Psi_12) is 12854
+instead of 11082 Toffolis (k = 9: 1910 instead of 1045; k = 10: 1357 instead of 450;
+one thread, round-off dependent).
 """
 
 from __future__ import annotations
@@ -172,6 +188,7 @@ METHODS = ("elementwise", "leaves")
 _EXPANSION_TOL = 1e-12          # F3: relative tolerance of the spin-orbital expansion
 _LEAF_RANK_TOL = 1e-10          # F6: rank tolerance of the generator factorization
 _LEAF_FLAGS = ("complex state", "order-1 Trotter error not in budget")
+_FLAG_PRODUCT = "product-formula error not in budget"
 _FLAG_ROUNDING = "rounding bound above delta_step"
 
 
@@ -257,12 +274,15 @@ class StepCost:
         logical_qubits: Q_prep = 2N + 3b + 8 (2N for an empty step).
         counts: additions, ANDs and Pauli rotations of the step.
         n_double, n_single, n_diagonal: kept excitations by kind (elementwise).
-        n_dropped: excitations of the masked expansion that round to zero (elementwise).
+        n_dropped: excitations of the masked expansion that round to zero (elementwise;
+            0 for eps = 0).
         n_masked: excitations of the unmasked expansion that the symmetry mask removes
-            (elementwise, diagnostic; 0 without irreps).
+            (elementwise, diagnostic; 0 without irreps and for eps = 0).
         n_leaves: L, leaves compiled (leaves).
         n_active: n_a,k of every compiled leaf (leaves).
-        flags: caveats (module docstring).
+        flags: caveats (module docstring): "product-formula error not in budget" (two or
+            more kept excitations) and "rounding bound above delta_step" (elementwise);
+            "complex state" and "order-1 Trotter error not in budget" (leaves).
         rounding_bound: bound on the operator-norm distance between the compiled step and
             the product of the exact exponentials of its factors: A pi / 2^b plus the
             angles of the dropped excitations (elementwise), A_leaf pi / 2^b (leaves).
@@ -301,7 +321,12 @@ def _check_direction(d: np.ndarray, *, real: bool) -> np.ndarray:
 
 
 def _check_eps(eps: float) -> float:
-    e = float(eps)
+    if np.iscomplexobj(eps):
+        raise ValueError(f"eps must be a finite real number, got {eps!r}")
+    try:
+        e = float(eps)
+    except (TypeError, ValueError):
+        raise ValueError(f"eps must be a finite real number, got {eps!r}") from None
     if e != eps or not math.isfinite(e):
         raise ValueError(f"eps must be a finite real number, got {eps!r}")
     return e
@@ -358,13 +383,16 @@ def _elementwise_cost(exp: _Expansion, eps: float, params: FTParameters, step: i
     counts = excitation_counts(kept)
     kinds = [e.kind for e in kept]
     bound = n_keep * math.pi / 2.0 ** b + float(np.sum(theta[n_keep:]))
-    flags = (_FLAG_ROUNDING,) if bound > params.delta_step else ()
+    flags = (((_FLAG_PRODUCT,) if n_keep >= 2 else ())
+             + ((_FLAG_ROUNDING,) if bound > params.delta_step else ()))
+    # eps = 0: F3 expands eps * mask(d) = 0, so nothing is dropped or masked.
+    n_dropped, n_masked = (len(exp.excitations) - n_keep, exp.n_masked) if eps != 0.0 else (0, 0)
     n = exp.norb
     return StepCost(method="elementwise", step=step, eps=eps, toffolis=counts.toffolis(b), bits=b,
                     logical_qubits=2 * n + 3 * b + 8 if n_keep else 2 * n, counts=counts,
                     n_double=kinds.count("double"), n_single=kinds.count("single"),
-                    n_diagonal=kinds.count("diagonal"), n_dropped=len(exp.excitations) - n_keep,
-                    n_masked=exp.n_masked, flags=flags, rounding_bound=bound)
+                    n_diagonal=kinds.count("diagonal"), n_dropped=n_dropped, n_masked=n_masked,
+                    flags=flags, rounding_bound=bound)
 
 
 def elementwise_excitations(d: np.ndarray, eps: float, *, irreps: np.ndarray | None = None,

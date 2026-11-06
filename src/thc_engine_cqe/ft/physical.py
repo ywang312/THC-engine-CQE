@@ -38,13 +38,17 @@ cycle, F = 4, 50% routing, d = 7..33, budget 0.1):
   Toffolis; here 1e13 Toffolis are fine.
 * The failure budget, the distances, F, the routing overhead and the cycle time are
   parameters (:class:`SurfaceCodeModel`); the default distances reach d = 43.
-* ``shot=True`` adds 2 d cycles of logical readout [assumption], which also count
-  in the data failure. A Clifford-only shot (N_Tof = 0) thus lasts 2 d cycles; it needs
-  no factory, so its area is the data block alone (factory "none").
+* ``shot=True`` adds 2 d cycles of logical readout after the last Toffoli
+  [assumption], which also count in the data failure. A Clifford-only shot (N_Tof = 0)
+  thus lasts 2 d cycles; it needs no factory, so its area is the data block alone
+  (factory "none").
 * An optional reaction floor [assumption]: with ``SurfaceCodeModel.reaction_us`` set,
-  the duration is at least ceil(toffoli_depth * t_react / t_cycle) cycles (Toffolis
-  that depend on measured outcomes cannot outrun the classical reaction time). The
-  data failure is evaluated on the floored duration.
+  the Toffoli part of a run lasts at least ceil(toffoli_depth * t_react / t_cycle)
+  cycles (Toffolis that depend on measured outcomes cannot outrun the classical
+  reaction time), and the readout of a shot follows it:
+  cycles = max(rounds, floor) + 2 d. The data failure is evaluated on these cycles.
+* N_Tof must be 0 or at least 1: OpenFermion's fluid floor(N_Tof / F * rounds_fac)
+  gives a run of zero cycles for 0 < N_Tof < F / rounds_fac.
 
 Observed with the defaults (p = 1e-3, 4 factories): the factory-limited rate is
 rounds_fac / F = 26.25 us per Toffoli for AutoCCZ(.., l2 = 21) and 28.75 us for l2 = 23
@@ -60,30 +64,42 @@ Toffolis at d = 35 and 37, 46.5 us per Toffoli).
 Monotonicity [derived]. Every layout's failure grows with N_Tof and the feasible set
 shrinks as the budget tightens, so the optimal area x duration is non-decreasing in
 N_Tof and in 1/budget, and for a fixed factory the optimal d is the smallest feasible
-one, also non-decreasing. The chosen d itself is not monotone in N_Tof, because the
-optimum can switch to a faster factory: 233 logical qubits at budget 0.1 need d = 15
-with AutoCCZ(9, 15) for 562 Toffolis but d = 13 with AutoCCZ(11, 13) for 1000
-(``cost_estimator`` gives the same; tests/test_ft_physical.py).
+one, also non-decreasing. The chosen d itself is monotone in neither, because the
+optimum can switch factories (specification section 7 claims both monotonicities; both
+are false in OpenFermion's own model, tests/test_ft_physical.py):
+
+* in N_Tof, to a faster factory: 233 logical qubits at budget 0.1 need d = 15 with
+  AutoCCZ(9, 15) for 562 Toffolis but d = 13 with AutoCCZ(11, 13) for 1000, a shorter
+  run with less data failure (``cost_estimator`` makes the same choice);
+* in 1/budget, to a cleaner factory: one shot of 83 logical qubits and 5623 Toffolis
+  needs d = 25 with AutoCCZ(13, 23) at budget 3e-5 but d = 23 with AutoCCZ(15, 23) at
+  1e-5, whose smaller distillation failure leaves more of the budget to the data block.
 
 Wall clock (F19) [assumption]
 -----------------------------
-A campaign of n independent runs of one circuit on M identical machines, each run on
-one machine (a run is not split; shots and per-element amplitude-estimation runs
-parallelize, a single QPE run does not), lasts
+A campaign of n independent runs of one circuit on M identical machines runs whole
+runs, each on one machine, one after another (a run is not split; shots and
+per-element amplitude-estimation runs parallelize, a single QPE run does not). It
+lasts
 
-    T(n, M) = t_run * max(n / M, min(n, 1))                    (campaign_seconds)
+    T(n, M) = t_run * ceil(n / M)                              (campaign_seconds)
 
-that is the even share n / M of the runs (a fluid share: the rounding to whole runs per
-machine is ignored), but at least one run (n < 1 is read as an expected number of runs
-on one machine). An infinite n (an infeasible route) lasts forever. The machines needed
-for a deadline D are the smallest M >= 1 with T(n, M) <= D (:func:`machines_for`); none
-suffice, and it raises, if one run is longer than D or n is infinite.
+with n rounded up to whole runs (a fractional count from a variance formula needs
+ceil(n) runs). For n >= 1 the even (fluid) share t_run max(n / M, 1) is a lower bound,
+and T exceeds it by less than one run: by up to 2x when n / M is just above 1 (5 runs
+on 4 machines take 2 t_run, not 1.25 t_run), negligibly when n / M >> 1, as for shots.
+An infinite n (an infeasible route) lasts forever. A random number of runs with mean n
+(e.g. 1/p QPE repetitions) takes n t_run on one machine on average, not T(n, 1). The
+machines needed for a deadline D are the smallest M >= 1 with T(n, M) <= D,
+M = ceil(n / floor(D / t_run)) (:func:`machines_for`); None if no number suffices
+(one run is longer than D, or n is infinite).
 """
 
 from __future__ import annotations
 
 import functools
 import math
+import numbers
 from dataclasses import dataclass
 
 __all__ = [
@@ -217,6 +233,17 @@ def _known_factories(p: float) -> tuple[_Factory, ...]:
 _NO_FACTORY = _Factory(name="none", footprint=0, rounds=0.0, failure=0.0)
 
 
+def _real(value: float, name: str) -> float:
+    """float(value) for a real number; ValueError for complex numbers, strings and non-numbers."""
+    if isinstance(value, (str, bytes)) or (isinstance(value, numbers.Complex)
+                                           and not isinstance(value, numbers.Real)):
+        raise ValueError(f"{name} must be a real number, got {value!r}")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a real number, got {value!r}") from None
+
+
 def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
                       model: SurfaceCodeModel = SurfaceCodeModel(), shot: bool = False,
                       toffoli_depth: float | None = None) -> PhysicalCost:
@@ -224,12 +251,12 @@ def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
 
     Args:
         n_logical: Q, logical qubits of the circuit.
-        n_toffoli: N_Tof, Toffolis (CCZ states) of one run; a float, so that large counts
-            do not overflow.
+        n_toffoli: N_Tof, Toffolis (CCZ states) of one run, 0 or >= 1; a float, so that
+            large counts do not overflow.
         fail_budget: largest admissible logical failure probability of one run
             (e.g. FTParameters.p_fail_shot, p_fail_ae, p_fail_qpe).
         model: machine parameters.
-        shot: add 2 d cycles of logical readout (a sampling shot; F19).
+        shot: add 2 d cycles of logical readout after the Toffolis (a sampling shot; F19).
         toffoli_depth: Toffolis on the critical path, for the reaction floor
             (default N_Tof: fully sequential). Used only when ``model.reaction_us`` is set.
 
@@ -240,17 +267,19 @@ def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
     Raises:
         ValueError: invalid inputs, or no factory and distance meet the budget.
     """
-    q = int(n_logical)
-    if q != n_logical or q < 1:
+    q_real = _real(n_logical, "n_logical")
+    q = int(q_real) if math.isfinite(q_real) else 0
+    if q != q_real or q < 1:
         raise ValueError(f"n_logical must be a positive integer, got {n_logical!r}")
-    n_tof = float(n_toffoli)
-    if not (math.isfinite(n_tof) and n_tof >= 0.0):
-        raise ValueError(f"n_toffoli must be finite and non-negative, got {n_toffoli!r}")
-    if not 0.0 < fail_budget <= 1.0:
+    n_tof = _real(n_toffoli, "n_toffoli")
+    if not (math.isfinite(n_tof) and (n_tof == 0.0 or n_tof >= 1.0)):
+        raise ValueError(f"n_toffoli must be 0 or a finite number >= 1, got {n_toffoli!r}")
+    budget = _real(fail_budget, "fail_budget")
+    if not 0.0 < budget <= 1.0:
         raise ValueError(f"fail_budget must lie in (0, 1], got {fail_budget!r}")
     floor_cycles = 0
     if model.reaction_us is not None:
-        depth = n_tof if toffoli_depth is None else float(toffoli_depth)
+        depth = n_tof if toffoli_depth is None else _real(toffoli_depth, "toffoli_depth")
         if not (math.isfinite(depth) and depth >= 0.0):
             raise ValueError(f"toffoli_depth must be finite and non-negative, got {toffoli_depth!r}")
         floor_cycles = math.ceil(depth * model.reaction_us / model.cycle_us)
@@ -264,10 +293,10 @@ def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
         distill = fac.failure * n_tof
         fac_area = n_fac * fac.footprint
         for d in model.distances:
-            cycles = max(rounds + (2 * d if shot else 0), floor_cycles)
+            cycles = max(rounds, floor_cycles) + (2 * d if shot else 0)
             failure = min(1.0, _topological_error_per_unit_cell(d, model.p_phys) * storage * cycles
                           + distill)
-            if failure > fail_budget:
+            if failure > budget:
                 continue
             area = storage * _physical_qubits_per_logical_qubit(d) + fac_area
             key = area * cycles           # exact integers: ties go to the first layout
@@ -276,7 +305,7 @@ def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
     if best is None:
         raise ValueError(f"no factory and distance in {model.distances[0]}..{model.distances[-1]} keep "
                          f"{n_tof:.4g} Toffolis on {q} logical qubits within the failure budget "
-                         f"{fail_budget:g}")
+                         f"{budget:g}")
     _, area, cycles, d, name, failure = best
     seconds = cycles * model.cycle_us / 1e6
     us_per_tof = seconds * 1e6 / n_tof if n_tof > 0.0 else math.nan
@@ -285,7 +314,7 @@ def surface_code_cost(n_logical: int, n_toffoli: float, *, fail_budget: float,
 
 
 def _check_runs(n_runs: float) -> float:
-    n = float(n_runs)
+    n = _real(n_runs, "n_runs")
     if not n >= 0.0:
         raise ValueError(f"n_runs must be non-negative, got {n_runs!r}")
     return n
@@ -294,9 +323,9 @@ def _check_runs(n_runs: float) -> float:
 def campaign_seconds(n_runs: float, per_run: PhysicalCost, n_machines: int = 1) -> float:
     """Wall clock of ``n_runs`` independent runs on ``n_machines`` machines (F19), seconds.
 
-    T = t_run max(n / M, min(n, 1)): the runs are shared evenly, but no run is split
-    across machines (module docstring). ``n_runs`` may be an expected (fractional) count,
-    or inf for an infeasible route (inf seconds).
+    T = t_run ceil(n / M): whole runs (n rounded up), each on one machine, the machines'
+    shares run one after another (module docstring). inf for n = inf (an infeasible
+    route), 0 for n = 0.
     """
     n = _check_runs(n_runs)
     m = int(n_machines)
@@ -304,26 +333,28 @@ def campaign_seconds(n_runs: float, per_run: PhysicalCost, n_machines: int = 1) 
         raise ValueError(f"n_machines must be a positive integer, got {n_machines!r}")
     if math.isinf(n):
         return math.inf
-    return per_run.seconds * max(n / m, min(n, 1.0))
+    return per_run.seconds * math.ceil(n / m)
 
 
-def machines_for(n_runs: float, per_run: PhysicalCost, deadline_s: float = SECONDS_PER_WEEK) -> int:
-    """Smallest number of machines M >= 1 that finish ``n_runs`` runs within ``deadline_s`` (F19).
+def machines_for(n_runs: float, per_run: PhysicalCost, deadline_s: float = SECONDS_PER_WEEK) -> int | None:
+    """Smallest number of machines M >= 1 that finish ``n_runs`` whole runs within ``deadline_s`` (F19).
 
-    Raises ValueError if a single run (or the expected fraction of one, n < 1) already
-    takes longer than the deadline, or if n is infinite: no number of machines suffices.
+    M = ceil(n / floor(deadline / t_run)), the runs one machine finishes in time. None if
+    no number of machines suffices: one run is longer than the deadline, or n is
+    infinite. 1 for n = 0 or a run of zero length.
     """
     n = _check_runs(n_runs)
-    if not deadline_s > 0.0:
+    deadline = _real(deadline_s, "deadline_s")
+    if not deadline > 0.0:
         raise ValueError(f"deadline_s must be positive, got {deadline_s!r}")
-    if not math.isfinite(n):
-        raise ValueError("an infinite number of runs never finishes")
-    if campaign_seconds(n, per_run, max(1, math.ceil(n))) > deadline_s:
-        raise ValueError(f"one run takes {per_run.seconds * min(n, 1.0):.4g} s, longer than the "
-                         f"deadline of {deadline_s:.4g} s; no number of machines suffices")
-    m = max(1, math.ceil(n * per_run.seconds / deadline_s))
-    while m > 1 and campaign_seconds(n, per_run, m - 1) <= deadline_s:
-        m -= 1                          # guard the ceil against round-off
-    while campaign_seconds(n, per_run, m) > deadline_s:
+    t = per_run.seconds
+    if math.isinf(n) or t > deadline:
+        return None
+    if n == 0.0 or t == 0.0 or math.isinf(deadline):
+        return 1
+    m = max(1, math.ceil(n / max(1, math.floor(deadline / t))))
+    while m > 1 and campaign_seconds(n, per_run, m - 1) <= deadline:
+        m -= 1                          # guard the floor and ceil against round-off
+    while campaign_seconds(n, per_run, m) > deadline:
         m += 1
     return m

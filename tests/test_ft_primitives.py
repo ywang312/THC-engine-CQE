@@ -69,19 +69,27 @@ def test_parameters_reject_invalid_values(bad):
 def test_phase_gradient_bits_reference_values():
     """b = 15 / 18 / 21 for A = 10 / 64 / 393 additions at delta = 1e-3 (specification section 7; the
     H4 and H6 step counts of Appendix A), and on a grid b is the smallest integer >= b_min with
-    A pi / 2^b <= delta, found here by brute force."""
+    A pi / 2^b <= delta, found here by brute force. b_min < 3 raises: the result sizes an adder, and
+    addition_toffolis rejects fewer than 3 bits."""
     assert [pr.phase_gradient_bits(a, 1e-3) for a in (10, 64, 393)] == [15, 18, 21]
     assert pr.phase_gradient_bits(0, 1e-3) == 4
     assert pr.phase_gradient_bits(1, 1.0, b_min=4) == 4            # pi / 2^2 <= 1, floored at b_min
+    assert pr.phase_gradient_bits(1, 1.0, b_min=3) == 3
     for a in (1, 2, 3, 7, 100, 1000, 12345):
         for delta in (1.0, 1e-2, 1e-3, 1e-5, 1e-8):
             for b_min in (3, 4, 10):
                 ref = next(b for b in range(b_min, 200) if a * math.pi / 2.0 ** b <= delta)
                 assert pr.phase_gradient_bits(a, delta, b_min) == ref
+                assert pr.addition_toffolis(ref) == ref - 2
     with pytest.raises(ValueError):
         pr.phase_gradient_bits(-1, 1e-3)
     with pytest.raises(ValueError):
         pr.phase_gradient_bits(10, 0.0)
+    for bad in (2, 1, 0, 3.5):
+        with pytest.raises(ValueError):
+            pr.phase_gradient_bits(1, 1.0, b_min=bad)
+    with pytest.raises(ValueError):
+        pr.phase_gradient_bits(0, 1e-3, b_min=2)
 
 
 def test_addition_toffolis():
@@ -156,7 +164,8 @@ def test_truncated_jacobi_anger_series_meets_the_budget(tau, delta):
 
 def test_gqsp_and_evolution_costs():
     """gqsp_walk_calls == 2R, the rotation count 3 (n + 1)(b - 2), and C_evol = 2R C_W + 3 (2R + 1)(beta - 2)
-    written out from F8, e.g. H6 (lambda_DF = 9.726, C_W = 1309) at t = 0.7: R = 17, 45976 Toffolis."""
+    written out from F8, e.g. H6 (lambda_DF = 9.726, C_W = 1309) at t = 0.7: R = 17, 45976 Toffolis.
+    R = 0 costs nothing (a documented choice: F8 read literally would charge one layer, 42 Toffolis)."""
     for tau, delta in [(0.79, 1e-4), (6.81, 1e-6), (12.0, 1e-8)]:
         assert pr.gqsp_walk_calls(tau, delta) == 2 * pr.jacobi_anger_degree(tau, delta)
     assert pr.gqsp_rotation_toffolis(0, 16) == 42
