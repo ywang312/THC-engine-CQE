@@ -33,6 +33,24 @@ Each part has a different job:
 
 Results and conclusions of M1 are in [docs/m1-results.md](docs/m1-results.md).
 
+## Status: milestone 2 (finishing)
+
+M2 asks what the CQE costs when the residual and the energies come from
+measurements, and replaces steepest descent with better optimizers.
+
+| Component | Module | State |
+|---|---|---|
+| Jordan–Wigner layer (blocked and interleaved orders), Pauli sums, qubit states | `measure.pauli` | done |
+| Residual element sets and measurement targets (aux route Q_e, direct route X_e) | `measure.targets` | done |
+| Residual routes: aux exp(−iδH) (exact, DF-Trotter, DF fragments) and direct; shots for a target error | `measure.routes` | done |
+| Exact per-shot variances: QWC, DF basis rotation, Pauli and matchgate shadows | `measure.schemes` | done |
+| CG and L-BFGS in local coordinates; spin-free or spin-orbital (standard CQE) metric | `optimizers`, `cqe` | done |
+| Estimated residuals and energies, fixed / zero / negative step candidates | `cqe` | done |
+| Finite-shot noise models (Gaussian, correlated, snapshots) and a shot ledger | `sampling` | done |
+| Linearized CQE: stiffness, null modes, symmetry blocks, noise floor, bias offset | `diagnostics.linearized` | done |
+
+Results and conclusions of M2 are in [docs/m2-results.md](docs/m2-results.md).
+
 ## Install
 
 ```bash
@@ -61,6 +79,17 @@ print([s.residual_norm for s in res.steps])
 # CQE with each generator projected onto its top double-factorized leaves
 res4 = run_cqe(h4, max_iter=20, e_exact=e_fci, compress=projection_compressor(n_leaves=4))
 
+# L-BFGS preconditioned with the spin-orbital ACSE generator (the standard CQE metric)
+res_lb = run_cqe(h4, max_iter=20, e_exact=e_fci, optimizer="lbfgs", metric="spin_orbital")
+
+# Shots for a 30% error of the full residual tensor: direct route, matchgate shadows
+from thc_engine_cqe.measure import routes, targets
+el = targets.element_set(h4.norb, "spin_free")
+var = routes.direct_residual_variance(h4, res.ci, el, "spin_free", "matchgate_shadow")
+a = routes.exact_residual(h4, res.ci, el, "spin_free")
+w = targets.element_multiplicities(el, "spin_free", h4.norb)
+print(routes.shots_for_relative_error(var.per_target, a, 0.3, weights=w))
+
 # Model Hamiltonians from factorized integrals
 thc = fit_thc_active(h4, nthc=8)       # THC rank M = 8
 df = double_factorize(h4.eri, eig_threshold=1e-3, first="eigh", tol=0.0,
@@ -71,13 +100,35 @@ h4_thc = thc.apply_to(h4)              # ActiveSpace with the THC integrals
 
 ## Benchmarks
 
+M1:
+
 ```bash
 .venv/bin/python benchmarks/run_thc_floors.py --systems h4,h6,h8,lih,n2 --out results/
 .venv/bin/python benchmarks/run_generator_rank.py --systems h4,h6,h6s,lih,n2,n2s,h8 --threads 1 --out results/
 ```
 
-Each writes JSON and markdown tables to `results/` (not tracked). The first takes
-about 20 s, the second about 3 minutes, on 4 cores.
+M2:
+
+```bash
+.venv/bin/python benchmarks/run_optimizers.py --threads 1 --out results/
+.venv/bin/python benchmarks/run_linearized.py --threads 1 --out results/
+.venv/bin/python benchmarks/run_measurement.py --threads 1 --out results/
+.venv/bin/python benchmarks/run_sampled_cqe.py --threads 1 --out results/
+```
+
+Each writes JSON and markdown tables to `results/` (not tracked). Approximate
+single-thread runtimes:
+
+| Benchmark | Runtime |
+|---|---|
+| `run_thc_floors.py` | about 20 s |
+| `run_generator_rank.py` | about 3 minutes |
+| `run_optimizers.py` | about 3 minutes |
+| `run_linearized.py` | about 20 s (add `--long-iters 2000` for the long N2 runs) |
+| `run_measurement.py` | about 1 hour (H6 alone half of it); `--quick` < 2 minutes |
+| `run_sampled_cqe.py` | about 65 minutes; `--quick` < 3 minutes |
+
+`--threads 1` pins the BLAS and PySCF threads, so the numbers are reproducible.
 
 ## Conventions
 
