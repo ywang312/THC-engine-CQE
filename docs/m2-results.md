@@ -13,40 +13,97 @@ numbers come from CI-space emulation with STO-3G and the systems of
 Every table can be regenerated with the benchmark scripts named in its section,
 run with `--threads 1`.
 
-## 1. Optimizers: conjugate gradient and L-BFGS
+## 1. Optimizers and the spin-orbital metric
 
-`run_cqe(..., optimizer="cg" | "lbfgs")` builds the direction in the local
-coordinates of the current iterate. The gradient there is −conj(A), with the
-inner product Re Σ conj(u)v. CG uses Polak–Ribière+; L-BFGS keeps memory 10, as
-in the locally parameterized quasi-Newton CQE of Smart, Boyn & Mazziotti
-(JCTC 18, 5286 (2022)). Steps to reach E − E_FCI below a threshold, exact CQE
-from HF, at most 60 steps (`benchmarks/run_optimizers.py`):
+`run_cqe(..., optimizer="cg" | "lbfgs", metric="spin_free" | "spin_orbital")`
+builds the direction in the local coordinates of the current iterate. The
+gradient there is −conj(A), with the inner product Re Σ conj(u)v. CG uses
+Polak–Ribière+; L-BFGS keeps memory 10, as in the locally parameterized
+quasi-Newton CQE of Smart, Boyn & Mazziotti (JCTC 18, 5286 (2022)).
 
-| system | SD < 1.6 mHa | CG | L-BFGS | SD < 1e-5 | CG | L-BFGS | final error after 60: SD / CG / L-BFGS |
-|---|---|---|---|---|---|---|---|
-| H4 | 5 | 3 | 3 | 35 | 9 | 9 | 4.6e-6 / 1e-11 / 2e-13 |
-| H6 | 14 | 6 | 6 | – | 51 | 47 | 1.5e-4 / 7.1e-6 / 5.9e-6 |
-| H6s | 47 | 13 | 12 | – | – | – | 1.4e-3 / 7.6e-5 / 7.2e-5 |
-| LiH | 2 | 2 | 2 | 51 | 10 | 9 | 5.8e-6 / 1.1e-7 / 1.4e-7 |
-| N2 | 7 | 3 | 3 | – | – | – | 3.3e-4 / 1.8e-4 / 1.8e-4 |
-| N2s | – | – | – | – | – | – | 8.5e-3 / 3.3e-3 / 5.2e-3 |
-| H8 | 36 | 9 | 9 | – | – | – | 7.2e-4 / 4.8e-5 / 4.6e-5 |
+**The metric.** The two generators differ:
 
-- **Speedup.** CG and L-BFGS reach chemical accuracy in up to 4× fewer steps
-  than steepest descent: 2.3× on H6 and N2, 4× on H6s and H8, and no gain on
-  LiH, which needs only 2. They reach 1e-5 Ha in 4–6× fewer steps where SD gets
-  there at all.
-- **Defaults.** Default runs reproduce M1 bit for bit, and every direction keeps
-  pair symmetry, anti-Hermiticity and S² = 0.
-- **Fixed candidates.** The same ordering holds with the hardware-like line
-  search, the lowest energy among the 11 fixed candidates 0.00625·2^k. To
-  1.6 mHa on H8: 24 / 10 / 9 steps, or 264 / 110 / 99 energy evaluations.
-- **Step sizes.** L-BFGS directions are scaled like quasi-Newton steps. Their
-  exact-search step sizes are 0.27–6.9 (10–90% range), against 0.017–0.12 for
-  SD, so a candidate set must span both.
-- **Negative and zero candidates.** Since this milestone, candidates may be zero
-  (stay) or negative (step against d). A zero step never counts as convergence.
-  Section 4 measures when these help under noise.
+- **M1 harness.** It steps along the spin-free generator Σ g[p,q,r,s] e_{pq,rs},
+  with g = conj(A).
+- **The CQE of Mazziotti and co-workers.** It steps along the spin-orbital
+  generator Σ_{ijkl} conj(²A^{ij}_{kl}) a†_i a†_j a_l a_k (full sum).
+- **The relation.** For singlets the spin-orbital generator is the spin-free one
+  with amplitude M g:
+  - M = (2I + T)/3, with (TX)[p,q,r,s] = X[p,s,r,q];
+  - verified on the Fock space to 1e-15;
+  - with this scale, our ε is the Euler step of the group's HQCA code.
+- **Why it preconditions.** M is symmetric positive definite on the residual's
+  subspace: eigenvalue 1 on singlet-coupled pairs, 1/3 on triplet-coupled pairs.
+  So `metric="spin_orbital"` preconditions every optimizer:
+  - SD takes d = M g, the standard CQE;
+  - CG is preconditioned PR+;
+  - L-BFGS uses H₀ = γM.
+
+Steps to E − E_FCI below 1.6 mHa / 1e-5 Ha, exact CQE from HF, at most 60 steps
+(`benchmarks/run_optimizers.py`; "so" = spin-orbital metric):
+
+| system | SD | SD (so) | CG | CG (so) | L-BFGS | L-BFGS (so) |
+|---|---|---|---|---|---|---|
+| H4 | 5 / 35 | 3 / 18 | 3 / 9 | 3 / 7 | 3 / 9 | 3 / 7 |
+| H6 | 14 / – | 6 / – | 6 / 51 | 4 / 38 | 6 / 47 | 4 / 36 |
+| H6 (1.0 Å) | 14 / – | 7 / – | 6 / 54 | 4 / 41 | 6 / 51 | 4 / 38 |
+| H6s | 47 / – | 30 / – | 13 / – | 10 / – | 12 / – | 10 / – |
+| LiH | 2 / 51 | 2 / 29 | 2 / 10 | 2 / 8 | 2 / 9 | 2 / 8 |
+| N2 | 7 / – | 3 / – | 3 / – | 3 / – | 3 / – | 3 / – |
+| N2s | – / – | – / – | – / – | – / – | – / – | – / – |
+| H8 | 36 / – | 15 / – | 9 / – | 6 / – | 9 / – | 6 / – |
+
+Final E − E_FCI after 60 steps:
+
+| system | SD | SD (so) | CG | CG (so) | L-BFGS | L-BFGS (so) |
+|---|---|---|---|---|---|---|
+| H6 | 1.5e-4 | 9.1e-5 | 7.0e-6 | 3.3e-6 | 5.9e-6 | 3.0e-6 |
+| H6s | 1.4e-3 | 1.0e-3 | 7.6e-5 | 4.4e-5 | 7.3e-5 | 3.9e-5 |
+| N2 | 3.3e-4 | 3.4e-4 | 1.8e-4 | 1.8e-4 | 1.8e-4 | 1.8e-4 |
+| N2s | 8.3e-3 | 7.9e-3 | 3.3e-3 | 3.5e-3 | 5.5e-3 | 3.7e-3 |
+| H8 | 7.2e-4 | 3.7e-4 | 4.8e-5 | 2.6e-5 | 4.7e-5 | 2.5e-5 |
+
+- **The standard CQE beats spin-free SD.** It reaches chemical accuracy 1.6–2.4×
+  faster (H6 6 against 14 steps, H8 15 against 36, N2 3 against 7; LiH needs 2
+  either way). Its first step alone recovers more than twice as much: one step
+  from HF leaves H6 (1.0 Å) 17.0 mHa above FCI, against 38.0 with the spin-free
+  generator.
+- **Preconditioned CG and L-BFGS beat the standard CQE.** With the
+  spin-orbital metric they need 1.5–3× fewer steps than it to chemical accuracy
+  on H6, H6s and H8 (H6s: 10 against 30), and 2.6× (H4) and 3.6× (LiH) fewer to
+  1e-5 Ha. Without the metric they tie with it on H6 and N2. The metric saves
+  CG and L-BFGS 1.2–1.5× in steps (H6: 4 against 6 to 1.6 mHa, 36 against 47
+  to 1e-5 Ha) and halves their final error.
+- **N2 is plateau-limited.** Every optimizer stops at about 1.8e-4 Ha (section 2).
+- **Fixed candidates.** The ordering holds with the hardware-like line search:
+  the lowest energy among the 11 candidates 0.00625·2^k, i.e. 11 energy
+  evaluations per step. Steps to 1.6 mHa on H8:
+
+  | SD | SD (so) | CG | CG (so) | L-BFGS | L-BFGS (so) |
+  |---|---|---|---|---|---|
+  | 24 | 9 | 10 | 7 | 9 | 6 |
+
+  All 96 benchmark runs, both line searches and both metrics, decrease the
+  energy monotonically.
+- **Step sizes.** Exact-search step sizes, 10–90% range per system:
+
+  | optimizer | spin-free | spin-orbital |
+  |---|---|---|
+  | SD | 0.017–0.12 | 0.035–0.35 |
+  | CG | 0.026–0.32 | 0.061–0.71 |
+  | L-BFGS | about 0.3–7 | 0.5–9 |
+
+  3–5% of L-BFGS steps exceed 6.4, so a candidate set must span 0.03–7 or
+  more.
+- **Defaults.** `metric="spin_free"` reproduces M1 bit for bit. Every direction
+  keeps pair symmetry, anti-Hermiticity and S² = 0.
+- **L-BFGS curvature tolerance.** The default is now 1e-2: pairs with
+  ⟨s, y⟩ ≤ 1e-2 ‖s‖‖y‖ are skipped. Exact runs are bit for bit the same as with
+  the old 1e-12; under noise the old value let noise-dominated pairs blow up the
+  direction (section 4).
+- **Negative and zero candidates.** Candidates may be zero (stay) or negative
+  (step against d). A zero step never counts as convergence. Section 4 measures
+  when they help under noise.
 
 ## 2. Why the exact CQE stalls: null and soft modes of the linearized CQE
 
