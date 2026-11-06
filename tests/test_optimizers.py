@@ -800,12 +800,14 @@ def test_cg_beta_rules_and_restarts():
 
 
 def test_lbfgs_curvature_test_is_relative():
-    """A pair with 0 < <s, y> <= curvature_tol ||s|| ||y|| is skipped (default 1e-12),
+    """A pair with 0 < <s, y> <= curvature_tol ||s|| ||y|| is skipped (default 1e-2),
     curvature_tol = 0 stores it, and <s, y> above the threshold is stored. Here s = d_0 =
     (1, 0, 0) and y = (delta, 1, 0): <s, y> = delta, ||s|| ||y|| = sqrt(1 + delta^2)."""
+    assert LBFGS().curvature_tol == 1e-2
     for delta, tol, fate in ((1e-13, 1e-12, "skipped"), (1e-13, 0.0, "stored"),
-                             (1e-11, 1e-12, "stored")):
-        opt = LBFGS(curvature_tol=tol)
+                             (1e-11, 1e-12, "stored"), (5e-3, None, "skipped"),
+                             (2e-2, None, "stored")):
+        opt = LBFGS() if tol is None else LBFGS(curvature_tol=tol)
         g0 = np.array([1.0, 0.0, 0.0])
         opt.direction(g0, g0)
         opt.step_taken(1.0)
@@ -844,7 +846,7 @@ def _audit_cg(steps, beta_rule, m=None, field="residual"):
     return dirs
 
 
-def _audit_lbfgs(steps, memory, curvature_tol=1e-12, m=None):
+def _audit_lbfgs(steps, memory, curvature_tol=1e-2, m=None):
     """L-BFGS directions rebuilt from the records with an explicit inverse-Hessian matrix:
     pairs s = eps_{k-1} d_{k-1} and y = -(g_k - g_{k-1}) (skipped when <s, y> <=
     curvature_tol ||s|| ||y||, oldest dropped beyond ``memory``), H_0 = gamma m with gamma

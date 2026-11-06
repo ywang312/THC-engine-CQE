@@ -371,7 +371,7 @@ def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 
             for all.
         optimizer_options: keyword arguments of the optimizer: "cg" takes
             beta ("pr+" | "fr") and restart; "lbfgs" takes memory (default 10)
-            and curvature_tol (default 1e-12); "sd" takes none.
+            and curvature_tol (default 1e-2); "sd" takes none.
         metric: the metric (preconditioner) M of every optimizer
             (optimizers.METRICS, optimizers.apply_metric). "spin_free"
             (default): M = I, the M1/M2 directions bit for bit.

@@ -363,7 +363,13 @@ class LBFGS(SearchDirection):
     Pairs: s_k = eps_k d_k (the step actually taken, in the chart of Psi_k) and
     y_k = grad_{k+1} - grad_k = -(g_{k+1} - g_k), formed when the next gradient
     arrives; the metric does not enter them. A pair is skipped (not stored) when
-    <s, y> <= curvature_tol ||s|| ||y||, which includes eps_k = 0. The two-loop
+    <s, y> <= curvature_tol ||s|| ||y||, which includes eps_k = 0. The default
+    curvature_tol = 1e-2 rejects pairs whose s and y are nearly orthogonal. With
+    exact residuals that does not happen on the benchmark systems (60-step runs of
+    H4-H8, LiH and N2 are bit for bit the same with 1e-12); with estimated
+    residuals such pairs are noise-dominated, and 1e-12 let them drive gamma
+    towards zero and the direction up to hundreds of times |g| (observed in the
+    finite-shot benchmark: single steps raising E by up to 3.4 Ha on LiH). The two-loop
     recursion (Nocedal & Wright, Algorithm 7.4) with the last ``memory`` pairs
     and H_0 = gamma M, gamma = <s, y> / <y, M y> of the newest pair (M = I and
     gamma = <s, y> / <y, y> for the default metric), gives d = H g = -H grad;
@@ -387,7 +393,7 @@ class LBFGS(SearchDirection):
 
     name = "lbfgs"
 
-    def __init__(self, memory: int = 10, curvature_tol: float = 1e-12, metric: str = "spin_free") -> None:
+    def __init__(self, memory: int = 10, curvature_tol: float = 1e-2, metric: str = "spin_free") -> None:
         super().__init__(metric)
         if int(memory) != memory or memory < 1:
             raise ValueError("memory must be a positive integer")
@@ -469,7 +475,7 @@ def make_optimizer(name: str = "sd", options: Mapping | None = None,
     """A fresh search-direction object: name in OPTIMIZERS, options as keyword arguments.
 
     "sd" takes no options; "cg" takes beta ("pr+" | "fr") and restart;
-    "lbfgs" takes memory (default 10) and curvature_tol (default 1e-12).
+    "lbfgs" takes memory (default 10) and curvature_tol (default 1e-2).
     ``metric`` (METRICS) is a separate argument, not an option: "spin_free"
     (default) or "spin_orbital" (module docstring).
     """
