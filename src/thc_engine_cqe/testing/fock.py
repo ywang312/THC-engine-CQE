@@ -28,11 +28,17 @@ def _popcount(x: np.ndarray) -> np.ndarray:
 
 
 class FockSpace:
-    """Fermionic Fock space of ``2 * norb`` spin orbitals (dimension 4**norb)."""
+    """Fermionic Fock space of ``2 * norb`` spin orbitals (dimension 4**norb).
+
+    A test oracle, limited to norb <= 8. At norb = 8 (65536 states) the ladder,
+    one-body and excitation operators and their products with vectors are cheap
+    (a compiled H8 CQE step replays in about 0.4 s); a full ``hamiltonian`` or
+    ``two_body`` matrix there sums norb**4 operator products and is slow.
+    """
 
     def __init__(self, norb: int):
-        if norb > 7:
-            raise ValueError("FockSpace is a test oracle; keep norb <= 7")
+        if norb > 8:
+            raise ValueError("FockSpace is a test oracle; keep norb <= 8")
         self.norb = norb
         self.nmodes = 2 * norb
         self.dim = 1 << self.nmodes
