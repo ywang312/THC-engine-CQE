@@ -2,7 +2,7 @@
 
 The routes are pure functions of numbers and arrays, so most tests use synthetic problems
 (random per-element inputs on the H4 element sets) and compare with references that do not
-use the module: the formulas of the M3 specification evaluated by hand in the test
+use the module: the formulas of docs/m3-cost-model.md evaluated by hand in the test
 (including the GQSP degree, recomputed here from Bessel functions rather than taken from
 ``ft.primitives``), ``scipy.optimize`` for the optimal AE allocation and for the roots of
 the hand-evaluated cost curves, M2's shot rule ``routes.shots_for_relative_error``, and a
@@ -23,7 +23,7 @@ from thc_engine_cqe.measure import routes, targets
 
 NORB = 4
 PREP = rs.PrepParams(toffolis=2506.0, logical_qubits=70)
-# H4 DF block encoding at threshold 3e-3 (specification Appendix A): lambda, C_W, and the
+# H4 DF block encoding at threshold 3e-3 (Appendix A of docs/m3-cost-model.md): lambda, C_W, and the
 # 188 logical qubits of the QPE minus its 2 ceil(log2(7753)) - 1 = 25 control qubits.
 WALK = rs.WalkParams(lam=4.935, toffoli_per_step=868, logical_qubits=163, kind="df")
 C_Q = {"spin_free": 16, "spin_orbital": 4}       # F11 [estimate]
@@ -34,7 +34,7 @@ def make_problem(k: int = 12, *, kind: str = "spin_free", seed: int = 0, aux_bia
                  uniform: bool = False) -> rs.ResidualProblem:
     """A ResidualProblem on the first k H4 elements with random per-element inputs.
 
-    The magnitudes are those of H4 (memo 2): A ~ 0.1 Ha, v ~ 5-20 Ha^2, lambda_Q ~ 1-2,
+    The magnitudes are those of H4 [design]: A ~ 0.1 Ha, v ~ 5-20 Ha^2, lambda_Q ~ 1-2,
     alpha_X ~ 2-8 Ha, L_X ~ 200-900. ``uniform`` makes alpha_X, L_X and m uniform.
     """
     rng = np.random.default_rng(seed)
@@ -50,7 +50,7 @@ def make_problem(k: int = 12, *, kind: str = "spin_free", seed: int = 0, aux_bia
 
 
 def quadratic_bias(beta: float, problem: rs.ResidualProblem):
-    """b(delta) = beta delta^2 ||A||_m, the leading order of the aux bias (memo 2: beta 0.16-1.06)."""
+    """b(delta) = beta delta^2 ||A||_m, the leading order of the aux bias ([design]: beta 0.16-1.06)."""
     norm = problem.norm_a_m
     return lambda delta: beta * delta ** 2 * norm
 
@@ -73,13 +73,13 @@ def ae_ref(alpha, m, budget, kappa, c_prep, c_obs, q_circuit):
     """F11 by hand: eps_e = t (alpha_e/m_e)^(1/3), N_e = 2 pi kappa alpha_e / eps_e, the Hadamard-test
     circuit on q_circuit = Q(Psi_k) + Q_obs + 1 qubits, Q_run = q_circuit + ceil(log2(N_e/2)) with the
     phase register, T = sum_e N_e (c_prep + c_obs,e + q_circuit,e / 2) (the reflection S_0 acts on the
-    circuit, not on the phase register). Returns (sum N_e, T, max_e run, max Q_run)."""
+    circuit, not on the phase register). Returns (sum N_e, T, max_e run, max Q_run, the runs)."""
     s = np.sum(np.cbrt(m) * np.cbrt(alpha) ** 2)
     eps = budget / math.sqrt(s) * np.cbrt(alpha / m)
     n = 2 * math.pi * kappa * alpha / eps
     q_run = q_circuit + np.ceil(np.log2(n / 2))
     run = n * (c_prep + c_obs + q_circuit / 2)
-    return n.sum(), run.sum(), run.max(), int(q_run.max())
+    return n.sum(), run.sum(), run.max(), int(q_run.max()), run
 
 
 # ----------------------------------------------------------------------- F11 allocation and kappa
@@ -108,7 +108,7 @@ def test_ae_allocation_matches_slsqp(seed):
 def test_ae_uniform_case_is_lambda_over_eps_per_element():
     """With uniform alpha and m, the AE route needs N = 2 pi kappa alpha K^(3/2) / (r ||A||_el)
     applications (||A||_el the unweighted norm), the "lambda/eps per element" count at
-    eps = r ||A||_el / sqrt(K) (memo 2, section 1.4): a closed form, evaluated by hand."""
+    eps = r ||A||_el / sqrt(K) [design]: a closed form, evaluated by hand."""
     p = make_problem(12, uniform=True)
     params = pm.FTParameters()
     for kappa in (1.0, 2.0):
@@ -119,13 +119,13 @@ def test_ae_uniform_case_is_lambda_over_eps_per_element():
 
 def test_ae_constant_from_sine_window_phase_estimation():
     """Sine-window phase estimation with M = 2^t - 1 applications of G: the RMS error of the phase
-    estimate over the uniform phase offset is kappa pi / M with kappa in [0.96, 1.0] for M = 63 and
-    255 (Appendix A: 0.974 / 0.993). The outcome law is simulated directly (register amplitudes
-    sin(pi (k+1)/(2^t+1)), controlled powers of G, inverse QFT), independent of the cost code; the
-    count N = 2M applications of the Hadamard-test circuit then matches primitives.ae_applications
-    at eps = pi alpha / M."""
+    estimate over the uniform phase offset is kappa pi / M with kappa in [0.96, 1.0] for M = 63, 255 and
+    1023, Appendix A's 0.974 / 0.993 / 0.998 to the printed digits [design]. The
+    outcome law is simulated directly (register amplitudes sin(pi (k+1)/(2^t+1)), controlled powers of
+    G, inverse QFT), independent of the cost code; the count N = 2M applications of the Hadamard-test
+    circuit then matches primitives.ae_applications at eps = pi alpha / M."""
     offsets = (np.arange(64) + 0.5) / 64          # phase = 2 pi (j + u) / 2^t, j irrelevant
-    for t in (6, 8):
+    for t, appendix_a in ((6, 0.974), (8, 0.993), (10, 0.998)):
         dim, m_apps = 2 ** t, 2 ** t - 1
         k = np.arange(dim)
         amp = np.sin(np.pi * (k + 1) / (dim + 1))
@@ -135,7 +135,7 @@ def test_ae_constant_from_sine_window_phase_estimation():
         assert np.allclose(prob.sum(axis=1), 1.0, atol=1e-12)
         err = np.angle(np.exp(1j * (2 * np.pi * k[None, :] / dim - phi[:, None])))
         ratio = math.sqrt(np.mean(np.sum(prob * err ** 2, axis=1))) / (math.pi / m_apps)
-        assert 0.96 <= ratio <= 1.0
+        assert 0.96 <= ratio <= 1.0 and abs(ratio - appendix_a) <= 5e-4
         alpha = 2.7
         assert pm.ae_applications(alpha, math.pi * alpha / m_apps) == pytest.approx(2 * m_apps, rel=1e-12)
 
@@ -189,8 +189,8 @@ def test_ae_routes_follow_f11(kind):
     (lambda_Q / delta, C_evol(delta) + C_Q) at one delta, on both element sets (C_Q = 16 spin-free,
     4 spin-orbital; m = 8 for every spin-orbital element): applications, Toffolis (with the reflection
     of the Hadamard-test circuit, Q_A / 2 per application), longest run, runs and qubits of F11,
-    evaluated by hand; the biases enter the budget (factorization for b1 and b3, b(delta) for b3,
-    none for b2)."""
+    evaluated by hand, and every element's run (the summands, which the wall clock schedules); the
+    biases enter the budget (factorization for b1 and b3, b(delta) for b3, none for b2)."""
     p0 = make_problem(9, kind=kind, seed=5)
     p = dataclasses.replace(p0, aux_bias=quadratic_bias(0.3, p0))
     walk = dataclasses.replace(WALK, fact_bias_m=0.01 * p.norm_a_m)
@@ -211,8 +211,9 @@ def test_ae_routes_follow_f11(kind):
         assert np.all(p.m == 8)
     for route, (c, alpha, c_obs, q_obs, bias) in cases.items():
         budget = budget_ref(p, params.r, bias)
-        n, t, run, q = ae_ref(alpha, p.m, budget, 1.5, PREP.toffolis, c_obs, PREP.logical_qubits + q_obs + 1)
+        n, t, run, q, runs = ae_ref(alpha, p.m, budget, 1.5, PREP.toffolis, c_obs, PREP.logical_qubits + q_obs + 1)
         assert c.route == route
+        np.testing.assert_allclose(c.run_toffolis, runs, rtol=1e-12, atol=0.0)
         assert c.n_prep == pytest.approx(n, rel=1e-12)
         assert c.toffolis == pytest.approx(t, rel=1e-12)
         assert c.coherent_toffolis == pytest.approx(run, rel=1e-12)
@@ -226,7 +227,7 @@ def test_ae_routes_follow_f11(kind):
 def test_element_with_zero_alpha_needs_no_applications():
     """An element whose X_e vanishes (alpha_X = 0, L_X = 0, A_e = 0) gets eps_e = 0 from the allocation
     and no applications: ae_x then costs exactly F11 on the other elements (by hand), with finite
-    totals, one run fewer, and the qubits of the elements that run."""
+    totals, one run fewer (no zero-length run is listed), and the qubits of the elements that run."""
     p0 = make_problem(9, seed=14)
     alpha, n_terms, a = p0.alpha_x.copy(), p0.n_terms_x.copy(), p0.A.copy()
     alpha[0], n_terms[0], a[0] = 0.0, 0, 0.0
@@ -236,12 +237,13 @@ def test_element_with_zero_alpha_needs_no_applications():
     rest = slice(1, None)
     budget = params.r * p.norm_a_m
     q_obs = np.ceil(np.log2(n_terms[rest])) + params.chi + 4
-    n, t, run, q = ae_ref(alpha[rest], p.m[rest], budget, 1.0, PREP.toffolis, 2.0 * n_terms[rest],
-                          PREP.logical_qubits + q_obs + 1)
+    n, t, run, q, runs = ae_ref(alpha[rest], p.m[rest], budget, 1.0, PREP.toffolis, 2.0 * n_terms[rest],
+                                PREP.logical_qubits + q_obs + 1)
     assert math.isfinite(c.toffolis) and math.isfinite(c.toffolis_per_prep)
     assert c.n_prep == pytest.approx(n, rel=1e-12) and c.toffolis == pytest.approx(t, rel=1e-12)
     assert c.coherent_toffolis == pytest.approx(run, rel=1e-12)
-    assert c.n_runs == p.n_elements - 1 and c.logical_qubits == q
+    assert c.n_runs == p.n_elements - 1 == len(c.run_toffolis) and c.logical_qubits == q
+    np.testing.assert_allclose(c.run_toffolis, runs, rtol=1e-12, atol=0.0)
     g_over_b, eps = rs.ae_allocation(alpha, p.m, budget)
     assert eps[0] == 0.0 and np.all(eps[rest] > 0)
 
@@ -307,7 +309,7 @@ def test_infeasible_bias_gives_the_flag_and_infinite_cost():
         else:
             assert "infeasible" in c.flags
             assert c.toffolis == c.n_prep == c.coherent_toffolis == c.n_runs == math.inf
-            assert math.isnan(c.toffolis_per_prep) and c.params["budget"] == 0.0
+            assert math.isnan(c.toffolis_per_prep) and c.params["budget"] == 0.0 and c.run_toffolis == ()
             assert c.logical_qubits == qubits[c.route]
     assert rs.best_route(costs).route in ("direct_mg", "ae_x")
     huge = dataclasses.replace(p, aux_bias=lambda d: 10.0 * p.norm_a_m)

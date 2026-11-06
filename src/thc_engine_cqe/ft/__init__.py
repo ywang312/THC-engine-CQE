@@ -3,7 +3,8 @@
 A resource-estimation layer built from validated cost models, not a fault-tolerant
 compiler. The unit is the Toffoli (one CCZ state); Cliffords are free. Every module
 states its cost model, with references and tags ([OF], [derived], [cited], [estimate],
-[assumption]), in its docstring.
+[assumption], [design], [build check]), in its docstring; the tag legend, the formula
+labels F1-F19 and F2a and the whole model are in docs/m3-cost-model.md.
 
     primitives       FTParameters (budgets and constants), phase-gradient rotations
                      (F1, F2), GQSP time evolution (F8), amplitude estimation (F11)

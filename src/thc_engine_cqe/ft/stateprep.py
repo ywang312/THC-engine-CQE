@@ -8,17 +8,18 @@ F1): b - 2 Toffolis per addition [OF: ``cost4df = 4 n (beta - 2)``], the ANDs of
 indicator cells, and a rounding error <= pi / 2^b per addition. The gradient register
 is a catalyst, prepared once per machine and kept across steps and shots; its b qubits
 are part of Q_prep, its preparation is not counted [assumption; OpenFermion's
-convention; primitives module docstring]. Tags: [OF] OpenFermion 1.8.1 source;
-[verified] reproduced by an explicit circuit in :mod:`thc_engine_cqe.ft.circuits` and
-tests/test_ft_circuits.py; [derived], [cited], [estimate] and [assumption] as in the M3
-specification. Formula tags F1-F19 are those of the specification.
+convention; primitives module docstring]. The tags and the formula labels F1-F19 are those
+of docs/m3-cost-model.md ([OF]: OpenFermion 1.8.1 source); "verified" below means
+reproduced by an explicit circuit of :mod:`thc_engine_cqe.ft.circuits` in
+tests/test_ft_circuits.py.
 
 Primitive counts (:class:`PrimitiveCounts`)
 -------------------------------------------
 A circuit is counted as n_add additions, n_and ANDs and n_pauli_rot Pauli rotations;
 at b bits it costs n_add (b - 2) + n_and Toffolis. The Pauli rotations are the
 rotation count of the same circuit in Pauli-based computation, exported for partially
-fault-tolerant models (roadmap M6) and not used in any Toffoli count here.
+fault-tolerant models (out of scope for M3; docs/m3-cost-model.md, "Scope and open
+questions") and not used in any Toffoli count here.
 
 Excitations (:func:`excitation_counts`, F3). ``diagnostics.cost.spin_orbital_excitations``
 writes a spin-free generator exactly as a sum of spin-orbital excitations; each
@@ -37,7 +38,7 @@ Clifford). Per excitation:
 singles: ``circuits.pg_excitation_unitary``, with the indicators as classical functions
 of the basis state, equals ``diagnostics.cost.circuit_unitary(excitation_circuit(exc))``
 to 1e-12 unrounded and is within pi / 2^b of it rounded]. The Pauli rotations are the Jordan-Wigner
-terms of each generator (8, 4 and 3 mutually commuting strings) [memo 3]. Diagonal terms
+terms of each generator (8, 4 and 3 mutually commuting strings) [design]. Diagonal terms
 occur only for complex generators (their amplitudes are imaginary).
 
 Elementwise step (:func:`elementwise_step_cost`, F3, the default method)
@@ -55,8 +56,8 @@ optional orbital irreps (F2a, :mod:`thc_engine_cqe.ft.symmetry`):
    is the prefix of X in decreasing angle, and the iteration ends at the largest b with
    b = F2(#{theta >= pi / 2^b}).
 4. C_step = A (b - 2) + 3 n_d + 2 n_s + n_g and Q_prep = 2N + 3b + 8 logical qubits
-   (system, gradient register, summand, b - 1 adder carries and the AND ancillas)
-   [derived; memo 1, specification S8]. A step without kept excitations costs 0 and
+   (system 2N, gradient register b, summand b, b - 1 adder carries and 9 AND ancillas)
+   [derived]. A step without kept excitations costs 0 and
    needs 2N qubits; so does eps = 0, whose expansion is empty (nothing is dropped or
    masked).
 
@@ -76,11 +77,12 @@ exactly, but not S^2: a spin-free double is a sum of alpha-alpha, beta-beta and
 alpha-beta excitations, which do not commute with S^2 one by one (F1's S^2 statement
 holds for one phase function, not for a product of them). ``circuits.replay_elementwise``
 measures the error. After the exact L-BFGS step from RHF, ||Psi~_1 - Psi_1|| is 2.2e-4
-(LiH) to 2.0e-3 (N2) at equilibrium [memo 1 section 2.4: 1.2e-3 to 2.0e-3, <= 1.8e-3 at
-the next step, and closed-loop compiled runs needed no extra step], but 2.7e-2 (H6 at
+(LiH) to 2.0e-3 (N2) at equilibrium [design: 1.2e-3 to 2.0e-3, <= 1.8e-3 at the next
+step, and closed-loop compiled runs needed no extra step], but 2.7e-2 (H6 at
 3 bohr) and 3.1e-2 (N2 at 2.0 A), 27 and 31 times delta_step, and <S^2> of Psi~_1 is
 <= 1.5e-5 at equilibrium but 1.5e-3 and 3.9e-3 on the stretched builds, against 0 for
-Psi_1 (circuits module docstring; tests/test_ft_circuits.py).
+Psi_1 (circuits module docstring;
+tests/test_ft_circuits.py::test_first_step_product_error_and_spin_contamination).
 
 Complex directions raise ValueError: a complex amplitude adds two Z rotations per
 excitation and complex states are out of scope (F3).
@@ -93,7 +95,7 @@ Clements et al., Optica 3, 1460 (2016); Kivlichan et al., PRL 120, 110501 (2018)
 both spins with the same angle; after a Clifford basis change each copy is
 exp(i theta s_sigma) with s_sigma in {-1, 0, 1}, so the eight one-hot cells of
 (s_alpha, s_beta) share one addition and cost 6 ANDs. A complex one adds the phase
-exp(i phi (n_q,alpha + n_q,beta)): one addition and 1 AND [memo 1, derived]
+exp(i phi (n_q,alpha + n_q,beta)): one addition and 1 AND [derived]
 (:func:`orbital_rotation_counts`):
 
     real:     g additions + 6 g ANDs,   4 g Pauli rotations
@@ -101,13 +103,17 @@ exp(i phi (n_q,alpha + n_q,beta)): one addition and 1 AND [memo 1, derived]
 
 The DF readout rotation of an energy measurement is real and has its own budget,
 b_r = F2(g, delta_readout) (its rounding error is an energy bias of about
-2 ||F_l^2|| delta_readout, specification S12): C_rot = g (b_r - 2) + 6 g
-(:func:`readout_rotation_toffolis`; 405 Toffolis at N = 6, b_r = 23).
+2 ||F_l^2|| delta_readout [design]): C_rot = g (b_r - 2) + 6 g
+(:func:`readout_rotation_toffolis`; 405 Toffolis at N = 6, b_r = 23), on 2N + 3 b_r + 8
+logical qubits, the layout of Q_prep below (:func:`readout_rotation_qubits`; 89 at N = 6)
+[estimate]. The line search (F13) runs C(Psi_k), a candidate step and this rotation in one
+shot, on the largest of their qubit counts (:func:`candidate_step_costs` gives the
+candidates' qubits and flags).
 
 A diagonal-Coulomb layer exp(i tau (sum_p mu_p n_p)^2), n_p = n_p,alpha + n_p,beta, on
 n_a orbitals with mu_p != 0 has the cells (n_p, n_q) in {1, 2}^2 per pair (4 ANDs, one
 addition) and n_p in {1, 2} per site (1 AND, one addition, which also absorbs the
-phases of the adjacent rotation) [memo 1] (:func:`diagonal_layer_counts`, F5):
+phases of the adjacent rotation) [design] (:func:`diagonal_layer_counts`, F5):
 
     n_a (n_a - 1)/2 + n_a additions,  2 n_a (n_a - 1) + n_a ANDs,  n_a (2 n_a + 1) Pauli rotations
 
@@ -127,21 +133,23 @@ n_a,k = ``diagnostics.cost.leaf_active_orbitals`` (|mu| > mu_tol max |mu|):
 Q_prep = 2N + 3b + 8 as above. Every leaf step carries the flags "complex state" (the
 leaf product of a real generator makes the state complex at O(eps^2), and the exact
 trajectory it is costed on is not propagated through it) and "order-1 Trotter error not
-in budget" (about 1e-2 in state norm at the RHF step [memo 1]). The leaf rotations are
+in budget" (about 1e-2 in state norm at the RHF step [design]). The leaf rotations are
 complex: Q_k = (S_k - i A_k)/sqrt2 for real generators.
 
 Cumulative cost (:func:`prep_cost`, F7)
 ---------------------------------------
 C(Psi_0) = 0 and C(Psi_k) = sum_{j<k} C_step(j); Q(Psi_k) = max_{j<k} Q_prep(j), and 2N
 for k = 0. A leaf circuit adds its final complex rotation once, at its own budget,
-b_f = F2(N(N-1), delta_step) [assumption: the specification leaves b_f open; memo 1 used
-the largest b of the trajectory, which makes C(Psi_k) depend on later steps]; it is
+b_f = F2(N(N-1), delta_step) [assumption: the design specification left b_f open, and the
+design notes used the largest b of the trajectory, which makes C(Psi_k) depend on later
+steps; docs/m3-results.md section 11]; it is
 ``PrepCost.final_rotation`` and is added for every k >= 1 at which a leaf was applied.
 With irreps, :func:`prep_cost` masks every direction before compiling it, for both
 methods (F2a).
 
 Observed (exact L-BFGS trajectories on the symmetry-adapted builds, delta_step = 1e-3,
-spec Appendix A; tests/test_ft_stateprep.py): H4 steps 0-2 cost 160 (10 doubles,
+Appendix A of docs/m3-cost-model.md; tests/test_ft_stateprep.py::test_appendix_a_elementwise_regressions):
+H4 steps 0-2 cost 160 (10 doubles,
 b = 15), 1192 (40 doubles and 24 singles, b = 18) and 1154 Toffolis, C(Psi_3) = 2506;
 H6 at 1.0 A 969 (51 doubles, b = 18), then 8442-8526 (b = 21), C(Psi_6) = 43427 on
 83 logical qubits; N2 486 (27 doubles, b = 17) and 1045 (55 doubles, b = 18),
@@ -169,6 +177,8 @@ from .symmetry import mask_pair_tensor
 
 __all__ = [
     "METHODS",
+    "FLAG_PRODUCT",
+    "FLAG_ROUNDING",
     "PrimitiveCounts",
     "excitation_counts",
     "orbital_rotation_counts",
@@ -179,8 +189,10 @@ __all__ = [
     "leaf_step_cost",
     "PrepCost",
     "prep_cost",
+    "candidate_step_costs",
     "candidate_step_toffolis",
     "readout_rotation_toffolis",
+    "readout_rotation_qubits",
 ]
 
 METHODS = ("elementwise", "leaves")
@@ -188,8 +200,9 @@ METHODS = ("elementwise", "leaves")
 _EXPANSION_TOL = 1e-12          # F3: relative tolerance of the spin-orbital expansion
 _LEAF_RANK_TOL = 1e-10          # F6: rank tolerance of the generator factorization
 _LEAF_FLAGS = ("complex state", "order-1 Trotter error not in budget")
-_FLAG_PRODUCT = "product-formula error not in budget"
-_FLAG_ROUNDING = "rounding bound above delta_step"
+#: StepCost flags of an elementwise step (module docstring).
+FLAG_PRODUCT = "product-formula error not in budget"
+FLAG_ROUNDING = "rounding bound above delta_step"
 
 
 # ------------------------------------------------------------------------------ counts
@@ -383,8 +396,8 @@ def _elementwise_cost(exp: _Expansion, eps: float, params: FTParameters, step: i
     counts = excitation_counts(kept)
     kinds = [e.kind for e in kept]
     bound = n_keep * math.pi / 2.0 ** b + float(np.sum(theta[n_keep:]))
-    flags = (((_FLAG_PRODUCT,) if n_keep >= 2 else ())
-             + ((_FLAG_ROUNDING,) if bound > params.delta_step else ()))
+    flags = (((FLAG_PRODUCT,) if n_keep >= 2 else ())
+             + ((FLAG_ROUNDING,) if bound > params.delta_step else ()))
     # eps = 0: F3 expands eps * mask(d) = 0, so nothing is dropped or masked.
     n_dropped, n_masked = (len(exp.excitations) - n_keep, exp.n_masked) if eps != 0.0 else (0, 0)
     n = exp.norb
@@ -530,17 +543,38 @@ def prep_cost(directions: Sequence[np.ndarray], eps: Sequence[float], *, method:
 
 
 # ------------------------------------------------------------------------- measurements
+def candidate_step_costs(d: np.ndarray, eps_candidates: Sequence[float], *,
+                         irreps: np.ndarray | None = None,
+                         params: FTParameters = FTParameters()) -> tuple[StepCost, ...]:
+    """Elementwise step costs of exp(eps_c D) for every line-search candidate eps_c (F3, F13).
+
+    Equal to ``elementwise_step_cost(d, eps_c, ...)`` for each candidate (``step`` = 0); d is
+    expanded once. The line search needs the logical qubits of the candidate steps, and
+    their flags: the rounding fixed point of F3 drops more of a small candidate's angles,
+    and "rounding bound above delta_step" marks the candidates whose dropped angles push
+    the bound above delta_step. Observed along the measured loops of
+    benchmarks/run_ft_pipeline.py: 0-3 of the 11 default candidates per iteration, 4-31 per
+    system (docs/m3-results.md, T9); on the unmasked H6 (1.0 A) L-BFGS step 3 the smallest
+    candidate, eps = 0.00625, compiles to the identity with a bound of 1.73e-3 (tested).
+    """
+    exp = _expand(d, irreps)
+    return tuple(_elementwise_cost(exp, _check_eps(e), params, 0) for e in eps_candidates)
+
+
 def candidate_step_toffolis(d: np.ndarray, eps_candidates: Sequence[float], *,
                             irreps: np.ndarray | None = None,
                             params: FTParameters = FTParameters()) -> np.ndarray:
     """(n_c,) int64 elementwise C_step of exp(eps_c D) for every line-search candidate (F13).
 
-    Equal to ``elementwise_step_cost(d, eps_c, ...).toffolis`` for each candidate; d is
-    expanded once.
+    The Toffolis of :func:`candidate_step_costs`.
     """
-    exp = _expand(d, irreps)
-    return np.array([_elementwise_cost(exp, _check_eps(e), params, 0).toffolis for e in eps_candidates],
-                    dtype=np.int64)
+    costs = candidate_step_costs(d, eps_candidates, irreps=irreps, params=params)
+    return np.array([c.toffolis for c in costs], dtype=np.int64)
+
+
+def _readout_bits(norb: int, params: FTParameters) -> tuple[PrimitiveCounts, int]:
+    rotation = orbital_rotation_counts(norb, complex_=False)
+    return rotation, phase_gradient_bits(rotation.n_add, params.delta_readout, params.b_min)
 
 
 def readout_rotation_toffolis(norb: int, *, params: FTParameters = FTParameters()) -> int:
@@ -548,5 +582,18 @@ def readout_rotation_toffolis(norb: int, *, params: FTParameters = FTParameters(
 
     g = N(N-1)/2 Givens rotations per spin, both spins sharing each addition; 405 at N = 6.
     """
-    rotation = orbital_rotation_counts(norb, complex_=False)
-    return rotation.toffolis(phase_gradient_bits(rotation.n_add, params.delta_readout, params.b_min))
+    rotation, b_r = _readout_bits(norb, params)
+    return rotation.toffolis(b_r)
+
+
+def readout_rotation_qubits(norb: int, *, params: FTParameters = FTParameters()) -> int:
+    """Logical qubits of the DF readout rotation: 2N + 3 b_r + 8, b_r = F2(g, delta_readout) (F4).
+
+    The register layout of Q_prep (system, gradient register, summand, b_r - 1 carries and
+    the AND ancillas) at the readout's own bits [estimate: a Givens cell needs at most the
+    ANDs of a double excitation]; 89 at N = 6 (b_r = 23), above the 83 of the H6 iterates.
+    N = 1 has no rotation and needs the 2 system qubits.
+    """
+    n = _check_count(norb, "norb")
+    rotation, b_r = _readout_bits(n, params)
+    return 2 * n + 3 * b_r + 8 if rotation.n_add else 2 * n

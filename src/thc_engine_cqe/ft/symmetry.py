@@ -78,12 +78,13 @@ Allowed elements, allowed / all (spin-free; spin-orbital), tested:
 The counts depend only on the multiset of orbital irreps (an orbital permutation maps
 element orbits to element orbits), so h6s and n2s have those of h6a and n2.
 
-Determinant irreps (:func:`ci_irrep`)
--------------------------------------
+Determinant irreps (:func:`determinant_irreps`, :func:`ci_irrep`)
+-----------------------------------------------------------------
 A determinant transforms as the XOR of the irreps of its occupied spin orbitals, i.e.
-irrep(alpha string) XOR irrep(beta string). :func:`ci_irrep` returns the irrep that
-holds the largest weight sum |c|^2 of a CI vector and that weight (fraction of the
-norm); tested against ``pyscf.fci.addons.symmetrize_wfn``.
+irrep(alpha string) XOR irrep(beta string) (:func:`determinant_irreps`, in the layout of a
+PySCF CI array). :func:`ci_irrep` returns the irrep that holds the largest weight sum
+|c|^2 of a CI vector and that weight (fraction of the norm); tested against
+``pyscf.fci.addons.symmetrize_wfn``.
 """
 
 from __future__ import annotations
@@ -103,6 +104,7 @@ __all__ = [
     "pair_mask",
     "element_mask",
     "mask_pair_tensor",
+    "determinant_irreps",
     "ci_irrep",
 ]
 
@@ -248,6 +250,29 @@ def _string_irreps(norb: int, n_elec: int, ir: np.ndarray) -> np.ndarray:
     return out
 
 
+def _split_nelec(nelec: int | tuple[int, int]) -> tuple[int, int]:
+    """(n_alpha, n_beta); a total is split as in PySCF, n_alpha = (n + n % 2) // 2 >= n_beta."""
+    if np.ndim(nelec) == 0:
+        n = int(nelec)
+        return (n + n % 2) // 2, n - (n + n % 2) // 2
+    na, nb = (int(x) for x in nelec)
+    return na, nb
+
+
+def determinant_irreps(norb: int, nelec: int | tuple[int, int],
+                       irreps: np.ndarray | Sequence[int]) -> np.ndarray:
+    """(n_alpha_strings, n_beta_strings) int64: the irrep id of every determinant of a PySCF CI array.
+
+    A determinant transforms as irrep(alpha string) XOR irrep(beta string), each the XOR of
+    the irreps of its occupied orbitals (module docstring); ``nelec`` as in :func:`ci_irrep`.
+    """
+    ir = _check_irreps(irreps)
+    if ir.size != norb:
+        raise ValueError(f"irreps has {ir.size} entries for norb={norb}")
+    na, nb = _split_nelec(nelec)
+    return _string_irreps(norb, na, ir)[:, None] ^ _string_irreps(norb, nb, ir)[None, :]
+
+
 def ci_irrep(ci: np.ndarray, norb: int, nelec: int | tuple[int, int],
              irreps: np.ndarray | Sequence[int]) -> tuple[int, float]:
     """Dominant irrep of a CI vector and its weight sum |c|^2 / sum |c|^2 over its determinants.
@@ -257,22 +282,15 @@ def ci_irrep(ci: np.ndarray, norb: int, nelec: int | tuple[int, int],
     (split as in PySCF, n_alpha = (n + n % 2) // 2 >= n_beta). A symmetry-pure state has
     weight 1.
     """
-    ir = _check_irreps(irreps)
-    if ir.size != norb:
-        raise ValueError(f"irreps has {ir.size} entries for norb={norb}")
-    if np.ndim(nelec) == 0:
-        n = int(nelec)
-        nelec = ((n + n % 2) // 2, n - (n + n % 2) // 2)
-    na, nb = (int(x) for x in nelec)
-    ga, gb = _string_irreps(norb, na, ir), _string_irreps(norb, nb, ir)
+    det = determinant_irreps(norb, nelec, irreps)
     c = np.asarray(ci)
-    if c.shape not in ((ga.size, gb.size), (ga.size * gb.size,)):
-        raise ValueError(f"ci has shape {c.shape}, expected ({ga.size}, {gb.size}) alpha x beta strings "
+    if c.shape not in (det.shape, (det.size,)):
+        raise ValueError(f"ci has shape {c.shape}, expected {det.shape} alpha x beta strings "
                          f"or its ravel")
-    w = np.abs(c.reshape(ga.size, gb.size)) ** 2
+    w = np.abs(c.reshape(det.shape)) ** 2
     total = float(w.sum())
     if not total > 0.0:
         raise ValueError("ci must be nonzero")
-    weights = np.bincount((ga[:, None] ^ gb[None, :]).ravel(), weights=w.ravel(), minlength=8)
+    weights = np.bincount(det.ravel(), weights=w.ravel(), minlength=8)
     g = int(np.argmax(weights))
     return g, float(weights[g] / total)

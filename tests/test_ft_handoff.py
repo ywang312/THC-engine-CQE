@@ -137,7 +137,7 @@ def test_runs_for_confidence_against_exact_arithmetic():
     assert [handoff.runs_for_confidence(p, d) for p, d in ties] == [2, 3, 30, 1]
     assert handoff.runs_for_confidence(0.99, 0.01) == 2 == _runs_reference(0.99, 0.01)
     assert handoff.runs_for_confidence(1.0, 0.01) == 1 and handoff.runs_for_confidence(0.995, 0.01) == 1
-    assert handoff.runs_for_confidence(0.9455) == 2          # H4 HF overlap: 2 runs (memo 3 table 2.4)
+    assert handoff.runs_for_confidence(0.9455) == 2          # H4 HF overlap: 2 runs [design]
     for bad in (0.0, -0.1, 1.1, math.nan):
         with pytest.raises(ValueError):
             handoff.runs_for_confidence(bad)
@@ -215,21 +215,20 @@ def test_first_step_flags_and_overlap_roundoff():
     """Row flags mark a loop applied to a record of the other first step; overlaps above 1 read as 1.
 
     The classical-first-step loop on an exact-line-search record flags rows k >= 1, the
-    measured loop on a classical-step record likewise, and the record's
-    "steps_from_exact_trajectory" reaches rows k >= 2; the free loop adds none. With
-    p_0 = 1 + 1e-15 (round-off) the HF saving is exactly 0.
+    measured loop on a classical-step record likewise, the matching pairs and the free loop
+    flag nothing. With p_0 = 1 + 1e-15 (round-off) the HF saving is exactly 0.
     """
     rng = np.random.default_rng(7)
     rec, prep, iters = _random_case(rng, K=3)
     rows = handoff.handoff_table(rec, prep, iters, C_QPE)
     assert rows[0].flags == () and all(r.flags == ("exact_first_step",) for r in rows[1:])
     assert all(r.flags == () for r in handoff.handoff_table(rec, prep, iters, C_QPE, loop="free"))
-    classical = dataclasses.replace(rec, first_step="second_order", flags=("steps_from_exact_trajectory",))
+    assert all(r.flags == () for r in handoff.handoff_table(rec, prep, iters, C_QPE, loop="measured"))
+    classical = dataclasses.replace(rec, first_step="second_order")
     rows = handoff.handoff_table(classical, prep, iters, C_QPE)
-    assert [r.flags for r in rows] == [(), (), ("steps_from_exact_trajectory",), ("steps_from_exact_trajectory",)]
+    assert [r.flags for r in rows] == [(), (), (), ()]
     rows = handoff.handoff_table(classical, prep, iters, C_QPE, loop="measured")
-    assert rows[0].flags == () and rows[1].flags == ("second_order_first_step",)
-    assert rows[2].flags == ("second_order_first_step", "steps_from_exact_trajectory")
+    assert rows[0].flags == () and all(r.flags == ("second_order_first_step",) for r in rows[1:])
     above = _record([1.0 + 1e-15, 1.0], [-1.0, -1.0], [0.0, 0.0])
     row0 = handoff.handoff_table(above, [0.0, 1.0], None, C_QPE, loop="free")[0]
     assert row0.p == 1.0 and row0.saving_vs_hf == 0.0 and row0.cost_expected == C_QPE
@@ -373,11 +372,11 @@ def test_cqe_only_cost():
 
 
 def test_certificates_on_exact_trajectories():
-    """p_lb along exact trajectories: memo 3 table 2.2 for H4 (0.76, 0.92, 0.98, 1.00 at k = 0-3) and S15 for N2.
+    """p_lb along exact trajectories: the design values for H4 (0.76, 0.92, 0.98, 1.00 at k = 0-3) and N2.
 
-    S15: with the same-irrep E1 the N2 HF certificate is 0.59 instead of 0.26 (any irrep),
+    With the same-irrep E1 of F15 the N2 HF certificate is 0.59 instead of 0.26 (any irrep),
     and rule E becomes certifiable or stays so. The trajectories come from
-    ft.trajectory.exact_trajectory; the reference values are memo 3's and the spec's.
+    ft.trajectory.exact_trajectory; the reference values are those of the design notes [design].
     """
     from thc_engine_cqe.ft.trajectory import exact_trajectory
 

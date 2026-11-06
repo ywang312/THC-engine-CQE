@@ -3,14 +3,16 @@
 Tags and formula numbers are those of :mod:`thc_engine_cqe.ft.primitives`. Costs are
 Toffolis, energies Hartree, variances Ha^2.
 
-Hand-off (F15) [memo 3, re-derived]
------------------------------------
-QPE on a qubitized walk returns an outcome within dE of E_0 with probability kappa p_k,
-p_k = |<psi_0|Psi_k>|^2, where kappa is set by where the ground-state phase falls on the
-QPE grid and is nearly state-independent (``ft.walk``: on H4 in memo 3's V1 setup, DF H' at
-threshold 1e-3 and t = 15, kappa = 0.986 and the ratio varies by 1e-8 along the L-BFGS
-iterates); kappa and the logical failure rate rescale every QPE term alike and are set to
-1, as in the specification. Handing off the CQE iterate Psi_k costs
+Hand-off (F15) [derived]
+------------------------
+QPE on a qubitized walk returns an outcome within dE of E_0 with probability w p_k,
+p_k = |<psi_0|Psi_k>|^2, where the window factor w (not the amplitude-estimation constant
+kappa of F11) is set by where the ground-state phase falls on the QPE grid and is nearly
+state-independent (``ft.walk``: on H4 with DF H' at threshold 1e-3 and t = 15, the setup of
+the design notes [design], w = 0.986 and the ratio varies by 1e-8 along the L-BFGS iterates;
+tests/test_ft_walk.py::test_window_probability_over_p_is_k_independent); w and the success
+probability of a QPE run, 1 - p_fail_qpe, rescale every QPE term alike and are both set to
+1, as in F15. Handing off the CQE iterate Psi_k costs
 
     T_E(k) = C_loop(k) + (C(Psi_k) + C_QPE) / p_k                 rule E, expected cost
     T_d(k) = C_loop(k) + R_d(p_lb,k) (C(Psi_k) + C_QPE),  R_d(p) = ceil(ln d / ln(1 - p))
@@ -37,8 +39,8 @@ for a lower bound E1 on the first excited energy of the state's symmetry sector
 (:func:`rule_e_certifiable`); otherwise an excited state below E_k + 2 dE can be accepted.
 Rule d (fixed confidence d = ``params.delta_conf``) makes R_d runs and keeps the lowest
 outcome, so it needs a certified p_lb <= p_k; runs with the exact p_k are reported as the
-oracle column (S16). :func:`optimal_handoff` mirrors this: "expected" minimizes T_E over
-the certified rows only (the k* of rule E), "delta" the certified T_d, and
+oracle column, which is not certified. :func:`optimal_handoff` mirrors this: "expected" minimizes T_E over
+the certified rows only (k_opt of rule E), "delta" the certified T_d, and
 "expected_oracle" and "delta_oracle" minimize over every row, as if the ground-state
 outcomes could be recognized (rule E) or p_k were known (rule d). The certificate is the
 Eckart-Temple bound [cited: Eckart, Phys. Rev. 36, 878 (1930) (volume unverified); Temple
@@ -50,9 +52,9 @@ re-derived: with q = 1 - p_k and E_j >= E1 > E_k for j >= 1, q (E1 - E_k) <=
 sum_{j>=1} p_j (E_j - E_k) = p_k (E_k - E_0), and by Cauchy-Schwarz
 sigma^2 >= p_k (E_k - E_0)^2 / q >= q (E1 - E_k)^2 / p_k. It is exact for two-level states,
 and a lower bound on E1 keeps it valid. ``use_e1="same_irrep"`` takes the same-irrep E1
-of the trajectory (S15), "any_irrep" the any-irrep one. Observed (exact L-BFGS records,
-the selected DF C_QPE, C_iter = 100 C_QPE per measured iteration [assumption: the
-specification's ">= 10^2 C_QPE"]): the cheapest T_E row of the measured loop is HF for h6s
+of the trajectory (F15), "any_irrep" the any-irrep one. Observed (exact L-BFGS records,
+the selected DF C_QPE, C_iter = 100 C_QPE per measured iteration [assumption: the design
+estimate, ">= 10^2 C_QPE"]): the cheapest T_E row of the measured loop is HF for h6s
 and n2s (1.74 and 3.96 C_QPE), where rule E is not certified (E_HF - E_0 = 0.282 and
 0.566 Ha against E1 - E_0 = 0.105 and 0.192 Ha); the certified optimum is k = 1
 (101 C_QPE) and k = 2 (203 C_QPE).
@@ -68,7 +70,7 @@ p_HF < p_0*(k). Step k pays (T_E(k+1) < T_E(k)) iff the marginal condition
 C_iter(k) < (C(Psi_k) + C_QPE)/p_k - (C(Psi_{k+1}) + C_QPE)/p_{k+1} holds (tested).
 Overlaps that round above 1 are read as 1, so saving_vs_hf(0) = 0 exactly.
 
-CQE energy alone (F17) [memo 3]
+CQE energy alone (F17) [design]
 -------------------------------
 k_v is the first iterate with E_k - E_0 <= ``params.e_tol_energy`` (1 mHa). The final
 energy with exact integrals takes S_fin = V_E / ``params.sigma_final``^2 shots of
@@ -213,14 +215,14 @@ class HandoffRow:
         cost_expected: T_E(k).
         p_lb: certified overlap (nan if E_k >= E1).
         runs_delta, cost_delta: R_d(p_lb) and T_d(k); None without a positive p_lb.
-        runs_delta_oracle: R_d(p_k), with the exact overlap (S16).
+        runs_delta_oracle: R_d(p_k), with the exact overlap (the oracle column, not certified).
         certifiable: rule E is certified (E1 - E_k > 3 dE).
         saving_vs_hf: C_QPE/p_0 - (C(Psi_k) + C_QPE)/p_k.
         p0_break_even: C_QPE / T_E(k).
         cost_delta_oracle: C_loop(k) + R_d(p_k) (C(Psi_k) + C_QPE).
         flags: "exact_first_step" (classical-first-step loop on an exact-line-search
-            record, k >= 1), "second_order_first_step" (measured loop on a classical-step
-            record, k >= 1), "steps_from_exact_trajectory" (from the record, k >= 2).
+            record, k >= 1) and "second_order_first_step" (measured loop on a classical-step
+            record, k >= 1).
     """
 
     k: int
@@ -300,8 +302,6 @@ def _row_flags(record: TrajectoryRecord, loop: str, k: int) -> tuple[str, ...]:
         flags.append("exact_first_step")
     if k >= 1 and loop == "measured" and record.first_step == "second_order":
         flags.append("second_order_first_step")
-    if k >= 2 and "steps_from_exact_trajectory" in record.flags:
-        flags.append("steps_from_exact_trajectory")
     return tuple(flags)
 
 
@@ -361,7 +361,7 @@ def handoff_table(record: TrajectoryRecord, prep_cumulative: np.ndarray,
 def optimal_handoff(rows: Sequence[HandoffRow], rule: str = "expected") -> HandoffRow:
     """The row of lowest total cost under ``rule`` (module docstring).
 
-    "expected": T_E over the rows where rule E is certified (the k* of rule E);
+    "expected": T_E over the rows where rule E is certified (k_opt of rule E);
     "expected_oracle": T_E over every row; "delta": the certified T_d (rows with a p_lb);
     "delta_oracle": T_d with the exact p_k. Ties go to the smaller k. Raises ValueError if
     no row qualifies.

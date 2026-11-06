@@ -36,7 +36,7 @@ no rotation-bits parameter (``BlockEncoding.beta`` is 0 for SF). C_W is the cost
 QROM clamp (:func:`openfermion_qr_clamp`) [derived]
 ---------------------------------------------------
 OpenFermion's ``utils.QR(L, M)`` minimizes the QROM cost L/2^k + M(2^k - 1) over integers k
-around k* = log2(L/M)/2 and calls ``sys.exit`` when k* < 0, i.e. L < M, which happens for
+around k_QR = log2(L/M)/2 and calls ``sys.exit`` when k_QR < 0, i.e. L < M, which happens for
 every small active space here (e.g. the DF output width n beta/2 = 64 exceeds Xi + n/2 = 31
 for H4). For L < M the cost is increasing in k >= 0 (its k = 1 value L/2 + M exceeds L), so
 the integer optimum is k = 0 with cost ceil(L): plain unary iteration. The clamp replaces
@@ -60,14 +60,14 @@ of one walk step (``WalkParams.logical_qubits`` of ``ft.residual``), and :func:`
 adds the register for any dE, so ``qpe_cost(enc, dE).logical_qubits`` equals OpenFermion's
 ``ancilla_cost`` at that dE and ``.toffolis`` its total cost (tested).
 
-Selection rule (:func:`select_qpe`) [M3 design, memo 3]
--------------------------------------------------------
+Selection rule (:func:`select_qpe`) [design]
+--------------------------------------------
 Among the scanned encodings with |de_fact| <= ``params.de_fact`` (0.5 mHa) and infidelity <=
 ``params.infid_tol`` (1e-4), take the one with the fewest QPE Toffolis at ``params.de_qpe``
 (1 mHa), per kind or overall; ties go to fewer logical qubits, then to the scan order. The
 total error is then <= 1.5 mHa, inside chemical accuracy. :func:`scan_encodings` scans the
-DF thresholds 1e-1 ... 1e-6, the THC ranks of memo 3 with penalties 0 and "auto", and every
-SF rank.
+DF thresholds 1e-1 ... 1e-6, the THC ranks of :data:`THC_RANKS` [design] with penalties 0
+and "auto", and every SF rank.
 
 Time evolution (F8) [derived; GQSP: cited, Motlagh and Wiebe, PRX Quantum 5, 020368 (2024)]
 ------------------------------------------------------------------------------------------
@@ -108,7 +108,7 @@ kind (rank; lambda in Ha; C_W; total Toffolis; logical qubits):
 A's. In OpenFermion's cost models at N <= 8 the SF walk step is 0.44-0.58 of the DF step,
 so SF is the cheapest admissible encoding for h4, n2 and lih (and beats DF for h6s and
 n2s), THC for h6a, and DF beats SF for h8. The lih and n2 THC fits pass the selection rule
-only at M = 21 and with a large lambda (non-convex fits; spec section 11, risk 6). A full
+only at M = 21 and with a large lambda (non-convex fits; docs/m3-results.md, caveat 6). A full
 scan (DF, THC with both penalties, SF) takes 2.6-3.2 / 7.2-7.3 / 6.7-7.0 / 4.5 s (h4, h6a,
 n2, lih; two runs, one thread on a shared machine), the THC fits 1.7-5.4 s of it.
 """
@@ -130,7 +130,7 @@ from ..factor.thc import fit_thc_active
 from ..integrals import ActiveSpace
 from .primitives import FTParameters, evolution_toffolis, jacobi_anger_degree
 
-if TYPE_CHECKING:  # ft.residual (task B) owns WalkParams; imported lazily in walk_params()
+if TYPE_CHECKING:  # ft.residual owns WalkParams; imported lazily in walk_params()
     from .residual import WalkParams
 
 __all__ = [
@@ -153,10 +153,10 @@ __all__ = [
 
 KINDS = ("df", "thc", "sf")
 
-#: DF eigenvalue thresholds of the scan (OpenFermion's rule) [M3 design, memo 3].
+#: DF eigenvalue thresholds of the scan (OpenFermion's rule) [design].
 DF_THRESHOLDS: tuple[float, ...] = (1e-1, 3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 1e-5, 1e-6)
 
-#: THC ranks of the scan per number of active orbitals [M3 design, memo 3]; other N use
+#: THC ranks of the scan per number of active orbitals [design]; other N use
 #: ``diagnostics.thc_floors.auto_ranks``.
 THC_RANKS: dict[int, tuple[int, ...]] = {4: (4, 6, 8, 10), 6: (6, 9, 12, 15, 18, 21),
                                          8: (8, 12, 16, 20, 24, 32)}

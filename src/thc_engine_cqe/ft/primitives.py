@@ -3,10 +3,13 @@
 Every cost in :mod:`thc_engine_cqe.ft` is a count of Toffolis (one CCZ state each) on
 a surface-code machine. An AND gadget costs 1 Toffoli to compute and 0 to uncompute
 (measurement-based uncomputation) [cited: Gidney, Quantum 2, 74 (2018)]. Cliffords are
-free. Tags: [OF] OpenFermion 1.8.1 source (``openfermion.resource_estimates``);
-[derived] derived in the M3 design and re-derived for the specification; [cited]
-literature; [estimate] and [assumption] modelling choices. Formula tags F1-F19 are
-those of the M3 specification.
+free. The tags and the formula labels F1-F19 and F2a are those of docs/m3-cost-model.md:
+[OF] OpenFermion's resource-estimate functions or conventions (OpenFermion 1.8.1,
+``openfermion.resource_estimates``); [derived] derived for this package and tested;
+[cited] from the cited literature; [estimate] a model choice, not a bound; [assumption] a
+stated assumption; [design] taken from the M3 design notes (not in the repository) and
+re-checked during the build; [build check] verified once during the build by a script
+that is not part of the repository.
 
 Rotations by classical angles (F1, F2)
 --------------------------------------
@@ -62,7 +65,7 @@ Hence [derived]
 
 with C_W the Toffolis of one controlled walk step (OpenFermion's step cost includes the
 control [OF]) and three beta-bit phase rotations per GQSP layer
-(:func:`gqsp_rotation_toffolis`) [estimate, upper bound: in the parametrization of
+(:func:`gqsp_rotation_toffolis`) [estimate, a conservative one: in the parametrization of
 Motlagh and Wiebe, (prod_{j=1..d} R(theta_j, phi_j, 0) A) R(theta_0, phi_0, lambda), a
 degree-d polynomial has 2d + 3 angles, d fewer than 3(d + 1); the overcount d (beta - 2)
 is about (beta - 2) / C_W = 1% of C_evol, 476 of 45976 Toffolis for H6 at t = 0.7].
@@ -76,7 +79,8 @@ A Hadamard-test circuit with success probability p = (1 + <O>/alpha)/2 is iterat
 with G = A S_0 A^dagger S_good. G has the eigenphases +-2 theta, sin^2 theta = p, and
 <O> = -alpha cos 2 theta. Sine-window phase estimation with M applications of G
 estimates 2 theta to an RMS error kappa pi / M with kappa -> 1 (simulated: 0.974,
-0.993, 0.998 for M = 63, 255, 1023) [derived; kappa verified], so
+0.993, 0.998 for M = 63, 255, 1023) [derived; kappa:
+tests/test_ft_residual.py::test_ae_constant_from_sine_window_phase_estimation], so
 sigma(<O>) <= kappa pi alpha / M. Each G applies A once and A^dagger once, hence
 
     N = 2 pi kappa alpha / eps                                       (ae_applications)
@@ -85,9 +89,13 @@ applications of A or A^dagger for an RMS error eps.
 
 Parameters
 ----------
-:class:`FTParameters` holds every budget and modelling constant of M3 (specification
-section 3); every function of :mod:`thc_engine_cqe.ft` takes
-``params: FTParameters = FTParameters()``.
+:class:`FTParameters` holds every budget and modelling constant of M3 (the parameters of
+docs/m3-cost-model.md). The functions that apply its budgets (in ``ft.stateprep``,
+``ft.circuits``, ``ft.residual``, ``ft.residual_inputs``, ``ft.qpe``, ``ft.handoff`` and
+``ft.pipeline``) take ``params: FTParameters = FTParameters()``; the others need no budget or
+take the constants they use as explicit arguments (e.g. :func:`phase_gradient_bits`,
+``qpe.qpe_cost``, ``residual.energy_ae``), and ``ft.physical`` takes a ``SurfaceCodeModel``
+and explicit failure budgets.
 """
 
 from __future__ import annotations
@@ -120,13 +128,13 @@ _LS_EPS_BASE = 0.00625
 
 @dataclass(frozen=True)
 class FTParameters:
-    """Budgets and modelling constants of the M3 cost layer (specification section 3).
+    """Budgets and modelling constants of the M3 cost layer (docs/m3-cost-model.md, "Parameters").
 
     Energies are in Hartree, times in units of 1/Hartree, angles in radians.
 
     Attributes:
         delta_step: operator-norm rounding budget of one compiled CQE step (F2, F3).
-            1e-3 adds at most one L-BFGS step [M3 design, memo 1 section 2.4; assumption].
+            1e-3 adds at most one L-BFGS step [design; assumption].
         delta_readout: rounding budget of one readout basis rotation (F4).
         b_min: minimum number of phase-gradient bits (F2).
         chi, beta: coefficient and rotation bits inside OpenFermion's block encodings
@@ -149,9 +157,11 @@ class FTParameters:
         p_fail_shot, p_fail_ae, p_fail_qpe: logical failure budgets of one sampling shot,
             one amplitude-estimation run and one QPE run (F18).
         aux_deltas: evolution times delta of the aux routes (1/Hartree, F10, F11)
-            [M3 design, memo 2].
-        n_settings, seed: matchgate settings and seed of the Rao-Blackwellized
-            per-shot variances for N >= 6 [M2].
+            [design]: the grid of the design notes' scripts, which has no 0.9
+            (docs/m3-results.md section 11).
+        n_settings, seed: matchgate settings and seed of the Rao-Blackwellized per-shot
+            variances [M2], used when the pair count sum_e L_e (L_e + 1) / 2 exceeds 5e7
+            (``residual_inputs.element_variances``; docs/m3-results.md section 11).
     """
 
     delta_step: float = 1e-3

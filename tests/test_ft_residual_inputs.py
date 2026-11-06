@@ -5,9 +5,9 @@ References independent of the module: the symmetry-blind full residual tensor of
 diagonalization of the CI Hamiltonian for the exact ground state, the Pauli coefficients
 and dense matrices of the M2 targets, ``scipy.linalg.expm`` on the qubit space, dense
 Pauli-LCU block encodings and Hadamard tests built here from the Pauli terms, the
-independently computed numbers of the M3 specification (Appendix A, the critic's
-``var_check.py``) and of memo 2, and exact matchgate pair sums of ``measure.routes`` on the
-unweighted X_e (the H6 and N2 V_m, computed once outside the suite).
+independently computed numbers of Appendix A (docs/m3-cost-model.md) and of the design notes
+[design], and exact matchgate pair sums of ``measure.routes`` on the unweighted X_e (the H6 and
+N2 V_m, computed once outside the suite [build check]).
 """
 
 import math
@@ -91,7 +91,7 @@ def test_alpha_x_is_the_pauli_one_norm_and_bounds_the_sector_norm(h4):
     X_e (from their coefficients), lambda_Q that of aux_targets' Q_e; Q_e and X_e are traceless, so
     they have no identity term and its exclusion changes nothing; neither norm depends on the qubit
     order; and ||X_e|| on the (2, 2) sector, from the dense matrix, is at most alpha_X (here well
-    below it: the 1-norm is loose, specification section 11)."""
+    below it: the 1-norm is loose; docs/m3-results.md, caveat 1)."""
     act, el, norms = h4["act"], h4["el"], h4["norms"]
     mapping = QubitMapping(act.norb)
     xs = targets.direct_targets(el, act, mapping, "spin_free")
@@ -118,9 +118,9 @@ def test_alpha_x_is_the_pauli_one_norm_and_bounds_the_sector_norm(h4):
 # ----------------------------------------------------------------------- variances
 def test_element_variances_exact_branch(h4):
     """H4 (7.6e6 term pairs): exact matchgate pair sums (no standard errors, no settings); w_aux is 0.01 x
-    the aux-route variance at delta = 0.1. V_m = sum m v at iterate 1 agrees within 1% with the critic's
-    independent value at SD iterate 2 (Appendix A: 1220) and W_m with memo 2's 816 (iterate 5): the
-    variances barely move."""
+    the aux-route variance at delta = 0.1. V_m = sum m v at iterate 1 agrees within 1% with the independent
+    value at SD iterate 2 (Appendix A: 1220) and W_m with the 816 of the design notes (iterate 5) [design]:
+    the variances barely move."""
     act, el, var = h4["act"], h4["el"], h4["var"]
     m = _m(act, el)
     assert (var["method"], var["n_settings"], var["seed"], var["delta_aux"]) == ("exact", None, None, 0.1)
@@ -177,11 +177,24 @@ def test_rb_variances_agree_with_the_exact_pair_sums(h4, monkeypatch):
 
 
 @pytest.mark.slow
+def test_vm_at_sd_iterate_2_matches_appendix_a(h4):
+    """V_m = sum_e m_e v_e at SD iterate 2 by exact matchgate pair sums, on the 28 allowed and on all 60
+    spin-free H4 elements: Appendix A's 1220 and 2402 [design] to the printed digits
+    (observed 1220.17 and 2401.88); the allowed set carries half of the total."""
+    act = h4["act"]
+    full = targets.element_set(act.norb, "spin_free")
+    for elements, ref in ((h4["el"], 1220.0), (full, 2402.0)):
+        var = ri.element_variances(act, h4["states"][1], elements, "spin_free")
+        assert var["method"] == "exact" and len(elements) in (28, 60)
+        assert abs(var["variance_m"] - ref) <= 0.5
+
+
+@pytest.mark.slow
 def test_n2_variances_use_exact_pair_sums():
     """N2 CAS(6,6) has 2.8e7 term pairs on its 33 allowed elements, below the 5e7 limit, so its variances
-    are exact pair sums (seed-independent; the specification's N <= 4 rule would sample them): V_m at SD
+    are exact pair sums (seed-independent; the design's N <= 4 rule would sample them): V_m at SD
     iterate 1 is 3751.08 Ha^2, the value of an independent exact sum through measure.routes alone on the
-    unweighted X_e (method="exact", 1.47e7 commuting pairs, computed once outside the suite)."""
+    unweighted X_e (method="exact", 1.47e7 commuting pairs, computed once outside the suite [build check])."""
     act = sy.benchmark_system("n2")
     states = []
     run_cqe(act, max_iter=1, optimizer="sd", callback=lambda st, ci: states.append(ci.copy()))
@@ -308,7 +321,7 @@ def test_build_problem_wiring(h4):
 
 def test_energy_variances_pick_the_lowest_df_split(h4):
     """The four DF splits are schemes.df_variance totals and the lowest is chosen; at H4 SD iterate 1
-    the shifted splits are about 3x lower than the unshifted ones (S6), eigh_shift lowest, as at HF,
+    the shifted splits are about 3x lower than the unshifted ones [design], eigh_shift lowest, as at HF,
     where F13 makes the choice; a state given with a factor (-3 Psi) is normalized first."""
     act, ci = h4["act"], h4["states"][0]
     out = ri.energy_variances(act, ci)

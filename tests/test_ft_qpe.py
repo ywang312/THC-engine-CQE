@@ -2,7 +2,8 @@
 
 References: OpenFermion's own regression tuples and functions (``compute_cost``,
 ``utils.QR``, ``sf.compute_lambda``), brute-force minimization, direct FCI of the model
-Hamiltonians, and the QPE numbers of spec Appendix A (memo 3 scan).
+Hamiltonians, and the QPE numbers of Appendix A (docs/m3-cost-model.md; the scan of the design
+notes [design]).
 """
 
 from __future__ import annotations
@@ -140,9 +141,9 @@ def test_qpe_cost_matches_openfermion_at_several_errors():
 def test_select_qpe_df_reproduces_appendix_a(name):
     """select_qpe(kind="df") picks Appendix A's threshold, L, Xi, C_W, total (+-0.5%), qubits, lambda (1e-3).
 
-    Appendix A is the memo-3 scan, consistent with OpenFermion; h6a is the spec's named
-    regression (3e-3, L = 11, Xi = 63, 1309 per step, 2.00e7). n2 runs on the
-    symmetry-adapted orbitals (the spec allows 2%; it reproduces exactly).
+    Appendix A is the scan of the design notes [design], consistent with OpenFermion; h6a is the
+    named regression of the design (3e-3, L = 11, Xi = 63, 1309 per step, 2.00e7). n2 runs on the
+    symmetry-adapted orbitals (the design allowed 2%; it reproduces exactly).
     """
     thr, L, Xi, lam, step, total, qubits = APPENDIX_DF[name]
     sel = qpe.select_qpe(_df_scan(name), kind="df")
@@ -152,6 +153,18 @@ def test_select_qpe_df_reproduces_appendix_a(name):
     assert e.toffoli_per_step == step and sel.logical_qubits == qubits
     assert abs(sel.toffolis / total - 1.0) <= 5e-3
     assert e.qr_clamped is True and abs(e.de_fact) <= 5e-4 and e.infidelity <= 1e-4
+
+
+def test_n2_df_on_symmetric_and_plain_orbitals():
+    """Appendix A: DF at threshold 3e-3 has the same lambda and step cost, to 2%, on the symmetry-adapted N2
+    orbitals as on a plain RHF build of the geometry (benchmark_system(symmetry=False), with its own exact
+    reference). Observed: lambda equal to 1.3e-14 relative, the same C_W = 1420, L = 20 and Xi = 82."""
+    a_sym, ref = _system("n2")
+    sym = qpe.df_encoding(a_sym, 3e-3, reference=ref)
+    a = symmetry.benchmark_system("n2", symmetry=False)
+    plain = qpe.df_encoding(a, 3e-3, reference=ExactReference.build(a))
+    assert abs(plain.lam / sym.lam - 1.0) <= 0.02
+    assert abs(plain.toffoli_per_step / sym.toffoli_per_step - 1.0) <= 0.02 and sym.toffoli_per_step == 1420
 
 
 def test_selection_rule_brute_force():
@@ -284,7 +297,7 @@ def test_encoding_fields_against_direct_fci():
 def test_thc_h6a_appendix_a():
     """THC on h6a at M = 15 with the auto penalty: lambda 9.125 (1e-3), 1035 per step, 1.48e7 total (+-0.5%).
 
-    Appendix A's THC row (memo 3); the encoding is admissible under the selection rule.
+    Appendix A's THC row [design]; the encoding is admissible under the selection rule.
     """
     a, ref = _system("h6a")
     enc = qpe.thc_encoding(a, 15, penalty="auto", reference=ref)
@@ -343,7 +356,7 @@ def test_evolution_cost_and_walk_params():
 
     The references are the primitives' formula and, at t = 1.4 (tau = 6.9), a hand Bessel
     sum: R = min{R : 2 sum_{j>R} |J_j(tau)| <= eps_evol} and C_evol = 2R C_W + 3(2R + 1)(beta - 2).
-    WalkParams is task B's type, imported only if ft.residual is present.
+    WalkParams is ft.residual's type, imported only if ft.residual is present.
     """
     a, ref = _system("h4")
     enc = qpe.df_encoding(a, 3e-3, reference=ref)

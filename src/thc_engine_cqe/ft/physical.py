@@ -6,7 +6,7 @@ a code distance and seconds with OpenFermion's surface-code model, and a number 
 of such a circuit into a campaign wall clock. Tags: [OF] OpenFermion 1.8.1,
 ``resource_estimates/surface_code_compilation/physical_costing.py`` (transcribed here
 with floats, reproduced exactly by tests/test_ft_physical.py); [derived], [assumption]
-as in the M3 specification.
+and the formula labels as in docs/m3-cost-model.md.
 
 Layout model (F18) [OF]
 -----------------------
@@ -50,12 +50,14 @@ cycle, F = 4, 50% routing, d = 7..33, budget 0.1):
 * N_Tof must be 0 or at least 1: OpenFermion's fluid floor(N_Tof / F * rounds_fac)
   gives a run of zero cycles for 0 < N_Tof < F / rounds_fac.
 
-Observed with the defaults (p = 1e-3, 4 factories): the factory-limited rate is
-rounds_fac / F = 26.25 us per Toffoli for AutoCCZ(.., l2 = 21) and 28.75 us for l2 = 23
-(:attr:`PhysicalCost.us_per_toffoli`); the H6 QPE run (233 logical qubits, 1.9998e7
-Toffolis) needs 956,160 physical qubits at d = 23 and 574.9 s at budget 0.1, and
-1,026,160 qubits at d = 25 at 0.01; one H6 Psi_6 shot (83 logical qubits, 43,427
-Toffolis) 721,960 qubits at d = 25 and 1.249 s at 1e-5 (spec Appendix A, tested). The
+Observed with the defaults (p = 1e-3, 4 factories): the factory-limited rate of
+AutoCCZ(l1, l2) is rounds_fac / F = max(5, 5.75 l1 / l2) l2 / 4 us per Toffoli
+(:attr:`PhysicalCost.us_per_toffoli`), i.e. 26.25 us for l2 = 21 with l1 <= 17 and 28.75 us
+for l2 = 23 with l1 <= 19 (27.31 for AutoCCZ(19, 21), 30.19 for AutoCCZ(21, 23)); the H6 DF
+QPE run (233 logical qubits, 1.9998e7 Toffolis) needs 956,160 physical qubits at d = 23 and
+574.9 s at budget 0.1, and 1,026,160 qubits at d = 25 at 0.01; one H6 Psi_6 shot (83 logical
+qubits, 43,427 Toffolis) 721,960 qubits at d = 25 and 1.249 s at 1e-5 (Appendix A of
+docs/m3-cost-model.md; tests/test_ft_physical.py::test_appendix_a_physical_numbers). The
 best factories fail with 3.6e-16 (two-level T) and 3.66e-14 (AutoCCZ(23, 39)) per state
 at p = 1e-3, so a budget is infeasible beyond about budget / 3.6e-16 Toffolis
 (:func:`surface_code_cost` raises; at budget 0.1 the T factory carries 1e13 and 1e14
@@ -65,8 +67,9 @@ Monotonicity [derived]. Every layout's failure grows with N_Tof and the feasible
 shrinks as the budget tightens, so the optimal area x duration is non-decreasing in
 N_Tof and in 1/budget, and for a fixed factory the optimal d is the smallest feasible
 one, also non-decreasing. The chosen d itself is monotone in neither, because the
-optimum can switch factories (specification section 7 claims both monotonicities; both
-are false in OpenFermion's own model, tests/test_ft_physical.py):
+optimum can switch factories (the design specification claimed both monotonicities; both
+are false in OpenFermion's own model:
+tests/test_ft_physical.py::test_distance_is_not_monotone_in_toffolis_or_budget_and_openfermion_agrees):
 
 * in N_Tof, to a faster factory: 233 logical qubits at budget 0.1 need d = 15 with
   AutoCCZ(9, 15) for 562 Toffolis but d = 13 with AutoCCZ(11, 13) for 1000, a shorter
@@ -103,6 +106,7 @@ import numbers
 from dataclasses import dataclass
 
 __all__ = [
+    "SECONDS_PER_WEEK",
     "SurfaceCodeModel",
     "PhysicalCost",
     "surface_code_cost",
@@ -110,6 +114,7 @@ __all__ = [
     "machines_for",
 ]
 
+#: The deadline of F19, 7 days (seconds).
 SECONDS_PER_WEEK = 7 * 86400
 
 

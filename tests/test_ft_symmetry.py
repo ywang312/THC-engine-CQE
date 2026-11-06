@@ -4,9 +4,10 @@ orbitals, orbital irreps, the point-group masks of F2a and determinant irreps.
 References independent of the module: the current builders of ``systems`` (plain RHF for the chains
 and LiH) and plain-RHF builds of N2 (``systems.n2`` is itself the D2h build), the AO labels of PySCF,
 PySCF's character tables (not the XOR rule), the allowed-element
-counts of the M3 specification (Appendix A, from the critic's ``sym_check.py``), the exact residual of
-``residual.compute_residual`` and of ``routes.exact_residual`` (PySCF transition RDMs), neither of
-which knows about symmetry, and ``pyscf.fci.addons.symmetrize_wfn``.
+counts of Appendix A (docs/m3-cost-model.md; computed for the design by an independent script
+[design]), the exact residual of ``residual.compute_residual`` and of ``routes.exact_residual``
+(PySCF transition RDMs), neither of which knows about symmetry, and
+``pyscf.fci.addons.symmetrize_wfn``.
 """
 
 import itertools
@@ -39,7 +40,7 @@ PLAIN_RHF_N2 = {
     "n2s": lambda: systems.molecule([("N", (0, 0, 0)), ("N", (0, 0, 2.0))], ncas=6, nelecas=6),
 }
 
-# Appendix A of the M3 specification: allowed / all elements, spin-free and spin-orbital.
+# Appendix A (docs/m3-cost-model.md): allowed / all elements, spin-free and spin-orbital.
 APPENDIX_A_COUNTS = {
     "h4": ((28, 60), (70, 150)),
     "h6a": ((153, 315), (408, 840)),
@@ -155,8 +156,8 @@ def test_xor_rule_is_the_group_product(group):
 @pytest.mark.parametrize("name", list(APPENDIX_A_COUNTS))
 def test_allowed_element_counts_match_appendix_a(name):
     """Allowed / all elements of targets.element_set, spin-free and spin-orbital, equal Appendix A
-    (computed by the critic's script); the spin-free mask is pair_mask at the element rows and the
-    spin-orbital mask the XOR of the rows' orbital indices."""
+    (computed for the design by an independent script [design]); the spin-free mask is pair_mask at
+    the element rows and the spin-orbital mask the XOR of the rows' orbital indices."""
     act = sy.benchmark_system(name)
     ir = sy.orbital_irreps(act)
     (sf_ok, sf_all), (so_ok, so_all) = APPENDIX_A_COUNTS[name]
@@ -285,6 +286,71 @@ def test_ci_irrep_splits_an_odd_electron_count_as_pyscf():
     assert sy.ci_irrep(ci.ravel(), 4, 5, ir) == (1, 1.0)
     with pytest.raises(ValueError):
         sy.ci_irrep(ci.T, 4, 5, ir)
+
+
+def test_ci_irrep_on_a_square_open_shell_array():
+    """(1, 3) electrons in 4 orbitals give a square 4 x 4 CI array whose alpha (one electron) and beta (three
+    electrons) strings differ, so the determinant labels are not symmetric under transposition. Every single
+    determinant has the irrep of its occupations, the XOR of the irreps of the occupied alpha and beta orbitals
+    (orbitals from cistring.addr2str), with weight 1, for both (1, 3) and (3, 1). The ids (0, 1, 2, 4) make the
+    labels asymmetric ((0, 1, 2, 3) would not: 3 - x = 3 XOR x)."""
+    from pyscf.fci import cistring
+
+    ir = np.array([0, 1, 2, 4])
+
+    def label(n_el, addr):
+        bits = cistring.addr2str(4, n_el, addr)
+        return int(np.bitwise_xor.reduce([ir[p] for p in range(4) if bits >> p & 1]))
+
+    for na, nb in ((1, 3), (3, 1)):
+        asymmetric = 0
+        for ia in range(4):
+            for ib in range(4):
+                ci = np.zeros((4, 4))
+                ci[ia, ib] = 1.0
+                expected = label(na, ia) ^ label(nb, ib)
+                assert sy.ci_irrep(ci, 4, (na, nb), ir) == (expected, 1.0)
+                asymmetric += expected != label(na, ib) ^ label(nb, ia)
+        assert asymmetric > 0
+
+
+def test_determinant_irreps_follow_the_occupations(builds):
+    """determinant_irreps on N2 (6 orbitals, (3, 3)) and LiH (6, (2, 2)) against a determinant-by-determinant
+    reference: the occupied orbitals of every alpha and beta string from cistring.addr2str (not
+    make_strings), XOR of their irreps; for 10 random determinants also against PySCF's symmetrize_wfn
+    (the unit vector survives only the projection on its own irrep). A total electron count splits as in
+    ci_irrep, and ci_irrep's weights are the |c|^2 sums over these labels."""
+    from pyscf.fci import addons, cistring
+
+    for name in ("n2", "lih"):
+        act, ir = builds[name]
+        n, (na, nb) = act.norb, act.nelec
+        det = sy.determinant_irreps(n, (na, nb), ir)
+        assert det.shape == (cistring.num_strings(n, na), cistring.num_strings(n, nb)) and det.dtype == np.int64
+
+        def string_irrep(addr: int, ne: int) -> int:
+            s = int(cistring.addr2str(n, ne, addr))
+            g = 0
+            for p in range(n):
+                if s >> p & 1:
+                    g ^= int(ir[p])
+            return g
+
+        ref = np.array([[string_irrep(i, na) ^ string_irrep(j, nb) for j in range(det.shape[1])]
+                        for i in range(det.shape[0])])
+        np.testing.assert_array_equal(det, ref)
+        np.testing.assert_array_equal(sy.determinant_irreps(n, na + nb, ir), det)
+        rng = np.random.default_rng(3)
+        for i, j in zip(rng.integers(det.shape[0], size=10), rng.integers(det.shape[1], size=10)):
+            unit = np.zeros(det.shape)
+            unit[i, j] = 1.0
+            with np.errstate(invalid="ignore", divide="ignore"):
+                kept = [k for k in range(8)
+                        if np.nan_to_num(addons.symmetrize_wfn(unit, n, (na, nb), ir, k))[i, j] > 0.5]
+            assert kept == [det[i, j]]
+            assert sy.ci_irrep(unit, n, (na, nb), ir) == (int(det[i, j]), 1.0)
+    with pytest.raises(ValueError):
+        sy.determinant_irreps(4, (2, 2), np.array([0, 1, 0]))
 
 
 def test_mask_helpers_and_validation(builds):

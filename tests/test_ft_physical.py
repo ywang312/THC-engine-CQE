@@ -3,9 +3,8 @@
 References independent of the module: OpenFermion's ``physical_costing`` (the source F18 transcribes:
 ``cost_estimator``, ``iter_known_factories``, and its ``AlgorithmParameters.estimate_cost`` scanned at
 other budgets as cost_estimator scans at 0.1; tests that need it start with importorskip), the physical
-numbers of the M3 specification (Appendix A, recomputed by the critic's ``phys_check.py`` with
-OpenFermion's own objects), and closed forms of the cycle counts and of the wall-clock model evaluated
-here.
+numbers of Appendix A (docs/m3-cost-model.md; recomputed for the design with OpenFermion's own objects
+[design]), and closed forms of the cycle counts and of the wall-clock model evaluated here.
 """
 
 import datetime
@@ -51,8 +50,10 @@ def _openfermion_layout(q: int, n: int, budget: float, p: float = 1e-3, distance
 
 def test_matches_openfermion_cost_estimator():
     """With OpenFermion's settings (budget 0.1, d = 7..33) the layout equals cost_estimator's exactly
-    (physical qubits, distance, seconds and failure) for the three cases of the specification and 60
-    random (Q, N_Tof), also at p = 1e-4 and 5e-4, where only the AutoCCZ factories exist."""
+    (physical qubits, distance, seconds and failure) for three reference cases (the H6 DF QPE run,
+    OpenFermion's THC Reiher case and the H6 Psi_6 circuit, costed as a plain run, not a shot) and 60
+    random (Q, N_Tof), also at p = 1e-4
+    and 5e-4, where only the AutoCCZ factories exist."""
     cost_estimator = _cost_estimator()
     rng = np.random.default_rng(11)
     cases = [(233, 19_997_593, 1e-3), (2142, 5_250_145_120, 1e-3), (83, 43_427, 1e-3)]
@@ -96,11 +97,12 @@ def test_factories_and_layouts_match_openfermion_at_other_error_rates():
 
 
 def test_appendix_a_physical_numbers():
-    """Appendix A: the H6 QPE run (233 logical qubits, 1.9998e7 Toffolis) needs 956,160 qubits, d = 23,
-    574.9 s at budget 0.1 and 1,026,160 qubits, d = 25 at 0.01; one H6 Psi_6 shot (83 qubits, 43,427
-    Toffolis, plus 2d readout cycles) 721,960 qubits, d = 25, 1.249 s at 1e-5 and 696,960 qubits, d = 23
-    at 1e-4. The factory-limited rate is 5 l2 / 4 us per Toffoli: 28.75 (l2 = 23) and 26.25 (l2 = 21,
-    the H4 QPE run of 6.73e6 Toffolis on 188 qubits at budget 0.1)."""
+    """Appendix A: the H6 DF QPE run (233 logical qubits, 1.9998e7 Toffolis) needs 956,160 qubits,
+    d = 23, 574.9 s at budget 0.1 and 1,026,160 qubits, d = 25 at 0.01; one H6 Psi_6 shot (83 qubits,
+    43,427 Toffolis, plus 2d readout cycles) 721,960 qubits, d = 25, 1.249 s at 1e-5 and 696,960 qubits,
+    d = 23 at 1e-4. The factory-limited rate of AutoCCZ(l1, l2) is 5 l2 / 4 us per Toffoli for
+    l1 <= 17 (l2 = 21) or l1 <= 19 (l2 = 23): 28.75 for this QPE run and 26.25 for the H4 DF QPE run
+    of 6.73e6 Toffolis on 188 qubits at budget 0.1."""
     qpe = ph.surface_code_cost(233, 19_997_593, fail_budget=0.1)
     assert (qpe.physical_qubits, qpe.distance) == (956_160, 23)
     assert qpe.seconds == pytest.approx(574.93, abs=5e-3) and qpe.failure <= 0.1
@@ -161,7 +163,7 @@ def test_objective_is_monotone_in_toffolis_and_budget():
 
 
 def test_distance_is_not_monotone_in_toffolis_or_budget_and_openfermion_agrees():
-    """Specification section 7's 'd is non-decreasing in N_Tof and in 1/budget' holds for neither: 233
+    """The design specification's 'd is non-decreasing in N_Tof and in 1/budget' holds for neither: 233
     qubits at budget 0.1 take d = 15 (AutoCCZ(9, 15)) for 562 Toffolis and d = 13 (the faster
     AutoCCZ(11, 13), shorter run, less data failure) for 1000; 83 qubits and 5623 Toffolis take d = 25
     (AutoCCZ(13, 23)) at budget 3e-5 and d = 23 (the cleaner AutoCCZ(15, 23), which leaves more of the

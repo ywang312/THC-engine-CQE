@@ -56,24 +56,26 @@ p_j = |<psi_j|Psi>|^2, returns m in {0, ..., 2^t - 1} with probability
 
 and the energy estimate E(m) = c + lambda cos(2 pi m / 2^t). Each F_t sums to 1 over m, so
 P sums to sum_j p_j. When the gap E_1 - E_0 is large against the window, the probability
-of |E(m) - E_0| <= dE is kappa p_0 with kappa set by where theta_0 falls on the grid, the
-same for every state [M3 design, memo 3, V1]; :func:`window_probability` evaluates it.
-Observed on H4 (memo 3, V1 setup: DF H' at threshold 1e-3, lambda_DF = 4.936,
+of |E(m) - E_0| <= dE is w p_0 with the window factor w set by where theta_0 falls on the
+grid, the same for every state [design]; :func:`window_probability` evaluates it.
+Observed on H4 (the setup of the design notes: DF H' at threshold 1e-3, lambda_DF = 4.936,
 c = Tr H'/2^{2N}, t = 15, dE = 1 mHa): the ratio is 0.9861933585 at HF and 0.9861933486
-from k = 4 on along the L-BFGS iterates, a spread of 9.96e-9, the digits of memo 3. The
-k-dependence is the excited-state tails, ratio_k - kappa = sum_{j>=1} p_kj tau_j / p_k0
+from k = 4 on along the L-BFGS iterates, a spread of 9.96e-9, the digits of the design notes
+(tests/test_ft_walk.py::test_window_probability_over_p_is_k_independent). The
+k-dependence is the excited-state tails, ratio_k - w = sum_{j>=1} p_kj tau_j / p_k0
 with single-state window probabilities tau_j <= 3.5e-6 (tested to 1e-12).
 """
 
 from __future__ import annotations
 
 import math
+from typing import Sequence
 
 import numpy as np
 import scipy.special
 
 from ..integrals import ActiveSpace
-from ..measure.pauli import QubitMapping, jw_hamiltonian
+from ..measure.pauli import QubitMapping, QubitState, jw_hamiltonian
 from .primitives import jacobi_anger_degree
 
 __all__ = ["PauliLCUWalk", "qpe_outcome_law", "window_probability"]
@@ -139,7 +141,7 @@ class PauliLCUWalk:
         """W^dagger phi = SELECT R phi (SELECT and R are Hermitian)."""
         return self._select(self._reflect(self._check(phi)))
 
-    def prepare(self, psi_qubit) -> np.ndarray:
+    def prepare(self, psi_qubit: np.ndarray | QubitState) -> np.ndarray:
         """|G> (x) |psi> for a dense system state of length 2^n_qubits (or a ``QubitState``)."""
         psi = np.asarray(psi_qubit.to_dense() if hasattr(psi_qubit, "to_dense") else psi_qubit)
         psi = psi.astype(np.complex128).ravel()
@@ -148,7 +150,7 @@ class PauliLCUWalk:
         return np.outer(self._g, psi)
 
     # ------------------------------------------------------------ observables
-    def moments(self, psi_qubit, nmax: int) -> np.ndarray:
+    def moments(self, psi_qubit: np.ndarray | QubitState, nmax: int) -> np.ndarray:
         """<G, psi| W^n |G, psi> for n = 0..nmax (complex array of nmax + 1 entries)."""
         phi0 = self.prepare(psi_qubit)
         phi = phi0
@@ -159,7 +161,7 @@ class PauliLCUWalk:
                 phi = self.apply(phi)
         return out
 
-    def laurent_evolution(self, psi_qubit, tau: float, delta: float) -> np.ndarray:
+    def laurent_evolution(self, psi_qubit: np.ndarray | QubitState, tau: float, delta: float) -> np.ndarray:
         """sum_{k=-R}^{R} (-i)^k J_k(tau) W^k |G>|psi> with R = R(tau, delta) of F8 (2R walk applications).
 
         Approximates |G> (x) exp(-i tau (H - c0)/lam)|psi> within 2 sum_{k>R} |J_k(tau)| <= delta
@@ -194,7 +196,8 @@ def _fejer_row(M: int, y: float) -> np.ndarray:
     return out
 
 
-def qpe_outcome_law(energies, weights, lam: float, c: float, t_bits: int) -> tuple[np.ndarray, np.ndarray]:
+def qpe_outcome_law(energies: Sequence[float] | np.ndarray, weights: Sequence[float] | np.ndarray, lam: float,
+                    c: float, t_bits: int) -> tuple[np.ndarray, np.ndarray]:
     """Outcome law of textbook QPE with ``t_bits`` control qubits on a qubitized walk: (P(m), E(m)).
 
     Args:

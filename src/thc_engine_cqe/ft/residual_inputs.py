@@ -2,7 +2,7 @@
 
 :func:`build_problem` assembles a :class:`~thc_engine_cqe.ft.residual.ResidualProblem`
 for one state from the pieces below. The per-shot variances and the normalizations are
-computed once per system and reused for every iterate (specification section 6.7); the
+computed once per system and reused for every iterate [design]; the
 exact residual and the aux-route bias are computed per state. States are real CI vectors.
 
 Element sets (:func:`allowed_elements`; F2a)
@@ -44,9 +44,10 @@ Per-shot variances (:func:`element_variances`; F10) [M2]
   sum_e L_e (L_e + 1) / 2 (the count of the schemes' ``method="auto"``) is at most 5e7,
   Rao-Blackwellized sampling of ``params.n_settings`` matchings (seed ``params.seed``)
   above. On the allowed spin-free sets: H4 7.6e6 pairs and N2 2.8e7 (exact), LiH 3.5e8 and
-  H6 2.2e9 (RB). The specification (sections 3 and 6.7) has exact sums for N <= 4 only;
-  that would give N2 a seed-dependent estimate (3730 +- 50 at seed 7, against the exact
-  3751.1) to save 2 s, so the pair count decides instead [deviation].
+  H6 2.2e9 (RB). The design specification had exact sums for N <= 4 only; that would give
+  N2 a seed-dependent estimate (3730 +- 50 at seed 7, against the exact 3751.1) to save 2 s,
+  so the pair count decides instead (changed from the design specification;
+  docs/m3-results.md section 11; tests/test_ft_residual_inputs.py::test_n2_variances_use_exact_pair_sums).
 * w_aux = delta^2 x ``routes.aux_residual_variance(delta=0.1, "exact", ...,
   "matchgate_shadow")``: the aux-route variance at delta is w_aux / delta^2 to O(delta^2)
   (``measure/routes.py``, "Shot cost of the routes").
@@ -96,6 +97,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 
@@ -131,7 +133,7 @@ DF_VARIANTS: dict[str, tuple[dict, bool]] = {
 _TIE_RTOL = 1e-9
 _TIE_ORDER = ("cholesky_shift", "eigh_shift", "cholesky", "eigh")
 
-# delta at which the aux-route variance is evaluated (w_aux = delta^2 v_aux; M3 specification 6.7).
+# delta at which the aux-route variance is evaluated (w_aux = delta^2 v_aux) [design].
 _W_DELTA = 0.1
 # Direct-route variances by exact matchgate pair sums up to this many term pairs
 # (sum_e L_e (L_e + 1) / 2, the count of the schemes' method="auto"), Rao-Blackwellized above.
@@ -207,7 +209,8 @@ class AuxBiasCurve:
 
 
 # ------------------------------------------------------------------------- elements
-def allowed_elements(active: ActiveSpace, kind: str = "spin_free", irreps=None) -> tuple[np.ndarray, np.ndarray]:
+def allowed_elements(active: ActiveSpace, kind: str = "spin_free",
+                     irreps: np.ndarray | Sequence[int] | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Symmetry-allowed rows of ``targets.element_set(N, kind)`` (F2a).
 
     Returns (elements, mask): the allowed rows and the boolean mask over the full
@@ -226,7 +229,7 @@ def allowed_elements(active: ActiveSpace, kind: str = "spin_free", irreps=None) 
     return el[mask], mask
 
 
-def element_normalizations(active: ActiveSpace, elements, kind: str,
+def element_normalizations(active: ActiveSpace, elements: np.ndarray, kind: str,
                            mapping: QubitMapping | None = None) -> dict:
     """LCU normalizations of the AE routes: {"lam_q", "alpha_x", "n_terms_x", "order"}.
 
@@ -245,7 +248,7 @@ def element_normalizations(active: ActiveSpace, elements, kind: str,
             "order": mapping.order}
 
 
-def element_variances(active: ActiveSpace, ci: np.ndarray, elements, kind: str, *,
+def element_variances(active: ActiveSpace, ci: np.ndarray, elements: np.ndarray, kind: str, *,
                       params: FTParameters = FTParameters()) -> dict:
     """Per-shot variances of the two residual routes under matchgate shadows at the state ``ci``.
 
@@ -286,12 +289,13 @@ def element_variances(active: ActiveSpace, ci: np.ndarray, elements, kind: str, 
 
 
 # ------------------------------------------------------------------------- biases
-def _aux_bias_values(active: ActiveSpace, ci: np.ndarray, el: np.ndarray, kind: str, deltas,
+def _aux_bias_values(active: ActiveSpace, ci: np.ndarray, el: np.ndarray, kind: str, deltas: Sequence[float],
                      a: np.ndarray, m: np.ndarray) -> np.ndarray:
     return np.array([_norm_m(routes.aux_residual(active, ci, d, "exact", el, kind) - a, m) for d in deltas])
 
 
-def aux_bias_curve(active: ActiveSpace, ci: np.ndarray, elements, kind: str, deltas) -> np.ndarray:
+def aux_bias_curve(active: ActiveSpace, ci: np.ndarray, elements: np.ndarray, kind: str,
+                   deltas: Sequence[float]) -> np.ndarray:
     """||routes.aux_residual(delta, "exact") - routes.exact_residual||_m per delta (Hartree).
 
     The exact bias of the aux route on exp(-i delta H) Psi, weighted by the multiplicities;
@@ -303,7 +307,7 @@ def aux_bias_curve(active: ActiveSpace, ci: np.ndarray, elements, kind: str, del
     return _aux_bias_values(active, ci, el, kind, np.atleast_1d(np.asarray(deltas, dtype=float)), a, m)
 
 
-def factorization_bias(active: ActiveSpace, active_model: ActiveSpace, ci: np.ndarray, elements,
+def factorization_bias(active: ActiveSpace, active_model: ActiveSpace, ci: np.ndarray, elements: np.ndarray,
                        kind: str) -> float:
     """||A[H'](Psi) - A[H](Psi)||_m (Hartree) for the model ``active_model`` (e.g. ``active.with_eri(eri_DF)``)."""
     if active_model.norb != active.norb or active_model.nelec != active.nelec:
@@ -337,8 +341,8 @@ def energy_variances(active: ActiveSpace, ci: np.ndarray) -> dict:
 
 
 # ------------------------------------------------------------------------- problem
-def build_problem(active: ActiveSpace, ci: np.ndarray, elements, kind: str, *, variances: dict,
-                  normalizations: dict, deltas=None) -> ResidualProblem:
+def build_problem(active: ActiveSpace, ci: np.ndarray, elements: np.ndarray, kind: str, *, variances: dict,
+                  normalizations: dict, deltas: Sequence[float] | None = None) -> ResidualProblem:
     """The :class:`~thc_engine_cqe.ft.residual.ResidualProblem` of the state ``ci``.
 
     A comes from ``routes.exact_residual``; ``variances`` (:func:`element_variances`) and

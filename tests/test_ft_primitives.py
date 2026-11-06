@@ -1,10 +1,10 @@
 """Tests of the M3 primitives (``thc_engine_cqe.ft.primitives``): parameters, phase-gradient bits and
 rounding (F1, F2), the Jacobi-Anger degree and GQSP costs (F8), and amplitude-estimation counts (F11).
 
-References independent of the module: the reference numbers of the M3 specification (Appendix A,
-recomputed by the critic's ``misc_check.py``), brute-force evaluations of the defining inequalities,
-complex exponentials, and the truncated Jacobi-Anger series summed with ``scipy.special.jv`` against
-``numpy.exp``.
+References independent of the module: the reference numbers of Appendix A (docs/m3-cost-model.md;
+recomputed for the design by an independent script [design]), brute-force evaluations of the
+defining inequalities, complex exponentials, and the truncated Jacobi-Anger series summed with
+``scipy.special.jv`` against ``numpy.exp``.
 """
 
 import dataclasses
@@ -17,7 +17,7 @@ import scipy.special
 from thc_engine_cqe.ft import primitives as pr
 from thc_engine_cqe.ft.primitives import FTParameters
 
-# Specification section 3: every field and its default.
+# The parameters of docs/m3-cost-model.md ("Parameters"): every field and its default.
 SPEC_DEFAULTS = {
     "delta_step": 1e-3, "delta_readout": 1e-5, "b_min": 4, "chi": 10, "beta": 16, "eps_evol": 1e-6,
     "r": 0.3, "kind": "spin_free", "kappa": 1.0, "kappa_practical": 2.0, "kappa_g": (1.0, 10.0, 100.0),
@@ -30,7 +30,7 @@ SPEC_DEFAULTS = {
 
 
 def _ja_degree_brute(tau: float, delta: float) -> int:
-    """R by the definition, summing |J_j| over j = R+1 .. R+60 term by term (as misc_check.py)."""
+    """R by the definition, summing |J_j| over j = R+1 .. R+60 term by term (as the design's check [design])."""
     for r in range(400):
         if 2.0 * sum(abs(scipy.special.jv(j, tau)) for j in range(r + 1, r + 61)) <= delta:
             return r
@@ -38,7 +38,7 @@ def _ja_degree_brute(tau: float, delta: float) -> int:
 
 
 def test_parameters_have_the_spec_defaults_and_are_frozen():
-    """Every field of specification section 3 exists with its default (the binding table, typed in
+    """Every field of the parameter table of docs/m3-cost-model.md exists with its default (typed in
     here), the dataclass is frozen, and the line-search candidates are 0.00625 * 2^j, j = 0..10 (the M2
     hardware rule, benchmarks/run_optimizers.py)."""
     p = FTParameters()
@@ -67,8 +67,8 @@ def test_parameters_reject_invalid_values(bad):
 
 
 def test_phase_gradient_bits_reference_values():
-    """b = 15 / 18 / 21 for A = 10 / 64 / 393 additions at delta = 1e-3 (specification section 7; the
-    H4 and H6 step counts of Appendix A), and on a grid b is the smallest integer >= b_min with
+    """b = 15 / 18 / 21 for A = 10 / 64 / 393 additions at delta = 1e-3 (the H4 and H6 step counts of
+    Appendix A), and on a grid b is the smallest integer >= b_min with
     A pi / 2^b <= delta, found here by brute force. b_min < 3 raises: the result sizes an adder, and
     addition_toffolis rejects fewer than 3 bits."""
     assert [pr.phase_gradient_bits(a, 1e-3) for a in (10, 64, 393)] == [15, 18, 21]
@@ -94,7 +94,7 @@ def test_phase_gradient_bits_reference_values():
 
 def test_addition_toffolis():
     """b - 2 Toffolis per phase-gradient addition (OpenFermion's cost4df = 4 n (beta - 2)); fewer than
-    3 bits raise (specification section 6.1)."""
+    3 bits raise (an adder needs 3 bits)."""
     assert pr.addition_toffolis(16) == 14
     assert pr.addition_toffolis(3) == 1
     for bad in (2, 0, 3.5):
@@ -125,7 +125,7 @@ def test_rounding_error_is_bounded_by_pi_over_2b():
 def test_jacobi_anger_reference_degrees():
     """R(tau, delta) of Appendix A: 3, 4, 5, 6 at tau = 0.2, 0.5, 0.79, 1.16 (delta = 1e-4) and 14, 17
     at tau = 4.87, 6.81 (delta = 1e-6), and agreement with a brute-force evaluation of the definition
-    (term-by-term Bessel sums, as the critic's misc_check.py) on random (tau, delta)."""
+    (term-by-term Bessel sums, as the design's check [design]) on random (tau, delta)."""
     ref = {(0.2, 1e-4): 3, (0.5, 1e-4): 4, (0.79, 1e-4): 5, (1.16, 1e-4): 6, (4.87, 1e-6): 14,
            (6.81, 1e-6): 17}
     for (tau, delta), r in ref.items():

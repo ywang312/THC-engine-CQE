@@ -208,7 +208,7 @@ def spin_weight(c: np.ndarray, norb: int, nelec: tuple[int, int], s: int) -> flo
 def test_replay_first_three_steps(name):
     """Compiled replay of the first three exact L-BFGS steps: the rounded and unrounded circuits differ by
     at most sum_j A_j pi / 2^{b_j}; every state keeps unit norm in its (n_alpha, n_beta) sector (no leakage,
-    1e-12); the unrounded first step is within 5e-3 of the exact Psi_1 (memo 1: 1.2e-3 to 2.0e-3; the
+    1e-12); the unrounded first step is within 5e-3 of the exact Psi_1 ([design]: 1.2e-3 to 2.0e-3; the
     elementwise product error); and the ground-state overlap after it is within 1e-3 of the exact one."""
     tr = trajectory(name, 3)
     act, ir = tr["active"], tr["irreps"]
@@ -261,13 +261,13 @@ def test_compiled_replay_reaches_chemical_accuracy_at_k_star():
 def test_first_step_product_error_and_spin_contamination(name, error, p_compiled, s2, quintet):
     """The compiled RHF step on all seven systems (H8 too: testing.fock allows 8 orbitals). The replay equals
     expm_multiply of the kept excitations at the rounded angles (an independent reference) to 1e-12. Against
-    the exact Psi_1 of run_cqe, the regression values of the circuits module docstring, which the reviewer's
-    own replay (own expansion, character mask and F3) reproduced: the state error (rel 1e-3), the
+    the exact Psi_1 of run_cqe, the regression values of the circuits module docstring, which an independent
+    replay (its own expansion, character mask and F3) reproduced [build check]: the state error (rel 1e-3), the
     ground-state overlap of the compiled state (1e-5), <S^2> from PySCF's spin_square (2%; 0 for the exact
     Psi_1) and the quintet share of ||Psi~_1 - Psi_1||^2 (projectors from PySCF's S^2; 2e-3; the rest is
     singlet, apart from 0.2% triplet for LiH). The stretched builds (h6s, n2s) have a product-formula error
-    20-30 times larger than the equilibrium ones, and the product breaks S^2: the elementwise cost model
-    budgets neither."""
+    20 and 16 times that of the equilibrium build of the same molecule (h6a, n2), 27 and 31 times
+    delta_step, and the product breaks S^2: the elementwise cost model budgets neither."""
     tr = trajectory(name, 1)
     act, ir = tr["active"], tr["irreps"]
     n, nelec = act.norb, tuple(act.nelec)

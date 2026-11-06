@@ -5,8 +5,8 @@ here build the pieces explicitly on small registers, so that tests/test_ft_circu
 can check the counting assumptions against independent references. Qubit layout and
 basis order are those of ``diagnostics.cost`` and ``testing.fock``: Jordan-Wigner with
 the blocked spin order (spin orbital (p, alpha) is qubit p, (p, beta) is qubit N + p),
-basis index bit k = qubit k. Tags as in the M3 specification ([derived], [cited],
-[OF]); F1-F19 are its formula tags.
+basis index bit k = qubit k. The tags ([derived], [cited], [OF]) and the formula labels
+F1-F19 are those of docs/m3-cost-model.md.
 
 Phase-gradient excitations (:func:`pg_excitation_unitary`, F1, F3) [derived]
 --------------------------------------------------------------------------
@@ -100,9 +100,10 @@ open loop, one thread; tests/test_ft_circuits.py). After the RHF step:
 The error is mostly product-formula error (rounding contributes <= 2.1e-4). The exact
 Psi_1 has <S^2> = 0; the quintet share is the part of ||Psi~_1 - Psi_1||^2 in the S = 2
 sector (projectors from PySCF's S^2), and the rest is singlet, apart from the 0.2%
-triplet of LiH. The stretched builds have a product-formula error 20-30 times larger
-than the equilibrium ones, 27 and 31 times delta_step, which the elementwise cost model
-does not budget (``stateprep``: flag "product-formula error not in budget"); on N2 at
+triplet of LiH. The stretched builds have a product-formula error 20 (H6) and 16 (N2)
+times that of the equilibrium build of the same molecule, 27 and 31 times delta_step,
+which the elementwise cost model does not budget (``stateprep``: flag "product-formula
+error not in budget"); on N2 at
 2.0 A already the exact step lowers the overlap. On the core systems the open-loop
 error stays below 3.2e-3 up to k* + 2, and the compiled circuits reach 1.6 mHa at the
 exact k* (3, 6, 3, 2 for H4, H6, N2, LiH).

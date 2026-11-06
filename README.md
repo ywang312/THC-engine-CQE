@@ -51,6 +51,28 @@ measurements, and replaces steepest descent with better optimizers.
 
 Results and conclusions of M2 are in [docs/m2-results.md](docs/m2-results.md).
 
+## Status: milestone 3 (complete)
+
+M3 asks what the CQE costs on a fault-tolerant machine, and what it is worth as a state
+preparer for QPE. `thc_engine_cqe.ft` is a resource-estimation layer (Toffolis, logical
+qubits, surface-code footprint and wall clock), not a compiler.
+
+| Component | Module | State |
+|---|---|---|
+| Budgets, phase-gradient rotations, GQSP time evolution, amplitude estimation | `ft.primitives` | done |
+| Symmetry-adapted benchmark systems, orbital irreps, point-group masks | `ft.symmetry` | done |
+| State preparation of the CQE iterates: elementwise and DF-leaf steps, cumulative costs | `ft.stateprep` | done |
+| Validation circuits: phase-gradient excitations, Givens rotations, compiled replay | `ft.circuits` | done |
+| Surface-code footprint and wall clock (OpenFermion's model) | `ft.physical` | done |
+| Residual and energy measurement: matchgate sampling, per-element amplitude estimation, gradient estimation, line search | `ft.residual`, `ft.residual_inputs` | done |
+| DF, THC and SF block encodings and QPE costs; a qubitized-walk emulator | `ft.qpe`, `ft.walk` | done |
+| Exact trajectories with overlaps and E₁, the classical second-order first step; the hand-off to QPE; the CQE-only energy | `ft.trajectory`, `ft.handoff` | done |
+| Iteration costs, machine schedules, per-system reports, tables T1–T9 | `ft.pipeline` | done |
+
+Results and conclusions of M3 are in [docs/m3-results.md](docs/m3-results.md); the cost
+model (parameters, formulas F1–F19, reference numbers) is in
+[docs/m3-cost-model.md](docs/m3-cost-model.md).
+
 ## Install
 
 ```bash
@@ -60,8 +82,11 @@ python -m venv .venv
 ```
 
 Requires Python ≥ 3.10, NumPy, SciPy, PySCF and h5py. The `ft` extra installs
-OpenFermion, which the λ, `df.factorize` and THC-cost cross-checks compare
-against (they are skipped without it); the suite takes about a minute.
+OpenFermion. The λ, `df.factorize` and THC-cost cross-checks compare against it,
+and M3 takes its QPE costs from OpenFermion's resource estimates (`ft.qpe`), so
+`ft.pipeline` and the M3 benchmark need it; tests that need it are skipped
+without it. The whole suite takes about 4 minutes on one thread;
+`-m "not slow"` skips the slowest checks.
 
 ## Quick start
 
@@ -98,6 +123,20 @@ print(thc.lam(h4.h1, eri_exact=h4.eri).lam_total, df.lam(h4.h1, eri_exact=h4.eri
 h4_thc = thc.apply_to(h4)              # ActiveSpace with the THC integrals
 ```
 
+M3: the fault-tolerant costs of one benchmark system, end to end (needs the `ft` extra):
+
+```python
+from thc_engine_cqe.ft import pipeline
+
+rep = pipeline.run_system("h4", optimizers=["lbfgs"])   # about 5 s on one thread
+s = pipeline.report_summary(rep)
+print(s["qpe_kind"], s["c_qpe"])       # selected (cheapest admissible) QPE encoding, its Toffolis
+fam = s["families"]["lbfgs"]
+print(fam["k_star"]["exact"])          # first L-BFGS iterate within 1.6 mHa
+print(fam["handoff"]["classical_first_step"]["expected"])  # optimal hand-off, in units of C_QPE
+print(pipeline.markdown_tables([rep]))                     # tables T1-T9 for this system
+```
+
 ## Benchmarks
 
 M1:
@@ -116,6 +155,12 @@ M2:
 .venv/bin/python benchmarks/run_sampled_cqe.py --threads 1 --out results/
 ```
 
+M3 (needs the `ft` extra):
+
+```bash
+.venv/bin/python benchmarks/run_ft_pipeline.py --threads 1 --out results/
+```
+
 Each writes JSON and markdown tables to `results/` (not tracked). Approximate
 single-thread runtimes:
 
@@ -127,6 +172,7 @@ single-thread runtimes:
 | `run_linearized.py` | about 20 s (add `--long-iters 2000` for the long N2 runs) |
 | `run_measurement.py` | about 1 hour (H6 alone half of it); `--quick` < 2 minutes |
 | `run_sampled_cqe.py` | about 65 minutes; `--quick` < 3 minutes |
+| `run_ft_pipeline.py` | about 5–6 minutes; `--systems h4` about 15 s |
 
 `--threads 1` pins the BLAS and PySCF threads, so the numbers are reproducible.
 

@@ -2,8 +2,8 @@
 
 References: the exact spectrum of the dense (n_alpha, n_beta) CI Hamiltonian, the
 Jordan-Wigner Fock-space oracle (``testing.fock``) for Tr H, ``factor.pauli_lambda`` for the
-Pauli 1-norm, dense matrix exponentials, direct DFT sums for the Fejer kernel, and memo 3's
-QPE emulation (V1) for the outcome-law constant.
+Pauli 1-norm, dense matrix exponentials, direct DFT sums for the Fejer kernel, and the QPE
+emulation of the design notes [design] for the outcome-law constant.
 """
 
 from __future__ import annotations
@@ -166,10 +166,10 @@ def test_outcome_law_argument_checks():
 def test_window_probability_over_p_is_k_independent():
     """H4, DF H' (threshold 1e-3), lambda_DF, c = Tr H'/2^{2N}, t = 15: P(|E(m) - E0'| <= 1 mHa)/p_k is constant.
 
-    The setup is memo 3's V1; the ratio reproduces its kappa = 0.98619336 and is
-    k-independent to 1e-8 over the L-BFGS iterates k = 0..6 (memo 3: spread 9.96e-9). The
-    residual k-dependence is exactly the excited-state tails: ratio_k - kappa =
-    sum_{j>=1} p_kj tau_j / p_k0 with kappa, tau_j the window probabilities of single
+    The setup is that of the design notes [design]; the ratio reproduces their window factor w = 0.98619336
+    and is k-independent to 1e-8 over the L-BFGS iterates k = 0..6 (design notes: spread 9.96e-9). The
+    residual k-dependence is exactly the excited-state tails: ratio_k - w =
+    sum_{j>=1} p_kj tau_j / p_k0 with w, tau_j the window probabilities of single
     eigenstates (to 1e-12).
     """
     a = symmetry.benchmark_system("h4")

@@ -6,9 +6,12 @@ Pure functions of numbers and arrays. The current state is described by its circ
 (:class:`WalkParams`: lambda, Toffolis C_W of one controlled walk step, logical qubits
 Q_walk; from ``ft.qpe``), and the residual by the per-element inputs of a
 :class:`ResidualProblem` (built from the M2 measure layer by ``ft.residual_inputs``).
-Every function takes ``params: FTParameters`` (``ft.primitives``); formula tags F1-F19
-and the tags [OF], [derived], [cited], [estimate], [assumption] are those of
-``ft.primitives``.
+The six route functions, :func:`compare_routes`, :func:`line_search_cost` and
+:func:`crossover_norm` take ``params: FTParameters`` (``ft.primitives``);
+:func:`variance_budget`, :func:`ae_allocation`, :func:`best_route`, :func:`energy_sampling`
+and :func:`energy_ae` take the constants they use as arguments. The formula labels F1-F19 and
+the tags ([OF], [derived], [cited], [estimate], [assumption], [design], [build check]) are
+those of docs/m3-cost-model.md.
 
 Units: Toffolis; A, its norms and biases in Hartree; per-shot variances v_e of the
 estimators of A_e in Ha^2. A *preparation* is one application of U_k or U_k^dagger
@@ -49,29 +52,31 @@ Sampling routes (F10)
   Q = Q(Psi_k) + Q_walk + 1 - 2N (the evolution's register shares the 2N system qubits)
   [estimate].
 
-Per-element amplitude estimation (F11) [derived; kappa verified]
----------------------------------------------------------------
+Per-element amplitude estimation (F11) [derived]
+------------------------------------------------
 A Hadamard-test circuit 𝒜 on Q_A,e = Q(Psi_k) + Q_obs,e + 1 logical qubits (the last one
 the Hadamard-test qubit), with success probability p = (1 + <O_e>/alpha_e)/2, is iterated
 with G = 𝒜 S_0 𝒜^dagger S_good, whose reflections alone are controlled; sine-window phase
-estimation gives sigma(<O_e>) <= kappa pi alpha_e / M with M applications of G, i.e.
+estimation gives sigma(<O_e>) <= kappa pi alpha_e / M with M applications of G (kappa:
+tests/test_ft_residual.py::test_ae_constant_from_sine_window_phase_estimation), i.e.
 N_e = 2 pi kappa alpha_e / eps_e applications of 𝒜 or 𝒜^dagger (``primitives.ae_applications``;
 canonical AE: [cited: Brassard, Hoyer, Mosca, Tapp, Contemp. Math. 305, 53 (2002)]).
 Minimizing sum_e N_e under sum_e m_e eps_e^2 = B^2 gives eps_e proportional to
 (alpha_e / m_e)^(1/3) and (:func:`ae_allocation`)
 
-    N = sum_e N_e = 2 pi kappa Gamma / B,      Gamma = (sum_e m_e^(1/3) alpha_e^(2/3))^(3/2).
+    N_A = sum_e N_e = 2 pi kappa Gamma / B,    Gamma = (sum_e m_e^(1/3) alpha_e^(2/3))^(3/2).
 
 Element e is one coherent run of N_e applications on Q_run,e = Q_A,e + ceil(log2(N_e / 2))
 logical qubits (the phase register). Each application costs C(Psi_k) + C_obs,e + Q_A,e / 2;
 the last term is the controlled reflection S_0 about |0> on the qubits of 𝒜, a
 multi-controlled Z of about Q_A,e Toffolis once per G, i.e. per two applications
-[estimate]. So T = sum_e N_e (C(Psi_k) + C_obs,e + Q_A,e / 2), and the longest coherent run
-is the largest summand. Deviation from specification F11 [derived]: F11 writes the
-reflection term as Q_run,e / 2, which also counts the phase register, on which S_0 does
-not act (half a Toffoli per register qubit and application more, at most 0.7% of an
-application at the H4 smoke-run states below); and its longest run, like the AE time of
-F19, leaves the term out, although its T contains it. The three observables (C_Q = 4
+[estimate]. So T = sum_e N_e (C(Psi_k) + C_obs,e + Q_A,e / 2), the summands are the runs
+(``RouteCost.run_toffolis``, which the wall clock of ``ft.pipeline`` schedules), and the
+longest coherent run is the largest summand. Changed from the design specification [derived]
+(docs/m3-results.md section 11): it wrote the reflection term as Q_run,e / 2, which also counts
+the phase register, on which S_0 does not act (half a Toffoli per register qubit and application
+more, at most 0.7% of an application at the H4 SD states below); and its longest run, like the
+AE time of F19, left the term out, although its T contained it. The three observables (C_Q = 4
 Toffolis for spin-orbital, 16 for spin-free Q_e [estimate]; every Q_obs [estimate]):
 
     route        alpha_e              C_obs,e               Q_obs                       bias
@@ -93,15 +98,16 @@ SODA 2019 (arXiv:1711.00465); Huggins et al., PRL 129, 240501 (2022)]
 Formulation "aux" (Huggins et al. on {Q_e} measured on exp(-i delta H') Psi_k,
 alpha_e = lambda_Q,e / delta), for K elements in n_B equal blocks:
 
-    N = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B,
-    T = N (C(Psi_k) + C_evol(delta) + C_probe / n_B),   C_probe = K (2 b_theta + 2),
+    N_GE = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B,
+    T = N_GE (C(Psi_k) + C_evol(delta) + C_probe / n_B),   C_probe = K (2 b_theta + 2),
 
 plus ceil(K / n_B) b_theta logical qubits for the probe angles (b_theta >= 3, the smallest
 phase-gradient adder). C_obs is C_evol(delta) alone: the Q_e enter only through the
-probe prod_e exp(-i x_e Q_e / lambda_Q,e), whose cost C_probe contains them [memo 2,
-route c2], so the C_Q of the Hadamard-test block encoding of b3 has no counterpart
-(specification F12 leaves C_obs implicit; with C_Q it would be 16 Toffolis more per
-query, below 0.1%). kappa_g is unknown; the route is reported for the band
+probe prod_e exp(-i x_e Q_e / lambda_Q,e), whose cost C_probe contains them [design],
+so the C_Q of the Hadamard-test block encoding of b3 has no counterpart (the design
+specification left C_obs of F12 implicit; with C_Q it would be 16 Toffolis more per
+query, at most 0.17% on the benchmark records: h4 at HF, delta = 0.4, 9514 Toffolis per
+query). kappa_g is unknown; the route is reported for the band
 ``params.kappa_g`` and never selected by :func:`best_route`.
 
 Line search and energies (F13)
@@ -130,7 +136,10 @@ iterate 3 at kappa = 1 (4.3e8 against 5.2e8 for sampling; 1.4e9 against 4.2e9 at
 5), from iterate 4 at kappa = 2; the aux sampling route is last throughout. The line
 search (V_E = 0.56-0.61 Ha^2) costs 0.8e9-1.6e10 Toffolis, 11-605 times the cheapest
 residual at iterates 1-5. The reflection term Q_A / 2 is at most 9.6% of an AE
-application (ae_product at iterate 1), 2.6% for ae_x.
+application (ae_product at iterate 1), 2.6% for ae_x. On the benchmark records, with the
+selected walks, it reaches 14% (ae_product, h4 at HF on the SF walk, C_W = 384: 67 of 467
+Toffolis), and dropping the phase register from it changes T by at most 1.35%
+(docs/m3-cost-model.md, F11).
 
 Flags: "infeasible" (B = 0), "estimate" (a Toffoli or qubit count above is an estimate:
 every route but ``direct_mg`` and the sampled energies), "assumption" (gradient
@@ -385,6 +394,10 @@ class RouteCost:
             ``delta``, ``kappa``, ``kappa_g``, ``n_blocks``, ``c_obs``, ...
         flags: "infeasible", "estimate", "assumption", "no_aux_bias", "qubits_upper_bound",
             "qubits_lower_bound" (module docstring).
+        run_toffolis: Toffolis of each run when the runs differ: the AE routes, one run per
+            element with N_e > 0, in element order (they sum to ``toffolis``, the largest is
+            ``coherent_toffolis``); empty for identical runs (shots, gradient-estimation
+            blocks, one energy_ae run) and for infeasible routes.
     """
 
     route: str
@@ -396,6 +409,7 @@ class RouteCost:
     logical_qubits: int
     params: dict
     flags: tuple[str, ...] = ()
+    run_toffolis: tuple[float, ...] = ()
 
 
 def _infeasible(route: str, logical_qubits: int, params: dict, flags: tuple[str, ...]) -> RouteCost:
@@ -535,7 +549,8 @@ def _ae_route(route: str, problem: ResidualProblem, prep: PrepParams, *, alpha: 
     info.update(budget=budget, gamma=gamma_over_b * budget, max_applications=float(n_e.max()))
     return RouteCost(route, n_total, t_total, t_total / n_total if n_total > 0 else math.nan,
                      float(run.max()), float(np.count_nonzero(runs)),
-                     int(q_run[runs].max() if runs.any() else q_circuit.max()), info, flags)
+                     int(q_run[runs].max() if runs.any() else q_circuit.max()), info, flags,
+                     run_toffolis=tuple(run[runs].tolist()))
 
 
 def ae_product(problem: ResidualProblem, prep: PrepParams, walk: WalkParams, *,
@@ -595,10 +610,10 @@ def gradient_estimation(problem: ResidualProblem, prep: PrepParams, walk: WalkPa
                         params: FTParameters = FTParameters()) -> RouteCost:
     """Gradient-estimation band, formulation "aux" (F12) [assumption], delta optimized.
 
-    N = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B with
-    alpha_e = lambda_Q,e / delta; T = N (C(Psi_k) + C_evol(delta) + C_probe / n_B),
+    N_GE = 2 pi kappa_g sqrt(K) sqrt(n_B) (sum_e m_e alpha_e^2)^(1/2) / B preparations with
+    alpha_e = lambda_Q,e / delta; T = N_GE (C(Psi_k) + C_evol(delta) + C_probe / n_B),
     C_probe = K (2 b_theta + 2), which contains the Q_e (no separate C_Q; module
-    docstring). Each of the n_B blocks is one coherent run of N / n_B preparations;
+    docstring). Each of the n_B blocks is one coherent run of N_GE / n_B preparations;
     Q = Q(Psi_k) + Q_walk + 1 - 2N + ceil(K / n_B) b_theta [estimate]. ``b_theta``, the
     bits of a probe angle, must be at least 3 (a phase-gradient adder, F1).
     """
@@ -730,13 +745,14 @@ def energy_ae(walk: WalkParams, prep: PrepParams, *, eps: float, kappa: float = 
     """Amplitude-estimated energy of H' to RMS error ``eps`` (Hartree), F13 option.
 
     The Hadamard test on the controlled walk step has alpha = lambda, so
-    N = 2 pi kappa lambda / eps applications (F11) of C(Psi_k) + C_W + Q_A / 2 Toffolis
+    N_E = 2 pi kappa lambda / eps applications (F11) of C(Psi_k) + C_W + Q_A / 2 Toffolis
     (the reflection S_0 on the Q_A = Q(Psi_k) + Q_walk - 2N + 1 qubits of the Hadamard-test
-    circuit), one coherent run on Q_run = Q_A + ceil(log2(N / 2)) qubits (with the phase
-    register; ``norb`` = N, the state and the walk share the 2N system qubits).
+    circuit), one coherent run on Q_run = Q_A + ceil(log2(N_E / 2)) qubits (with the phase
+    register; ``norb`` = N, the active orbitals: the state and the walk share the 2N system
+    qubits).
     ``norb=None`` counts the system register twice (an upper bound by 2N, flag
-    "qubits_upper_bound"). The estimate is the energy of H' (bias E(H') - E(H), not
-    counted).
+    "qubits_upper_bound"). The estimate is the energy of H' in the measured state (bias
+    <Psi|H' - H|Psi>, not counted; not the ground-state de_fact of the encoding).
     """
     kappa = _real("kappa", kappa, positive=True)
     eps = _real("eps", eps, positive=True)

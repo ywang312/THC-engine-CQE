@@ -28,20 +28,18 @@ Psi_k). The exact residual is still recorded (``residual_norms``).
 
 First step (``first_step``). "exact" (default) is the trajectory above: step 0 takes the
 exact line search eps* along d_0, as a measured loop would (F14, "measured"). "second_order"
-is the input of the classical-first-step loop (F14, F16): Psi_1 = exp(eps_2 G_0) HF with the
-classical step eps_2 of :func:`second_order_step` along the same d_0 (masked like the run),
-so row 1 (Psi_1, E_1, sigma_1^2, ||A_1||, p_1) and eps_0 = eps_2 are those of the classical
-step. The later steps of that protocol run the optimizer from Psi_1 with the pair or
-conjugacy memory of step 0. ``run_cqe`` takes an optimizer name, not a seeded optimizer
-object, so this can be computed exactly only for the memoryless "sd": its steps 1..K-1 are
-``run_cqe`` from Psi_1. For "cg" and "lbfgs" a restart from Psi_1 would drop the memory of
-step 0 and change later steps by more than eps_2 - eps* does (below), so rows k >= 2 and
-steps j >= 1 are those of the exact trajectory (flag "steps_from_exact_trajectory"): they
-are not produced by the recorded steps from the classical Psi_1, and C(Psi_k) of
-``ft.stateprep`` for k >= 2 combines the classical step 0 with the exact later steps.
+is the input of the classical-first-step loop (F14, F16): step 0 takes the classical step
+eps_2 of :func:`second_order_step` along the run's own d_0 (masked like the run), through
+``run_cqe(..., first_eps=eps_2)``, and the later steps search as usual. The optimizer
+records the forced step like any other, so CG and L-BFGS keep the step-0 pair or conjugacy
+memory, and every row k >= 1 is the exact continuation after the classical step: row 1
+(Psi_1, E_1, sigma_1^2, ||A_1||, p_1) and eps_0 = eps_2 are those of the classical step, and
+C(Psi_k) of ``ft.stateprep`` compiles the steps that produced the recorded states. A restart
+from Psi_1 would drop the step-0 memory and change later steps by more than eps_2 - eps*
+does (below).
 
-Spectrum (S15) [derived]
-------------------------
+Spectrum (the E1 of F15) [derived]
+----------------------------------
 ``active.fci(nroots=n_roots, spin_square=0)`` gives the lowest singlet roots; psi_0 is the
 first. E1_any is the second root. E1 (same irrep) is the energy of the first root above
 psi_0 that has the irrep of psi_0 (``ft.symmetry.ci_irrep``). Degenerate roots of
@@ -52,13 +50,15 @@ the irrep g iff the largest eigenvalue of C^T P_g C exceeds 1/2, with C the grou
 vectors and P_g the projector on the determinants of irrep g (0 or 1 for an exactly
 degenerate subspace of symmetry-pure states). E1 is then the lowest energy of that group,
 a lower bound on the same-irrep root by at most the group's width. For roots of one irrep
-each this is the rule of the specification. If none of the n_roots roots qualifies, E1 is
+each this is the per-root rule of the design specification (docs/m3-results.md section 11;
+tests/test_ft_trajectory.py::test_e1_degenerate_roots_are_tested_as_a_subspace). If none of
+the n_roots roots qualifies, E1 is
 replaced by the highest root, a lower bound on it (flag "e1_lower_bound"); without irreps
 E1 = E1_any (flag "e1_any_irrep"), also a lower bound. Lower bounds keep the certificate of
 ``ft.handoff`` valid.
 
-Classical first step (F16) [derived; memo 1, memo 3]
----------------------------------------------------
+Classical first step (F16) [derived]
+------------------------------------
 At the RHF determinant A_0 is known in closed form, A_ovov = 4(ia|jb) - 2(ib|ja) [M1,
 docs/m1-results.md section 3], so the first direction d_0 = M conj(A_0) needs no
 measurement. Along
@@ -101,26 +101,27 @@ overlaps to 1e-6, k*) and checks E1 against PySCF's symmetry-adapted FCI to 1e-8
 The second-order step is within 3% of the exact line search at equilibrium, not for the
 stretched systems (h6s, n2s). E''(0) agrees with the Richardson difference to <= 2.1e-9
 (relative) on all seven. The projection leaves the equilibrium trajectories unchanged:
-over the first 7 steps the energies agree with the critic's unprojected runs to 1e-11
+over the first 7 steps the energies agree with unprojected runs [build check] to 1e-11
 (h4), 7e-10 (h6a) and 3e-10 Ha (n2), the overlaps to 2e-8. On n2s, where the unprojected
 run leaks 1.9e-4 of its weight out of the HF irrep, the projected run ends at 5.71 mHa
-after 20 steps against 7.31 mHa. Cost per system (one thread): the 12 FCI roots 0.10 / 1.45 / 1.17 / 0.54 / 2.57
-/ 1.44 / 5.44 s (h4, h6a, n2, lih, h6s, n2s, h8), the 20 steps 0.07-0.27 s (h8 3.2 s, with
-or without the projection; timings on a shared machine).
+after 20 steps against 7.31 mHa. Cost per system (one thread): the 12 FCI roots 0.10 /
+1.45 / 1.17 / 0.54 / 2.57 / 1.44 / 5.44 s (h4, h6a, n2, lih, h6s, n2s, h8; ``roots`` lets a
+caller with several records of one system solve once), the 20 steps 0.07-0.27 s (h8 3.2 s,
+with or without the projection; timings on a shared machine).
 
 ``first_step="second_order"`` (L-BFGS as above): E_1 - E_0 = 21.515 / 37.986 / 35.243 /
 3.461 / 88.585 / 224.119 / 47.550 mHa and p_1 = 0.98039 / 0.95801 / 0.96357 / 0.99411 /
 0.88310 / 0.24327 / 0.94581 (h4, h6a, n2, lih, h6s, n2s, h8), against 21.504 / 37.956 /
 35.209 / 3.455 / 84.900 / 212.223 / 47.515 mHa and 0.98023 / 0.95763 / 0.96350 / 0.99401 /
-0.87223 / 0.23144 / 0.94542 after the exact step. The protocol with the memory of step 0
-(L-BFGS seeded with the pair (eps_2 d_0, grad_1 - grad_0), emulated in a scratch script by
-handing run_cqe a pre-seeded optimizer) has the same k* as the exact trajectory on all
-seven systems; its rows k = 2..6 differ from the exact ones, i.e. from this record, by
-<= 0.010 mHa and <= 1.4e-4 in p_k at equilibrium (h4, h6a, n2, lih, h8), by <= 0.45 mHa
-and 1.4e-3 on h6s, and by up to 30 mHa and 0.11 on n2s. An L-BFGS restart from Psi_1
-instead lies 3.4-7.6 mHa above the seeded protocol at k = 2 at equilibrium (h4, h6a, n2,
-h8; 0.24 mHa on lih) and needs one more step on n2 (k* = 4); on n2s neither is close (the
-restart deviates by up to 23 mHa).
+0.87223 / 0.23144 / 0.94542 after the exact step. The continuation has the same k* as the
+exact trajectory on all seven systems, and its rows k >= 2 differ from the exact ones by
+<= 0.010 mHa and <= 1.4e-4 in p_k at equilibrium (h4, h6a, n2, lih, h8), by <= 0.45 mHa and
+1.4e-3 on h6s, and by up to 30 mHa and 0.11 on n2s (with metric "spin_orbital":
+<= 0.012 mHa and 3.5e-5, 0.41 mHa and 3.7e-3, 14.5 mHa and 0.034). A plain
+L-BFGS restart from Psi_1, which loses the step-0 pair, lies 3.4-7.6 mHa above the
+continuation at k = 2 at equilibrium (h4, h6a, n2, h8; 0.24 mHa on lih) and needs one more
+step on n2 (k* = 4); on n2s it deviates by up to 23 mHa. For the memoryless "sd" the
+continuation and the restart coincide (to the printed 1e-3 mHa).
 """
 
 from __future__ import annotations
@@ -128,7 +129,7 @@ from __future__ import annotations
 import math
 import warnings
 from dataclasses import dataclass
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -137,7 +138,7 @@ from ..fci_ops import Hamiltonian, expm_apply, inner, normalize, two_body
 from ..integrals import ActiveSpace
 from ..optimizers import apply_metric, direction_slope
 from ..residual import ResidualData, compute_residual, descent_generator
-from .symmetry import ci_irrep, mask_pair_tensor
+from .symmetry import ci_irrep, determinant_irreps, mask_pair_tensor
 
 __all__ = [
     "FIRST_STEPS",
@@ -178,10 +179,10 @@ class TrajectoryRecord:
         ground_irrep: irrep id of psi_0 (None without irreps).
         irrep_impurity: max_k (1 - weight of the irrep of Psi_0 in Psi_k) (None without irreps).
         converged: ``CQEResult.converged`` of the run that produced the last row.
-        flags: "e1_any_irrep", "e1_lower_bound", "ground_state_not_in_hf_irrep",
-            "steps_from_exact_trajectory".
+        flags: "e1_any_irrep", "e1_lower_bound", "ground_state_not_in_hf_irrep".
         first_step: "exact" (eps_0 from the exact line search) or "second_order" (eps_0 = eps_2
-            of F16, the classical first step; module docstring).
+            of F16, the classical first step, and the exact continuation after it; module
+            docstring).
     """
 
     system: str
@@ -215,20 +216,6 @@ class TrajectoryRecord:
     def errors(self) -> np.ndarray:
         """E_k - E_0 for k = 0..K (Hartree)."""
         return self.energies - self.e0
-
-
-def _determinant_irreps(norb: int, nelec: tuple[int, int], irreps: np.ndarray) -> np.ndarray:
-    """Irrep id (XOR of the occupied orbitals' ids) of every determinant, shape of a CI array."""
-    from pyscf.fci import cistring
-
-    def strings(n: int) -> np.ndarray:
-        s = np.asarray(cistring.make_strings(range(norb), n), dtype=np.int64)
-        out = np.zeros(s.size, dtype=np.int64)
-        for p in range(norb):
-            out ^= np.where((s >> p) & 1, int(irreps[p]), 0)
-        return out
-
-    return strings(nelec[0])[:, None] ^ strings(nelec[1])[None, :]
 
 
 def _same_irrep_e1(energies: np.ndarray, cis: list[np.ndarray], det_irreps: np.ndarray,
@@ -283,12 +270,12 @@ def _mask_estimator(irreps: np.ndarray | None) -> Callable | None:
     return lambda rd, ci, it: mask_pair_tensor(rd.A, irreps)
 
 
-def _run(active: ActiveSpace, ham: Hamiltonian, ci0: np.ndarray | None, max_iter: int,
+def _run(active: ActiveSpace, ham: Hamiltonian, max_iter: int,
          **run_kw) -> tuple[list[np.ndarray], list[tuple[float, float, float]], list[float],
                             list[np.ndarray], CQEResult]:
-    """run_cqe from ``ci0`` (None: HF): states, rows (E, sigma^2, ||A||) of every state, eps, directions, result."""
-    states = [normalize(ham.space.hf() if ci0 is None else np.asarray(ci0))]
-    res = run_cqe(active, ci0=ci0, max_iter=int(max_iter), keep_generators=True,
+    """run_cqe from HF: states, rows (E, sigma^2, ||A||) of every state, eps, directions, result."""
+    states = [normalize(ham.space.hf())]
+    res = run_cqe(active, max_iter=int(max_iter), keep_generators=True,
                   callback=lambda step, ci: states.append(normalize(np.asarray(ci))), **run_kw)
     K = len(states) - 1
     taken = res.steps[:K]
@@ -305,7 +292,8 @@ def _run(active: ActiveSpace, ham: Hamiltonian, ci0: np.ndarray | None, max_iter
 def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter: int = 20,
                      system: str = "", irreps: np.ndarray | None = None, n_roots: int = 12,
                      metric: str = "spin_free", optimizer_options: Mapping | None = None,
-                     mask_residual: bool = True, first_step: str = "exact") -> TrajectoryRecord:
+                     mask_residual: bool = True, first_step: str = "exact",
+                     roots: tuple[Sequence[float], Sequence[np.ndarray]] | None = None) -> TrajectoryRecord:
     """Exact CQE trajectory from HF with states, overlaps, E1 and E1_any (module docstring).
 
     Args:
@@ -317,8 +305,12 @@ def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter:
             ``mask_residual``, project the residual onto the allowed entries (F2a).
         n_roots: singlet FCI roots computed for E1 (>= 2).
         mask_residual: apply the symmetry projection when ``irreps`` is given.
-        first_step: "exact" or "second_order" (the classical step eps_2 of F16 as step 0;
-            module docstring). Raises ValueError if eps_2 is undefined at HF.
+        first_step: "exact" or "second_order" (step 0 takes the classical step eps_2 of F16,
+            ``run_cqe(..., first_eps=eps_2)``, and the later steps continue from it; module
+            docstring). Raises ValueError if eps_2 is undefined at HF.
+        roots: the singlet FCI roots ``active.fci(nroots=n_roots, spin_square=0.0)`` (energies,
+            CI vectors), computed once by a caller that builds several records of one system
+            (``ft.pipeline``); None computes them here. They must number ``n_roots``.
     """
     if int(n_roots) < 2:
         raise ValueError(f"n_roots must be >= 2 (E1 needs an excited root), got {n_roots}")
@@ -328,8 +320,11 @@ def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter:
     ir = None if irreps is None else np.asarray(irreps, dtype=int)
     if ir is not None and ir.shape != (norb,):
         raise ValueError(f"irreps must have shape ({norb},), got {ir.shape}")
-    es, cis = active.fci(nroots=int(n_roots), spin_square=0.0)
+    es, cis = active.fci(nroots=int(n_roots), spin_square=0.0) if roots is None else roots
     es = np.asarray(es, dtype=float)
+    if es.shape != (int(n_roots),) or len(cis) != int(n_roots):
+        raise ValueError(f"roots must hold n_roots = {n_roots} energies and CI vectors, got {es.size} "
+                         f"and {len(cis)}")
     psi0 = normalize(np.asarray(cis[0]))
     flags: list[str] = []
     ground_irrep = None
@@ -338,7 +333,7 @@ def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter:
         flags.append("e1_any_irrep")
     else:
         ground_irrep = ci_irrep(psi0, norb, nelec, ir)[0]
-        found = _same_irrep_e1(es, cis, _determinant_irreps(norb, nelec, ir), ground_irrep)
+        found = _same_irrep_e1(es, cis, determinant_irreps(norb, nelec, ir), ground_irrep)
         if found is None:
             warnings.warn(f"no excited singlet of irrep {ground_irrep} among {n_roots} roots; "
                           "E1 is replaced by the highest root (a lower bound)", RuntimeWarning, stacklevel=2)
@@ -350,29 +345,14 @@ def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter:
     mask_ir = ir if (ir is not None and mask_residual) else None
     run_kw = dict(optimizer=optimizer, optimizer_options=optimizer_options, metric=metric,
                   e_exact=float(es[0]), residual_estimator=_mask_estimator(mask_ir))
-    if first_step == "exact" or int(max_iter) < 1:
-        states, rows, eps, directions, res = _run(active, ham, None, max_iter, **run_kw)
-    else:
-        hf = normalize(ham.space.hf())
-        rd0, d0, slope, d2e = _f16(active, hf, ham, metric, mask_ir)
+    if first_step == "second_order" and int(max_iter) >= 1:
+        _, _, slope, d2e = _f16(active, normalize(ham.space.hf()), ham, metric, mask_ir)
         lowering, bad = _step_flags(slope, d2e)
         if bad:
             raise ValueError(f"the second-order first step is undefined at HF ({bad[0]}: E''(0) = {d2e:.3e} Ha, "
                              f"predicted lowering {lowering:.3e} Ha)")
-        eps2 = -slope / d2e
-        psi1 = _propagate(ham, d0, hf, eps2)
-        if optimizer == "sd":                   # memoryless: the later steps are run_cqe from Psi_1
-            states1, rows1, eps1, dirs1, res = _run(active, ham, psi1, int(max_iter) - 1, **run_kw)
-            states, eps, directions = [hf] + states1, [eps2] + eps1, [d0] + dirs1
-            rows = [(rd0.energy, rd0.variance, rd0.residual_norm)] + rows1
-        else:
-            states, rows, eps, directions, res = _run(active, ham, None, max_iter, **run_kw)
-            if eps:
-                rd1 = compute_residual(active, psi1, ham)
-                states[1], rows[1] = psi1, (rd1.energy, rd1.variance, rd1.residual_norm)
-                eps[0], directions[0] = eps2, d0
-                if len(eps) >= 2:
-                    flags.append("steps_from_exact_trajectory")
+        run_kw["first_eps"] = -slope / d2e
+    states, rows, eps, directions, res = _run(active, ham, max_iter, **run_kw)
     energies, variances, rnorms = (np.array(col, dtype=float) for col in zip(*rows))
     overlaps = np.array([abs(complex(inner(psi0, s))) ** 2 for s in states])
     impurity = None
@@ -380,7 +360,7 @@ def exact_trajectory(active: ActiveSpace, *, optimizer: str = "lbfgs", max_iter:
         hf_irrep = ci_irrep(states[0], norb, nelec, ir)[0]
         if hf_irrep != ground_irrep:
             flags.append("ground_state_not_in_hf_irrep")
-        det_ir = _determinant_irreps(norb, nelec, ir)
+        det_ir = determinant_irreps(norb, nelec, ir)
         impurity = max(float(np.sum(np.abs(s[det_ir != hf_irrep]) ** 2)) for s in states)
     return TrajectoryRecord(
         system=system or active.label, optimizer=res.optimizer, norb=norb, nelec=tuple(nelec),

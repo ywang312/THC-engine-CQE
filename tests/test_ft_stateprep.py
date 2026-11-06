@@ -1,11 +1,11 @@
 """Tests of the M3 state-preparation costs (``thc_engine_cqe.ft.stateprep``, F3-F7).
 
-References independent of the module: the Appendix A table of the M3 specification (recomputed by
-the critic's ``traj_check.py``, which pair-symmetrizes, masks and expands with its own tolerance and
-fixed point), a literal re-implementation of F3 and F6 written in this file (the expansion of
-eps * mask(d) with eps inside, bits by enumeration, the fixed point by search), the rank of the RHF
-residual W = 4(ia|jb) - 2(ib|ja) from the ERIs (M1), and the count formulas of F3-F5 typed in from
-the specification.
+References independent of the module: the Appendix A table of docs/m3-cost-model.md (recomputed
+for the design by a script that pair-symmetrizes, masks and expands with its own tolerance and
+fixed point [design]), a literal re-implementation of F3 and F6 written in this file (the expansion
+of eps * mask(d) with eps inside, bits by enumeration, the fixed point by search), the rank of the
+RHF residual W = 4(ia|jb) - 2(ib|ja) from the ERIs (M1), and the count formulas of F3-F5 typed in
+from docs/m3-cost-model.md.
 """
 
 import math
@@ -64,7 +64,7 @@ def _irrep_xor(exc: Excitation, irreps: np.ndarray, norb: int) -> int:
 
 def literal_f3(d: np.ndarray, eps: float, irreps=None, delta: float = 1e-3) -> dict:
     """F3 as written: expand eps * mask(d) at tol 1e-12, theta = |amplitude|, and take the largest
-    b <= F2(#all) with b = F2(#{theta >= pi / 2^b}) (the limit of the specification's iteration)."""
+    b <= F2(#all) with b = F2(#{theta >= pi / 2^b}) (the limit of the iteration of F3)."""
     g = d if irreps is None else sym.mask_pair_tensor(d, irreps)
     exc = spin_orbital_excitations(eps * g, tol=1e-12)
     theta = np.array([abs(e.amplitude) for e in exc])
@@ -83,7 +83,7 @@ def literal_f3(d: np.ndarray, eps: float, irreps=None, delta: float = 1e-3) -> d
 def test_appendix_a_elementwise_regressions(name):
     """Exact L-BFGS steps on the symmetry-adapted builds reproduce Appendix A: the trajectory (E - E_FCI
     to 1e-3 mHa, overlaps to 1e-4), the masked elementwise counts n_d / n_s, b, C_step and C(Psi_k).
-    The table was computed by the critic's own expansion and fixed point (traj_check.py); the
+    The table was computed for the design with its own expansion and fixed point [design]; the
     rounding bound stays within delta_step, and every step carries only the product-formula flag (it
     compiles more than one excitation)."""
     ref = APPENDIX_A[name]
@@ -383,6 +383,48 @@ def test_candidate_step_toffolis_matches_step_costs_and_is_monotone():
     assert list(sp.candidate_step_toffolis(d, [-e for e in cands], irreps=ir)) == list(costs)
 
 
+def test_candidate_step_costs_give_qubits_and_flags():
+    """candidate_step_costs equals elementwise_step_cost for every candidate (the line search needs its
+    qubits and flags, not only the Toffolis). Against literal F3 on the unmasked H6 L-BFGS step 3: the
+    kept set and b give Q = 2N + 3b + 8 (2N when nothing is kept), and the flag "rounding bound above
+    delta_step" is set exactly where n_kept pi / 2^b plus the dropped angles exceed delta_step. The
+    smallest candidate there keeps nothing and is flagged (observed bound 1.73e-3)."""
+    tr = trajectory("h6a")
+    d, ir = tr["d"][3], tr["irreps"]
+    cands = FTParameters().eps_candidates
+    costs = sp.candidate_step_costs(d, cands, irreps=ir)
+    assert costs == tuple(sp.elementwise_step_cost(d, e, irreps=ir) for e in cands)
+    assert [c.toffolis for c in costs] == list(sp.candidate_step_toffolis(d, cands, irreps=ir))
+    n = d.shape[0]
+    for e, c in zip(cands, costs):
+        ref = literal_f3(d, e, ir)
+        kept = len(ref["kept"])
+        assert c.logical_qubits == (2 * n + 3 * ref["b"] + 8 if kept else 2 * n)
+        theta = np.sort(ref["theta"])[::-1]
+        bound = kept * math.pi / 2.0 ** ref["b"] + float(np.sum(theta[kept:]))
+        assert ("rounding bound above delta_step" in c.flags) == (bound > 1e-3)
+    assert costs[0].toffolis == 0 and "rounding bound above delta_step" in costs[0].flags
+    assert costs[0].rounding_bound == pytest.approx(1.73e-3, abs=5e-6)
+
+
+def test_candidate_step_costs_use_the_given_budget():
+    """At delta_step = 1e-4 (not the default 1e-3) every line-search candidate follows literal F3 at that budget
+    (bits by enumeration, the fixed point by search): the same kept doubles and singles and Toffolis. The tighter
+    budget raises the bits of the largest candidate by about log2(10) and its cost (F2)."""
+    tr = trajectory("h4")
+    d, ir = tr["d"][1], tr["irreps"]
+    tight = FTParameters(delta_step=1e-4)
+    cands = tight.eps_candidates
+    got = sp.candidate_step_costs(d, cands, irreps=ir, params=tight)
+    for e, c in zip(cands, got):
+        ref = literal_f3(d, e, ir, delta=1e-4)
+        assert (c.n_double, c.n_single, c.toffolis) == (ref["nd"], ref["ns"], ref["toffolis"])
+        if ref["kept"]:
+            assert c.bits == ref["b"]
+    loose = sp.candidate_step_costs(d, cands, irreps=ir)
+    assert got[-1].bits - loose[-1].bits in (3, 4) and got[-1].toffolis > loose[-1].toffolis
+
+
 # ------------------------------------------------------------------------------- counts
 def test_primitive_count_rules():
     """The per-kind rules of F3 (double 1 + 3, single 1 + 2, diagonal 1 + 1 additions + ANDs; 8 / 4 / 3
@@ -408,7 +450,7 @@ def test_primitive_count_rules():
 
 
 def test_readout_rotation_toffolis():
-    """C_rot = g (b_r - 2) + 6 g with b_r = F2(g, delta_readout = 1e-5): 405 at N = 6 (specification S12),
+    """C_rot = g (b_r - 2) + 6 g with b_r = F2(g, delta_readout = 1e-5): 405 at N = 6 [design],
     and the formula with b_r by enumeration for N = 2..8 and another budget."""
     assert sp.readout_rotation_toffolis(6) == 405
     for n in range(2, 9):
@@ -417,3 +459,17 @@ def test_readout_rotation_toffolis():
         p = FTParameters(delta_readout=1e-3)
         assert sp.readout_rotation_toffolis(n, params=p) == g * (_bits(g, 1e-3) - 2) + 6 * g
     assert sp.readout_rotation_toffolis(1) == 0
+
+
+def test_readout_rotation_qubits():
+    """Q_rot = 2N + 3 b_r + 8 with b_r = F2(g, delta_readout) by enumeration: 89 at N = 6 (b_r = 23), the
+    formula for N = 2..8 and another budget, and 2N for N = 1 (no rotation)."""
+    assert sp.readout_rotation_qubits(6) == 89
+    for n in range(2, 9):
+        g = n * (n - 1) // 2
+        assert sp.readout_rotation_qubits(n) == 2 * n + 3 * _bits(g, 1e-5) + 8
+        p = FTParameters(delta_readout=1e-3)
+        assert sp.readout_rotation_qubits(n, params=p) == 2 * n + 3 * _bits(g, 1e-3) + 8
+    assert sp.readout_rotation_qubits(1) == 2
+    with pytest.raises(ValueError):
+        sp.readout_rotation_qubits(-1)

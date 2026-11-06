@@ -1,7 +1,7 @@
 """Tests of ft.trajectory: exact CQE trajectories, overlaps, E1 and the classical first step (F16).
 
-Reference trajectory numbers are the critic's full-precision values (synth-m3,
-``traj_check_lbfgs.json``, spec Appendix A), computed with its own script on symmetric
+Reference trajectory numbers are the full-precision values behind Appendix A
+(docs/m3-cost-model.md), computed for the design with an independent script [design] on symmetric
 builds made directly with ``systems.molecule`` and without the residual projection; the
 spectrum references come from PySCF's symmetry-adapted FCI solver and dense
 diagonalization; F16 is checked against JW Fock-space matrices (``testing.fock``).
@@ -19,7 +19,7 @@ from thc_engine_cqe.optimizers import apply_metric
 from thc_engine_cqe.residual import compute_residual, descent_generator
 from thc_engine_cqe.testing.fock import FockSpace
 
-# (E_{k+1} - E_0, p_{k+1}, ||A_k||) after L-BFGS step k (Appendix A; critic's JSON, full precision).
+# (E_{k+1} - E_0, p_{k+1}, ||A_k||) after L-BFGS step k (Appendix A, full precision [design]).
 REFERENCE = {
     "h4": [(0.021504277878737987, 0.9802267643657638, 0.8584626920670166),
            (0.0038899458295142963, 0.9959988972047659, 0.6114978604421792),
@@ -35,6 +35,7 @@ REFERENCE = {
            (0.0011465443159579536, 0.9993742385694582, 0.403824789764888)],
 }
 K_STAR = {"h4": 3, "h6a": 6, "n2": 3}                       # Appendix A: 1.6 mHa after 3 / 6 / 3 steps
+NORM_A3 = {"h4": 0.1256, "n2": 0.1168}                      # ||A|| before step 3, Appendix A, 4 digits
 P_HF = {"h4": 0.9455, "h6a": 0.9026, "n2": 0.9257, "lih": 0.9743}   # Appendix A, 4 digits
 GAPS = {"h4": (0.5657, 0.5633), "h6a": (0.3909, 0.3909), "n2": (0.7115, 0.4117),
         "lih": (0.1332, 0.1332)}                            # E1 - E0 same irrep / any irrep, 4 digits
@@ -65,13 +66,15 @@ def _check_against_reference(name: str) -> None:
         assert abs(rec.errors[k + 1] - err) <= 1e-6
         assert abs(rec.overlaps[k + 1] - p) <= 1e-6
         assert abs(rec.residual_norms[k] - rnorm) <= 1e-6
+    if name in NORM_A3:
+        assert abs(rec.residual_norms[3] - NORM_A3[name]) < 5e-5
     assert trajectory.first_iterate_below(rec, 1.6e-3) == K_STAR[name]
 
 
 def test_h4_trajectory_reproduces_appendix_a():
-    """h4 L-BFGS: E_k - E_0 and p_k after steps 0-2 to 1e-6, ||A_k|| to 1e-6, k* = 3.
+    """h4 L-BFGS: E_k - E_0 and p_k after steps 0-2 to 1e-6, ||A_k|| to 1e-6 (k = 3 to Appendix A's 4 digits), k* = 3.
 
-    The reference is the critic's independent run (unmasked residual, its own build call),
+    The reference is the independent run of the design [design] (unmasked residual, its own build call),
     so the agreement also shows that the symmetry projection leaves the trajectory unchanged.
     """
     _check_against_reference("h4")
@@ -80,7 +83,7 @@ def test_h4_trajectory_reproduces_appendix_a():
 @pytest.mark.slow
 @pytest.mark.parametrize("name", ["h6a", "n2"])
 def test_h6a_n2_trajectories_reproduce_appendix_a(name):
-    """h6a (k* = 6) and n2 (k* = 3) against the critic's full-precision values (as for h4).
+    """h6a (k* = 6) and n2 (k* = 3) against the full-precision values of the design (as for h4).
 
     n2 was built before ``systems.canonical_orbitals`` fixed the pi orientation; energies and
     overlaps are invariant under that orbital rotation, so the numbers must still agree.
@@ -158,7 +161,8 @@ def test_e1_same_and_any_irrep(name):
     The same-irrep reference is ``direct_spin1_symm`` in the irrep of psi_0 (a different
     solver, which never mixes irreps); E1_any is the second singlet of the dense CI matrix.
     Both agree to 1e-8 Ha and with Appendix A to its 4 printed digits. The N2 value
-    (0.7115 against 0.4117) is the S15 correction.
+    (0.7115 against 0.4117) is why F15 uses the same-irrep E1. The HF overlap p_0 matches Appendix A to
+    its 4 digits (independent runs of the design [design]).
     """
     a, ir = _system(name)
     rec = trajectory.exact_trajectory(a, system=name, irreps=ir, max_iter=0)
@@ -167,6 +171,7 @@ def test_e1_same_and_any_irrep(name):
     assert abs((rec.e1_any - rec.e0) - _dense_singlet_gap(a)) < 1e-8
     same, any_ = GAPS[name]
     assert abs(rec.e1 - rec.e0 - same) < 5e-5 and abs(rec.e1_any - rec.e0 - any_) < 5e-5
+    assert abs(rec.overlaps[0] - P_HF[name]) < 5e-5
 
 
 def test_e1_degenerate_roots_are_tested_as_a_subspace():
@@ -260,7 +265,7 @@ def test_second_order_step(name):
 
     h4: E''(0) and a central difference are recomputed from dense JW Fock-space matrices
     (``testing.fock``, no PySCF CI code). lih: against the module's Richardson difference and
-    the energy loss E(eps2) - E(eps*) of the spec (<= 3.4e-5 Ha). eps* is the trajectory's
+    the energy loss E(eps2) - E(eps*) of the design notes (<= 3.4e-5 Ha) [design]. eps* is the trajectory's
     first exact line-search step.
     """
     a, ir = _system(name)
@@ -369,33 +374,41 @@ def test_second_order_step_at_a_converged_state():
     assert out["state"] is None and np.isfinite(out["d2e"])
 
 
-def test_second_order_first_step_record():
-    """first_step="second_order": row 1 is the classical step, recomputed in the JW Fock space.
+def _fock_second_order_step(a, d: np.ndarray) -> tuple[float, np.ndarray, np.ndarray]:
+    """(eps_2, Psi_1 = expm(eps_2 G) HF, H) from dense JW Fock-space matrices (testing.fock, no fci_ops).
 
-    E'(0) = <[H, G]> and E''(0) = <[[H, G], G]> at HF come from dense Fock-space matrices
-    (testing.fock), eps_2 = -E'(0)/E''(0), Psi_1 = expm(eps_2 G) HF, and E_1, sigma_1^2, p_1
-    from the dense H and the dense ground state (p_1 to 1e-8, the accuracy of the
-    record's Davidson psi_0); none of it uses fci_ops. The values are
-    those of the reviewer's run (E_1 - E_0 = 21.515 mHa, p_1 = 0.98039, against 21.504 mHa
-    and 0.98023 after the exact step). L-BFGS rows k >= 2 and steps j >= 1 are the exact
-    trajectory's (flag), and d_0 is the exact run's first direction bit for bit (the same
-    masked residual and metric; without the mask it would differ by the round-off of the
-    forbidden entries, <= 7.5e-16 here).
+    E'(0) = <[H, G]> and E''(0) = <[[H, G], G]> at HF, eps_2 = -E'(0)/E''(0).
+    """
+    fs = FockSpace(a.norb)
+    H = fs.hamiltonian(a.h1, a.eri, a.ecore).toarray()
+    G = fs.two_body(d).toarray()
+    hf = fs.from_ci(FCISpace.of(a).hf(), a.nelec)
+    comm = H @ G - G @ H
+    eps2 = -float(np.real(np.vdot(hf, comm @ hf))) / float(np.real(np.vdot(hf, (comm @ G - G @ comm) @ hf)))
+    return eps2, scipy.linalg.expm(eps2 * G) @ hf, H
+
+
+def test_second_order_first_step_record():
+    """first_step="second_order" (L-BFGS): row 1 is the classical step, recomputed in the JW Fock space.
+
+    eps_2, Psi_1 = expm(eps_2 G) HF, E_1, sigma_1^2 and p_1 come from dense Fock-space matrices
+    and the dense ground state (p_1 to 1e-8, the accuracy of the record's Davidson psi_0); none
+    of it uses fci_ops. The values are those of the module docstring and of an independent run
+    [build check] (E_1 - E_0 = 21.515 mHa, p_1 = 0.98039, against 21.504 mHa and 0.98023 after
+    the exact step). d_0 is the exact run's
+    first direction bit for bit (the same masked residual and metric). The rows k >= 2 are the
+    continuation after the classical step, not the exact trajectory's rows (which an earlier
+    version reported): they differ from them, by 4.7e-6 Ha at k = 2 here.
     """
     a, ir = _system("h4")
     exact = _record("h4")
     rec = trajectory.exact_trajectory(a, system="h4", irreps=ir, n_roots=3, max_iter=5, first_step="second_order")
-    assert rec.first_step == "second_order" and rec.flags == ("steps_from_exact_trajectory",)
+    assert rec.first_step == "second_order" and rec.flags == ()
     assert rec.n_steps == 5 and len(rec.states) == 6
     assert np.array_equal(rec.directions[0], exact.directions[0])
-    fs = FockSpace(a.norb)
-    H = fs.hamiltonian(a.h1, a.eri, a.ecore).toarray()
-    G = fs.two_body(rec.directions[0]).toarray()
-    hf = fs.from_ci(FCISpace.of(a).hf(), a.nelec)
-    comm = H @ G - G @ H
-    eps2 = -float(np.real(np.vdot(hf, comm @ hf))) / float(np.real(np.vdot(hf, (comm @ G - G @ comm) @ hf)))
+    eps2, psi1, H = _fock_second_order_step(a, rec.directions[0])
     assert abs(rec.eps[0] - eps2) <= 1e-12 * eps2
-    psi1 = scipy.linalg.expm(eps2 * G) @ hf
+    fs = FockSpace(a.norb)
     assert abs(abs(np.vdot(psi1, fs.from_ci(rec.states[1], a.nelec))) - 1.0) < 1e-12
     e1 = float(np.real(np.vdot(psi1, H @ psi1)))
     assert abs(rec.energies[1] - e1) < 1e-10
@@ -410,31 +423,122 @@ def test_second_order_first_step_record():
     assert abs(rec.overlaps[1] - abs(np.vdot(psi0, psi1)) ** 2) < 1e-8
     assert abs(rec.errors[1] - 21.515e-3) < 1e-6 and abs(rec.overlaps[1] - 0.98039) < 1e-5
     assert abs(rec.residual_norms[1] - compute_residual(a, rec.states[1]).residual_norm) < 1e-12
-    for k in range(2, 6):
-        assert np.array_equal(rec.states[k], exact.states[k]) and rec.energies[k] == exact.energies[k]
-    np.testing.assert_array_equal(rec.eps[1:], exact.eps[1:5])
+    assert abs(rec.energies[2] - exact.energies[2]) > 1e-6
     with pytest.raises(ValueError):
         trajectory.exact_trajectory(a, irreps=ir, n_roots=2, max_iter=1, first_step="classical")
 
 
-def test_second_order_first_step_sd_is_a_continuation():
-    """With the memoryless "sd" the later steps are run_cqe from the classical Psi_1 itself (no flag).
+@pytest.mark.parametrize("metric", ["spin_free", "spin_orbital"])
+@pytest.mark.parametrize("opt", ["sd", "cg", "lbfgs"])
+def test_second_order_first_step_is_the_first_eps_continuation(opt, metric):
+    """Every row k >= 1 equals an independent run_cqe(first_eps=eps_2) call, for SD, CG and L-BFGS and both metrics.
 
-    The reference reruns run_cqe from the record's Psi_1 with the same mask; steps, energies
-    and states must agree.
+    The reference eps_2 is computed from dense JW Fock-space matrices (testing.fock) along d_0 =
+    M conj(mask(A_0)) (apply_metric of the masked HF residual, recomputed here), and run_cqe is
+    called directly with the same mask hook; the record's eps_0 must equal that eps_2 to 1e-12
+    and its states, energies, steps and directions those of the reference run. The two eps_2
+    differ in the last bit, which moves later line-search minima by up to 5e-6 relative (Brent's
+    resolution along the flat SD valley; energies by 2e-9 Ha), hence the tolerances.
     """
     from thc_engine_cqe.cqe import run_cqe
 
     a, ir = _system("h4")
-    rec = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=3, optimizer="sd", first_step="second_order")
-    assert rec.flags == () and rec.n_steps == 3 and rec.optimizer == "sd"
-    so = trajectory.second_order_step(a, irreps=ir)
-    assert rec.eps[0] == so["eps2"] and abs(abs(np.vdot(rec.states[1], so["state"])) - 1.0) < 1e-14
-    states = []
-    res = run_cqe(a, ci0=rec.states[1], max_iter=2, optimizer="sd", keep_generators=True,
+    rec = trajectory.exact_trajectory(a, system="h4", irreps=ir, n_roots=3, max_iter=6, optimizer=opt,
+                                      metric=metric, first_step="second_order")
+    hf = FCISpace.of(a).hf()
+    d0 = apply_metric(descent_generator(symmetry.mask_pair_tensor(compute_residual(a, hf).A, ir)), metric)
+    np.testing.assert_allclose(rec.directions[0], d0, rtol=0.0, atol=1e-14)
+    eps2, _, _ = _fock_second_order_step(a, d0)
+    assert abs(rec.eps[0] - eps2) <= 1e-12 * eps2 and rec.flags == () and rec.metric == metric
+    states = [normalize(hf)]
+    res = run_cqe(a, max_iter=6, optimizer=opt, metric=metric, first_eps=eps2, keep_generators=True,
                   residual_estimator=lambda rd, ci, it: symmetry.mask_pair_tensor(rd.A, ir),
                   callback=lambda st, ci: states.append(normalize(np.asarray(ci))))
-    np.testing.assert_allclose(rec.eps[1:], [s.eps for s in res.steps], rtol=1e-12)
-    np.testing.assert_allclose(rec.energies[1:3], [s.energy for s in res.steps], atol=1e-12)
-    for k in (2, 3):
-        assert abs(abs(np.vdot(rec.states[k], states[k - 2])) - 1.0) < 1e-12
+    assert rec.n_steps == len(res.steps) == len(states) - 1 == 6
+    for k in range(1, 7):
+        assert abs(abs(np.vdot(rec.states[k], states[k])) - 1.0) < 1e-12
+    np.testing.assert_allclose(rec.energies[:6], [s.energy for s in res.steps], rtol=0.0, atol=1e-8)
+    np.testing.assert_allclose(rec.eps, [s.eps for s in res.steps], rtol=1e-4)
+    for d, s in zip(rec.directions, res.steps):
+        assert np.linalg.norm(d - s.generator) <= 1e-4 * np.linalg.norm(s.generator)
+
+
+def test_second_order_first_step_keeps_the_step0_memory():
+    """L-BFGS keeps the step-0 pair after the classical step; for the memoryless SD a restart is the same run.
+
+    The reference is run_cqe restarted from the record's Psi_1 with the same mask (a fresh
+    optimizer). For SD its steps, energies and states equal the record's. For L-BFGS the record
+    lies below the restart at k = 2, by 5.15 mHa on h4 (measured), because the restart takes a
+    steepest-descent step where the continuation uses the step-0 curvature pair.
+    """
+    from thc_engine_cqe.cqe import run_cqe
+
+    a, ir = _system("h4")
+    for opt in ("sd", "lbfgs"):
+        rec = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=3, optimizer=opt,
+                                          first_step="second_order")
+        assert rec.n_steps == 3 and rec.optimizer == opt
+        states = []
+        res = run_cqe(a, ci0=rec.states[1], max_iter=2, optimizer=opt, keep_generators=True,
+                      residual_estimator=lambda rd, ci, it: symmetry.mask_pair_tensor(rd.A, ir),
+                      callback=lambda st, ci: states.append(normalize(np.asarray(ci))))
+        if opt == "sd":
+            np.testing.assert_allclose(rec.eps[1:], [s.eps for s in res.steps], rtol=1e-8)
+            np.testing.assert_allclose(rec.energies[1:3], [s.energy for s in res.steps], atol=1e-12)
+            for k in (2, 3):
+                assert abs(abs(np.vdot(rec.states[k], states[k - 2])) - 1.0) < 1e-12
+        else:
+            assert res.steps[1].energy - rec.energies[2] > 1e-3
+
+
+def test_second_order_first_step_with_a_single_step():
+    """max_iter = 1 (``pipeline.run_system`` accepts it): the one step is the classical eps_2, not the line search.
+
+    eps_2 comes from dense JW Fock-space matrices along the masked d_0 (testing.fock, no fci_ops
+    propagation); the exact record's single step differs from it (by 1.6% on h4), and Psi_1 is
+    expm(eps_2 G) HF.
+    """
+    a, ir = _system("h4")
+    rec = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=1, first_step="second_order")
+    exact = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=1)
+    eps2, psi1, _ = _fock_second_order_step(a, rec.directions[0])
+    assert rec.n_steps == 1 and rec.first_step == "second_order"
+    assert abs(rec.eps[0] - eps2) <= 1e-12 * eps2 and abs(exact.eps[0] / eps2 - 1.0) > 1e-2
+    fs = FockSpace(a.norb)
+    assert abs(abs(np.vdot(psi1, fs.from_ci(rec.states[1], a.nelec))) - 1.0) < 1e-12
+
+
+def test_second_order_first_step_uses_the_runs_mask():
+    """eps_2 is taken along the run's own masked d_0, also where the mask removes nonzero entries of A_0.
+
+    With the true irreps the forbidden entries of A_0 are round-off, so masked and unmasked steps agree; the
+    orbital labels (0, 5, 0, 1) instead of h4's (0, 5, 0, 5) forbid the (01 -> 23) doubles, 67% of ||A_0||.
+    The reference eps_2 is computed from dense JW Fock-space matrices along conj(mask(A_0)) for those labels
+    (mask_pair_tensor and compute_residual, not the trajectory code); the unmasked step is 20% shorter.
+    """
+    a, _ = _system("h4")
+    fake = np.array([0, 5, 0, 1])
+    rec = trajectory.exact_trajectory(a, irreps=fake, n_roots=3, max_iter=2, first_step="second_order")
+    a0 = compute_residual(a, FCISpace.of(a).hf()).A
+    masked = symmetry.mask_pair_tensor(a0, fake)
+    assert np.linalg.norm(a0 - masked) > 0.5 * np.linalg.norm(a0)
+    d0 = descent_generator(masked)
+    np.testing.assert_allclose(rec.directions[0], d0, rtol=0.0, atol=1e-14)
+    eps2, _, _ = _fock_second_order_step(a, d0)
+    plain, _, _ = _fock_second_order_step(a, descent_generator(a0))
+    assert abs(rec.eps[0] - eps2) <= 1e-12 * eps2 and abs(plain / eps2 - 1.0) > 0.1
+
+
+def test_precomputed_roots_give_the_same_record():
+    """``roots`` (one FCI solve shared by several records, as ``ft.pipeline`` does) gives the record computed with
+    its own solve, value for value; roots of the wrong number raise."""
+    a, ir = _system("h4")
+    roots = a.fci(nroots=3, spin_square=0.0)
+    for first in trajectory.FIRST_STEPS:
+        ref = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=2, first_step=first)
+        rec = trajectory.exact_trajectory(a, irreps=ir, n_roots=3, max_iter=2, first_step=first, roots=roots)
+        assert (rec.e0, rec.e1, rec.e1_any) == (ref.e0, ref.e1, ref.e1_any)
+        np.testing.assert_array_equal(rec.energies, ref.energies)
+        np.testing.assert_array_equal(rec.overlaps, ref.overlaps)
+    with pytest.raises(ValueError):
+        trajectory.exact_trajectory(a, irreps=ir, n_roots=4, max_iter=1, roots=roots)
