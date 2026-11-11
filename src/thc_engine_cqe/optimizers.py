@@ -434,6 +434,21 @@ class LBFGS(SearchDirection):
             r = r + (a - b) * s
         return r, gamma
 
+    def inverse_hessian_apply(self, g: np.ndarray) -> np.ndarray:
+        """H_k g for the current memory: the two-loop recursion (H_0 = gamma M) with the stored pairs,
+        M g with an empty memory. A new array; the optimizer's state is not changed.
+
+        After ``direction(g_k, A_k)`` the memory holds the pairs that produced d_k = H_k g_k
+        (the newest one, (s_{k-1}, y_{k-1}), formed in that call), so this applies the
+        inverse-Hessian operator of d_k to any tensor, e.g. the element fills of a residual
+        estimate (``steprules.debiased_slope``). H_k is symmetric positive definite in
+        :func:`real_inner` (class docstring).
+        """
+        g = np.asarray(g)
+        if self._pairs:
+            return self._two_loop(g)[0]
+        return np.array(apply_metric(g, self.metric), copy=True)
+
     def direction(self, g: np.ndarray, A: np.ndarray) -> np.ndarray:
         g = np.asarray(g)
         info: dict = {"n_pairs": 0, "pair": None, "reset": False, "gamma": None}

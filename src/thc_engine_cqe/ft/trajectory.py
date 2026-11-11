@@ -146,6 +146,9 @@ __all__ = [
     "exact_trajectory",
     "first_iterate_below",
     "second_order_step",
+    "same_irrep_e1",
+    "f16",
+    "propagate",
 ]
 
 FIRST_STEPS = ("exact", "second_order")
@@ -268,6 +271,14 @@ def _mask_estimator(irreps: np.ndarray | None) -> Callable | None:
     if irreps is None:
         return None
     return lambda rd, ci, it: mask_pair_tensor(rd.A, irreps)
+
+
+# Public names of three helpers (the same objects): the same-irrep E1 of the spectrum rule,
+# F16 at a state (residual data, masked direction d, E'(0), E''(0)) and the propagation
+# normalize(exp(eps G) psi) of every record, by Taylor expm_apply at tolerance 1e-15.
+same_irrep_e1 = _same_irrep_e1
+f16 = _f16
+propagate = _propagate
 
 
 def _run(active: ActiveSpace, ham: Hamiltonian, max_iter: int,

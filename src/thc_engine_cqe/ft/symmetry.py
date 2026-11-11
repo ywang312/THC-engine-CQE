@@ -27,6 +27,28 @@ axis-aligned (pi_x in B3u and B2g, pi_y in B2u and B3g; tested on the AO
 coefficients). ``benchmark_system(name, symmetry=False)`` gives the plain RHF orbitals
 of the same geometry, which for N2 have an arbitrary pi orientation.
 
+Parametric names (:func:`system_spec`, F20) [design; the CAS rule derived]
+--------------------------------------------------------------------------
+Names outside :data:`BENCHMARK_SYSTEMS` are parsed by :func:`system_spec` and built on the
+same path (STO-3G, symmetry-adapted D2h RHF, ``systems.canonical_orbitals``):
+
+    pattern            system                            active space                     unit of R
+    h<n>_r<R>          linear H_n, spacing R (even n)    all orbitals and electrons       bohr
+    n2_r<R>            N2 at bond length R               CAS(6,6), ncore 4                angstrom
+    n2v_r<R>           N2 at bond length R               CAS(10,8), ncore 2 (frozen 1s;   angstrom
+                                                         2sigma_g ... 3sigma_u active)
+    h4rect_<a>x<b>     H4 rectangle a x b                all                              bohr
+
+R, a and b are parsed with ``float()``; chain atoms sit at i R on z, as in the M3 entries, and
+N2 at (0, 0, 0) and (0, 0, R). The M3 names resolve first and keep their labels; the
+parametric names of :data:`ALIASES` describe the same geometries and build bit-identical h1,
+eri, ecore, mo_coeff and irreps (tests/test_ft_symmetry_names.py). h6a and lih have no
+parametric name. CAS rule: ncore = (n_elec - nelecas)/2 and ncore + ncas must not exceed
+the number of MOs (``integrals.ActiveSpace.from_pyscf`` raises ValueError otherwise). N2 in
+STO-3G has 10 MOs, so CAS(8,8) (ncore 3) is impossible, while CAS(10,8) builds (3136
+determinants). The square h4rect_<a>x<a> has a B1g ground state, orthogonal to the Ag HF
+determinant (p_HF = 0); it is a test case, not an overlap-limited system.
+
 Orbital irreps (:func:`orbital_irreps`)
 ---------------------------------------
 PySCF's irrep ids of the active orbitals (``symm.label_orb_symm``, which rejects
@@ -89,6 +111,8 @@ PySCF CI array). :func:`ci_irrep` returns the irrep that holds the largest weigh
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Sequence
 
 import numpy as np
@@ -99,6 +123,8 @@ from ..measure.targets import KINDS
 
 __all__ = [
     "BENCHMARK_SYSTEMS",
+    "ALIASES",
+    "system_spec",
     "benchmark_system",
     "orbital_irreps",
     "pair_mask",
@@ -140,17 +166,81 @@ BENCHMARK_SYSTEMS: dict[str, dict] = {
 }
 
 
+#: M3 names and the parametric names (F20) of the same geometries, which build bit-identical
+#: integrals, orbitals and irreps. Informational: the M3 names keep their own labels and builds.
+ALIASES: dict[str, str] = {"h4": "h4_r1.8", "h6s": "h6_r3.0", "h8": "h8_r1.8", "n2": "n2_r1.098",
+                           "n2s": "n2_r2.0"}
+
+_NUMBER = r"(\d+(?:\.\d*)?|\.\d+)"
+_PATTERNS: dict[str, re.Pattern] = {
+    "chain": re.compile(rf"h([1-9]\d*)_r{_NUMBER}"),
+    "n2": re.compile(rf"n2_r{_NUMBER}"),
+    "n2v": re.compile(rf"n2v_r{_NUMBER}"),
+    "h4rect": re.compile(rf"h4rect_{_NUMBER}x{_NUMBER}"),
+}
+_PATTERN_HELP = "h<n>_r<R> (bohr), n2_r<R> (A, CAS(6,6)), n2v_r<R> (A, CAS(10,8)), h4rect_<a>x<b> (bohr)"
+
+
+def _length(text: str, what: str, name: str) -> float:
+    value = float(text)
+    if not (math.isfinite(value) and value > 0.0):
+        raise ValueError(f"{name!r}: the {what} must be a positive finite number, got {text!r}")
+    return value
+
+
+def system_spec(name: str) -> dict:
+    """The build entry of a parametric system name (F20; module docstring).
+
+    Returns a dict with the keys of a :data:`BENCHMARK_SYSTEMS` entry: "atom", "unit",
+    "basis", "symmetry", "ncas", "nelecas", "description". Patterns: ``h<n>_r<R>`` (linear
+    H_n, spacing R bohr, even n, all active), ``n2_r<R>`` (N2 at R angstrom, CAS(6,6)),
+    ``n2v_r<R>`` (N2 at R angstrom, CAS(10,8)), ``h4rect_<a>x<b>`` (H4 rectangle, sides a
+    and b bohr). Raises ValueError for any other name, including the M3 names (resolved by
+    :func:`benchmark_system`), an odd chain (no closed-shell RHF) and non-positive lengths.
+    """
+    if not isinstance(name, str):
+        raise ValueError(f"system names are strings, got {name!r}")
+    m = _PATTERNS["chain"].fullmatch(name)
+    if m:
+        n, r = int(m.group(1)), _length(m.group(2), "spacing", name)
+        if n < 2 or n % 2:
+            raise ValueError(f"{name!r}: h<n>_r<R> needs an even n >= 2 (closed-shell RHF), got n = {n}")
+        return _entry(_chain(n, r), "bohr", "D2h", f"H{n} chain, {r:.10g} bohr, STO-3G")
+    m = _PATTERNS["n2"].fullmatch(name)
+    if m:
+        r = _length(m.group(1), "bond length", name)
+        return _entry(_diatomic("N", "N", r), "angstrom", "D2h", f"N2, {r:.10g} A, STO-3G, CAS(6,6)",
+                      ncas=6, nelecas=6)
+    m = _PATTERNS["n2v"].fullmatch(name)
+    if m:
+        r = _length(m.group(1), "bond length", name)
+        return _entry(_diatomic("N", "N", r), "angstrom", "D2h", f"N2, {r:.10g} A, STO-3G, CAS(10,8)",
+                      ncas=8, nelecas=10)
+    m = _PATTERNS["h4rect"].fullmatch(name)
+    if m:
+        a, b = _length(m.group(1), "side a", name), _length(m.group(2), "side b", name)
+        atom = (("H", (0.0, 0.0, 0.0)), ("H", (a, 0.0, 0.0)), ("H", (a, b, 0.0)), ("H", (0.0, b, 0.0)))
+        return _entry(atom, "bohr", "D2h", f"H4 rectangle, {a:.10g} x {b:.10g} bohr, STO-3G")
+    raise ValueError(f"{name!r} is not a parametric system name; patterns: {_PATTERN_HELP}")
+
+
 def benchmark_system(name: str, *, symmetry: bool = True) -> ActiveSpace:
-    """Active space of the benchmark system ``name`` (a key of :data:`BENCHMARK_SYSTEMS`).
+    """Active space of the benchmark system ``name``: a key of :data:`BENCHMARK_SYSTEMS`, else a
+    parametric name of :func:`system_spec` (F20).
 
     With ``symmetry`` (the default) the RHF is symmetry-adapted in the system's point
     group (D2h, or C2v for LiH) and the orbitals are ``systems.canonical_orbitals``;
     without it, the plain RHF orbitals of the same geometry. The label is ``name``.
+    The M3 names take the M3 path unchanged; a parametric name builds through the same
+    ``systems.molecule`` call with the entry of :func:`system_spec`.
     """
-    try:
-        spec = BENCHMARK_SYSTEMS[name]
-    except KeyError:
-        raise ValueError(f"unknown benchmark system {name!r}; known: {sorted(BENCHMARK_SYSTEMS)}") from None
+    spec = BENCHMARK_SYSTEMS.get(name) if isinstance(name, str) else None
+    if spec is None:
+        try:
+            spec = system_spec(name)
+        except ValueError as exc:
+            raise ValueError(f"unknown benchmark system {name!r}; known: {sorted(BENCHMARK_SYSTEMS)} and the "
+                             f"patterns {_PATTERN_HELP} ({exc})") from None
     return systems.molecule(list(spec["atom"]), basis=spec["basis"], unit=spec["unit"],
                             ncas=spec["ncas"], nelecas=spec["nelecas"], label=name,
                             symmetry=spec["symmetry"] if symmetry else False)

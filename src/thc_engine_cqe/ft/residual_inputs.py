@@ -61,6 +61,18 @@ Computed once per system: the exact V_m at HF and SD iterates 1, 3 and 5 is 1220
 moves by at most 1.9% (H4) and 2.5% (N2) per element from iterate 1 to HF; a test checks
 H4 iterates 1 and 4 against 3%.
 
+Subset totals (:func:`variance_totals_subset`; F24 (ii)) [estimate]
+------------------------------------------------------------------
+Where the per-element variances of every allowed element are too slow (N = 10), V_m and
+W_m are estimated from a uniform random subset S of K_s elements (``numpy`` default_rng
+with ``seed``, without replacement): V^_m = (K/K_s) sum_{e in S} m_e v_e, with the
+sampling standard error (K/K_s) sqrt(K_s) sd(m_e v_e) sqrt(1 - K_s/K) (finite population,
+sd with ddof = 1), and the same for W_m. The routes receive the uniform per-element values
+v_e = V^_m / sum_e m_e and w_e = W^_m / sum_e m_e, which reproduce the totals and hence
+the direct_mg and aux_mg costs exactly; the AE routes use alpha_X, not v_e. The estimate
+is unbiased over subsets (exactly so for exact pair sums; tests/test_ft_scaling.py). The
+variances are usually taken at the HF determinant (F24 (i)).
+
 Biases
 ------
 * Aux route (:func:`aux_bias_curve`): ||routes.aux_residual(delta, "exact") -
@@ -115,6 +127,7 @@ __all__ = [
     "allowed_elements",
     "element_normalizations",
     "element_variances",
+    "variance_totals_subset",
     "aux_bias_curve",
     "factorization_bias",
     "energy_variances",
@@ -286,6 +299,54 @@ def element_variances(active: ActiveSpace, ci: np.ndarray, elements: np.ndarray,
             "w_aux": _W_DELTA ** 2 * np.asarray(av.per_target, dtype=float),
             "method": dv.method, "n_settings": int(dv.n_samples) if rb else None,
             "seed": params.seed if rb else None, "delta_aux": _W_DELTA}
+
+
+def variance_totals_subset(active: ActiveSpace, ci: np.ndarray, elements: np.ndarray, kind: str, *,
+                           k_subset: int = 100, seed: int = 11,
+                           params: FTParameters = FTParameters()) -> dict:
+    """F24 (ii): V_m and W_m from the per-shot variances of a uniform random subset of ``elements``.
+
+    The subset is ``np.random.default_rng(seed).choice(K, min(k_subset, K), replace=False)``
+    (sorted); its variances come from :func:`element_variances` at ``ci`` (with ``params``).
+    Returns the format of :func:`element_variances`, with uniform per-element values, so the
+    dict serves as ``variances`` of :func:`build_problem` (module docstring):
+
+    * ``v_direct`` (K,) = V^_m / sum_e m_e and ``w_aux`` (K,) = W^_m / sum_e m_e;
+    * ``variance_m`` = V^_m = (K/K_s) sum_{e in S} m_e v_e (Ha^2) and ``stderr_m`` its sampling
+      standard error (K/K_s) sqrt(K_s) sd(m_e v_e) sqrt(1 - K_s/K) (0 for K_s = K);
+      ``stderr`` (K,) = stderr_m / sum_e m_e;
+    * ``w_aux_m`` = W^_m and ``w_stderr_m`` its sampling standard error;
+    * ``stderr_m_estimator``: (K/K_s) times the subset's own ``stderr_m`` (Rao-Blackwellized
+      sampling of its variances; 0 for exact pair sums), not included in ``stderr_m``;
+    * ``method`` = "subset" and ``subset_method`` the subset's "exact" or "rb";
+      ``n_settings``, ``seed`` and ``delta_aux`` as in :func:`element_variances`;
+    * ``subset`` (K_s,) the element indices, ``k_subset``, ``subset_seed`` and ``n_elements``.
+    """
+    el = _elements(active, elements, kind)
+    k = el.shape[0]
+    k_s = int(k_subset)
+    if k_s != k_subset or k_s < 2:
+        raise ValueError(f"k_subset must be an integer >= 2 (a standard deviation), got {k_subset!r}")
+    k_s = min(k_s, k)
+    m = targets.element_multiplicities(el, kind, active.norb).astype(float)
+    sub = np.sort(np.random.default_rng(seed).choice(k, size=k_s, replace=False))
+    vs = element_variances(active, ci, el[sub], kind, params=params)
+    scale, fpc = k / k_s, math.sqrt(max(0.0, 1.0 - k_s / k))
+    x_v = m[sub] * vs["v_direct"]
+    x_w = m[sub] * vs["w_aux"]
+    vm, wm = scale * float(np.sum(x_v)), scale * float(np.sum(x_w))
+    if k_s == k:                    # the full set: no sampling error
+        se_v = se_w = 0.0
+    else:
+        se_v = scale * math.sqrt(k_s) * float(np.std(x_v, ddof=1)) * fpc
+        se_w = scale * math.sqrt(k_s) * float(np.std(x_w, ddof=1)) * fpc
+    m_total = float(np.sum(m))
+    return {"v_direct": np.full(k, vm / m_total), "stderr": np.full(k, se_v / m_total),
+            "variance_m": vm, "stderr_m": se_v, "w_aux": np.full(k, wm / m_total), "w_aux_m": wm,
+            "w_stderr_m": se_w, "stderr_m_estimator": scale * float(vs["stderr_m"]),
+            "method": "subset", "subset_method": vs["method"], "n_settings": vs["n_settings"],
+            "seed": vs["seed"], "delta_aux": vs["delta_aux"], "subset": sub, "k_subset": k_s,
+            "subset_seed": seed, "n_elements": k}
 
 
 # ------------------------------------------------------------------------- biases

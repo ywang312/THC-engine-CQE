@@ -33,7 +33,7 @@ from .integrals import ActiveSpace
 from .optimizers import direction_slope, make_optimizer, structure_error
 from .residual import ResidualData, compute_residual, descent_generator, spin_free_norm
 
-__all__ = ["CQEStep", "CQEResult", "run_cqe", "line_search", "generator_norm_estimate"]
+__all__ = ["CQEStep", "CQEResult", "run_cqe", "line_search", "line_search_step", "generator_norm_estimate"]
 
 # compress(g, residual_data, iteration) -> compressed pair-order coefficients
 Compressor = Callable[[np.ndarray, ResidualData, int], np.ndarray]
@@ -305,6 +305,22 @@ def _krylov_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: floa
             return eps, e, normalize(prop.state(eps)), n_evals, None
         eps_max *= 2.0  # the minimum is on the edge of the bracket: enlarge it
     return eps, e, normalize(prop.state(eps)), n_evals, None
+
+
+def line_search_step(ham: Hamiltonian, g: np.ndarray, psi: np.ndarray, eps_max: float,
+                     tol: float) -> tuple[float, float, np.ndarray]:
+    """The exact line search of :func:`run_cqe` along exp(eps G) psi, G = sum g e_{pq,rs}.
+
+    Returns (eps, E(eps), the normalized exp(eps G) psi): the minimum of the exact energy on
+    the Krylov representation of the line (grid on [0, eps_max] and bounded Brent
+    refinement, :func:`line_search`; the bracket doubles while the minimum lies on its
+    edge, at most six times), with Krylov tolerance ``tol``. ``run_cqe`` calls it with
+    eps_max = 1.5/||G|| (``generator_norm_estimate(ham.space, g, psi)``) and
+    ``tol = krylov_tol`` (default 1e-10); with the same inputs the result is the same bit for
+    bit. ``psi`` must be normalized; ``g`` is the direction d of the step.
+    """
+    eps, e, psi_new, _, _ = _krylov_step(ham, g, psi, eps_max, tol)
+    return eps, e, psi_new
 
 
 def run_cqe(active: ActiveSpace, ci0: np.ndarray | None = None, max_iter: int = 30,

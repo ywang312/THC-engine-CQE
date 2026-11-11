@@ -161,6 +161,7 @@ __all__ = [
     "layout",
     "lpt_makespan",
     "Campaign",
+    "route_campaigns",
     "machines_for_campaigns",
     "IterationCost",
     "iteration_costs",
@@ -308,6 +309,10 @@ def _route_campaigns(cost: RouteCost, params: FTParameters, model: SurfaceCodeMo
     rate = per.us_per_toffoli * 1e-6
     runs = tuple(sorted((t * rate for t in cost.run_toffolis), reverse=True))
     return (Campaign(cost.route, cost.n_runs, per, cost.toffolis * rate, identical=False, runs_s=runs),)
+
+
+#: Public name of the campaign builder of a residual route (F19), the same object.
+route_campaigns = _route_campaigns
 
 
 def machines_for_campaigns(campaigns: Sequence[Campaign], deadline_s: float = SECONDS_PER_WEEK) -> int | None:

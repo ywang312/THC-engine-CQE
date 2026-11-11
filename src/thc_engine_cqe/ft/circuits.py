@@ -64,8 +64,8 @@ diagonal of phases [Clements et al., Optica 3, 1460 (2016); Kivlichan et al., PR
 A real orthogonal V gives phi = 0 and phases +-1, i.e. real rotations only. This is the
 rotation count g of F4 (per spin).
 
-Compiled elementwise replay (:func:`replay_elementwise`, F3)
------------------------------------------------------------
+Compiled elementwise replay (:func:`replay_elementwise`, :func:`compiled_step`, F3)
+-----------------------------------------------------------------------------------
 The Fock-space oracle ``testing.fock.FockSpace`` (no PySCF CI machinery) prepares HF
 and applies each step as the product of its kept excitations
 (``stateprep.elementwise_excitations``: masked, rounding fixed point, decreasing angle).
@@ -83,7 +83,11 @@ the Fock space and conserves N and S_z, so ||Psi~_k|| = 1 up to round-off, and a
 deficit would be leakage out of the (n_alpha, n_beta) sector. Directions are real
 (F3), so the kept excitations are doubles and singles with real amplitudes. The oracle
 is dense in 4^N; ``testing.fock`` allows N <= 8, so all seven benchmark systems replay
-(H8, 65536 states, in about 0.35 s per RHF step).
+(H8, 65536 states, in about 0.35 s per RHF step). :func:`compiled_step` is the loop body
+for one step from any CI array (a closed loop measures its next residual on the compiled
+state, and s slices of a step are s calls at eps/s); K successive calls from HF give the
+replay's states to round-off (the CI <-> Fock maps are exact on the (n_alpha, n_beta)
+sector; tested).
 
 Observed (exact L-BFGS trajectories on the symmetry-adapted builds, rounded circuits,
 open loop, one thread; tests/test_ft_circuits.py). After the RHF step:
@@ -111,6 +115,7 @@ exact k* (3, 6, 3, 2 for H4, H6, N2, LiH).
 
 from __future__ import annotations
 
+import functools
 import math
 from typing import Sequence
 
@@ -129,6 +134,7 @@ __all__ = [
     "givens_decomposition",
     "givens_reconstruct",
     "replay_elementwise",
+    "compiled_step",
 ]
 
 _H = np.array([[1.0, 1.0], [1.0, -1.0]]) / math.sqrt(2.0)
@@ -363,6 +369,44 @@ def replay_elementwise(active: ActiveSpace, directions: Sequence[np.ndarray], ep
             v = v + math.sin(theta) * kv + (1.0 - math.cos(theta)) * _k_apply(cre, ann, x, kv)
         states.append(fock.to_ci(v, nelec))
     return states
+
+
+@functools.lru_cache(maxsize=4)
+def _fock_ladders(norb: int) -> tuple[FockSpace, tuple, tuple]:
+    """The Fock-space oracle of ``norb`` orbitals and its ladder operators, by mode (cached per norb)."""
+    fock = FockSpace(norb)
+    ann = tuple(fock.a(mode % norb, mode // norb) for mode in range(2 * norb))
+    return fock, ann, tuple(a.T.tocsr() for a in ann)
+
+
+def compiled_step(active: ActiveSpace, ci: np.ndarray, d: np.ndarray, eps: float, *,
+                  irreps: np.ndarray | None = None, rounded: bool = True,
+                  params: FTParameters = FTParameters()) -> np.ndarray:
+    """The compiled elementwise circuit of one step (d, eps) applied to the CI array ``ci`` (F3).
+
+    The loop body of :func:`replay_elementwise`: the kept excitations of
+    ``stateprep.elementwise_excitations(d, eps, irreps=irreps, params=params)`` (masked,
+    rounding fixed point, decreasing angle), each applied exactly on the Fock-space oracle
+    with the b-bit rounded angle (``rounded=True``) or the exact one. ``ci`` is a CI array
+    of ``active`` (or its ravel), real or complex, not renormalized (every factor is
+    unitary); N <= 8 orbitals. Returns the CI array (n_alpha_strings, n_beta_strings) of the
+    compiled state, in PySCF's determinant basis.
+    """
+    space = FCISpace.of(active)
+    c = np.asarray(ci)
+    if c.shape not in (space.shape, (space.size,)):
+        raise ValueError(f"ci has shape {c.shape}, expected {space.shape} or its ravel")
+    n, nelec = active.norb, tuple(active.nelec)
+    fock, ann, cre = _fock_ladders(n)
+    v = fock.from_ci(c.reshape(space.shape), nelec)
+    kept, b = elementwise_excitations(d, eps, irreps=irreps, params=params)
+    for x in kept:
+        theta = abs(x.amplitude)
+        if rounded:
+            theta = 2.0 * math.pi * round_angle(theta, b) / 2.0 ** b
+        kv = _k_apply(cre, ann, x, v)
+        v = v + math.sin(theta) * kv + (1.0 - math.cos(theta)) * _k_apply(cre, ann, x, kv)
+    return np.array(fock.to_ci(v, nelec))
 
 
 def _k_apply(cre: list, ann: list, exc: Excitation, u: np.ndarray) -> np.ndarray:

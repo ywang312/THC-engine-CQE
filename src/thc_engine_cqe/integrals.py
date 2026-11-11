@@ -169,6 +169,10 @@ class ActiveSpace:
             nelecas: active electrons, int or (n_alpha, n_beta) (default: all).
             mo_coeff: orbitals to use instead of ``mf.mo_coeff`` (e.g. CASSCF or
                 natural orbitals). Core orbitals are taken from the first columns.
+
+        Raises ValueError if the ncore = (n_elec - nelecas)/2 core orbitals and the ncas
+        active ones do not fit in the MOs (e.g. CAS(8,8) of N2 in STO-3G: 3 + 8 > 10);
+        PySCF would otherwise return integrals of a silently truncated active space.
         """
         from pyscf import ao2mo, mcscf
 
@@ -179,6 +183,9 @@ class ActiveSpace:
         if nelecas is None:
             nelecas = mol.nelec
         mc = mcscf.CASCI(mf, ncas, nelecas)
+        if mc.ncore + ncas > nmo:
+            raise ValueError(f"ncore + ncas = {mc.ncore} + {ncas} = {mc.ncore + ncas} exceeds the {nmo} molecular "
+                             f"orbitals (CAS({sum(mc.nelecas)},{ncas}) of {mol.nelectron} electrons)")
         if mo_coeff is not None:
             mc.mo_coeff = mo_coeff
         h1, ecore = mc.get_h1eff()
