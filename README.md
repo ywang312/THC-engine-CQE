@@ -73,6 +73,56 @@ Results and conclusions of M3 are in [docs/m3-results.md](docs/m3-results.md); t
 model (parameters, formulas F1–F19, reference numbers) is in
 [docs/m3-cost-model.md](docs/m3-cost-model.md).
 
+## Status: milestone 4 (complete)
+
+M4 asks where M3's verdict, that no measured CQE iteration pays as a state preparer for
+QPE at equilibrium, changes: on overlap-limited systems (hydrogen chains to n = 10,
+stretched N2), with step rules that measure no energies, in a closed-loop finite-shot
+fault-tolerant CQE, under an E1-referenced hand-off rule and QPE-side amplification
+schemes, and for ground-state properties against QPE.
+
+| Component | Module | State |
+|---|---|---|
+| Unit-step, line-search, grid and gated 3-point-fit step rules with safeguards | `steprules` | done |
+| Fault-tolerant costs of the step rules, the energy-precision wall | `ft.steprules` | done |
+| Closed-loop finite-shot CQE: estimators, controllers, replicates, paired verdicts | `ft.closedloop` | done |
+| Overlap, gap and cost scaling, break-even sizes, compiled overlaps, stage cache | `ft.scaling` | done |
+| Windowed QPE outcome laws, model spectra of H′, the E1-referenced acceptance rule B | `ft.acceptance` | done |
+| Sector levels, truncated-CI bounds, contaminant weights, energy certificates | `ft.certify` | done |
+| QPE-side schemes: amplitude amplification, step filters, two-stage QPE | `ft.amplify` | done |
+| Ground-state properties: the CQE iterate against QPE-projected copies and Hellmann–Feynman QPE | `ft.properties` | done |
+
+In short (costs in units of one QPE, C_QPE; r is the relative error of the measured
+residual):
+
+- At equilibrium M3's verdict holds at r ≤ 1 and in the closed loop (the one exception,
+  h4's spin-free unit step at r = 3 on a noise-free trajectory, gains 0.0163%).
+- Without the line search the cheapest measured iteration, a unit step after the free
+  classical step, costs 0.0184–519 C_QPE at r = 1. At the best realizable QPE-side scheme
+  it pays on exact trajectories at r ≤ 1 only on H4 at 3.5–4.0 bohr and H6 at 4.0 bohr,
+  and in the closed loop's deciding cells only on H4 at 4.0 bohr and, narrowly, on N2 at
+  2.8 Å. These pays are fragile: on H4 at 3.5 bohr, the one certified hand-off among them,
+  the gain comes mostly from the overshoot of the exponential search; elsewhere they rest
+  on hand-offs whose termination is not certified, and at 4.0 bohr the iteration mostly
+  repairs an overshooting free step. The second measured iteration pays at the best scheme
+  on no exact trajectory and in no deciding cell.
+- On N2 at 2.0–2.8 Å the large lever is the QPE side: a step filter with exponential
+  search, again without certified termination, cuts the HF hand-off from 3.939–12.8 C_QPE
+  (M3's uncertified oracle rule E) to 1.466–1.885. Rule B, given an assumed lower bound on
+  E₁, gives every exact hand-off state a realizable acceptance at M3's oracle cost plus
+  one C_QPE per verification run (on nine stretched systems without a certificate and with
+  termination not certified); on M3's systems it buys soundness, not a cheaper hand-off.
+- Beyond the computed sizes (n ≤ 10) the chains' overlap catastrophe outgrows the cost of
+  the first measured iteration only from n* = 86 (repetition) or 166 (best scheme) at
+  r = 1, at overlaps ≤ 1.5e-5 and outside the sizes at which the kernel-aware form of
+  rule B can still certify a 1-mHa hand-off: a model extrapolation.
+- For ground-state properties the CQE iterate is the cheapest estimator on most (system,
+  target) pairs only with a free loop.
+
+Results and conclusions of M4 are in [docs/m4-results.md](docs/m4-results.md); the cost
+model (parameters, formulas F20–F53, reference numbers) is in
+[docs/m4-cost-model.md](docs/m4-cost-model.md).
+
 ## Install
 
 ```bash
@@ -161,6 +211,16 @@ M3 (needs the `ft` extra):
 .venv/bin/python benchmarks/run_ft_pipeline.py --threads 1 --out results/
 ```
 
+M4 (needs the `ft` extra; the summary reads the other four outputs and runs last):
+
+```bash
+.venv/bin/python benchmarks/run_m4_scaling.py --out results/m4
+.venv/bin/python benchmarks/run_m4_loop.py --out results/m4
+.venv/bin/python benchmarks/run_m4_handoff.py --m3-results results --out results/m4
+.venv/bin/python benchmarks/run_m4_properties.py --out results/m4
+.venv/bin/python benchmarks/run_m4_summary.py --out results/m4
+```
+
 Each writes JSON and markdown tables to `results/` (not tracked). Approximate
 single-thread runtimes:
 
@@ -173,8 +233,22 @@ single-thread runtimes:
 | `run_measurement.py` | about 1 hour (H6 alone half of it); `--quick` < 2 minutes |
 | `run_sampled_cqe.py` | about 65 minutes; `--quick` < 3 minutes |
 | `run_ft_pipeline.py` | about 5–6 minutes; `--systems h4` about 15 s |
+| `run_m4_scaling.py` | about 75 minutes |
+| `run_m4_loop.py` | about 75 minutes |
+| `run_m4_handoff.py` | about 25 minutes |
+| `run_m4_properties.py` | about 5 minutes |
+| `run_m4_summary.py` | about 6 minutes |
 
 `--threads 1` pins the BLAS and PySCF threads, so the numbers are reproducible.
+
+The M4 scripts write to `results/m4/` and cache their stages in `results/m4/cache`, so an
+interrupted run resumes: `run_m4_scaling.py --systems <s> --stage <stage>` computes one
+stage per process, and `run_m4_loop.py --resume` reloads the finished systems.
+`--m3-results results` reads M3's `results/ft_<system>.json`; without it the hand-off
+benchmark recomputes M3's records. Each script has `--quick` for a small system set. The
+M4 scripts take no `--threads`: they set OMP_NUM_THREADS, OPENBLAS_NUM_THREADS and
+MKL_NUM_THREADS to 1 themselves. Their runtimes above were measured on one thread at a
+load of about 2.
 
 ## Conventions
 
