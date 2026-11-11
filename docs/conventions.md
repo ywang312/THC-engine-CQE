@@ -17,12 +17,12 @@ below.
 
 ## Operators
 
-- One-body: E_pq = Σ_σ a†_{pσ} a_{qσ}.
+- One-body: E\_pq = Σ\_σ a†\_{pσ} a\_{qσ}.
 - Two-body, normal-ordered and spin-free:
 
-  e_{pq,rs} = Σ_{στ} a†_{pσ} a†_{rτ} a_{sτ} a_{qσ} = E_pq E_rs − δ_qr E_ps.
+  e\_{pq,rs} = Σ\_{στ} a†\_{pσ} a†\_{rτ} a\_{sτ} a\_{qσ} = E\_pq E\_rs − δ\_qr E\_ps.
 
-  Pair exchange leaves it unchanged (e_{pq,rs} = e_{rs,pq}), and its adjoint is e_{pq,rs}† = e_{qp,sr}.
+  Pair exchange leaves it unchanged (e\_{pq,rs} = e\_{rs,pq}), and its adjoint is e\_{pq,rs}† = e\_{qp,sr}.
 - Hamiltonian:
 
   H = ecore + Σ_pq h_pq E_pq + ½ Σ_pqrs (pq|rs) e_{pq,rs}.
@@ -58,7 +58,7 @@ operator e_{pq,rs}. This is PySCF's order:
 **Normalization:** no factor of ½. The trace is Σ_pq dm2[p,p,q,q] = N(N−1). If
 your code uses ²D with a 1/2! prefactor (trace N(N−1)/2), multiply by ½.
 
-**Mazziotti index order:** ²D^{ij}_{kl} = ⟨a†_i a†_j a_l a_k⟩ in spin orbitals.
+**Mazziotti index order:** ²D^{ij}\_{kl} = ⟨a†\_i a†\_j a\_l a\_k⟩ in spin orbitals.
 Summing over spin, with i,k sharing one spin and j,l the other, gives
 
   ²D^{ij}_{kl} (spin-summed) = dm2[i, k, j, l].
@@ -94,7 +94,7 @@ directions bit for bit. On tensors with the structure of A, M is symmetric
 positive definite, with eigenvalue 1 on T = +1 (singlet-coupled pairs) and 1/3 on
 T = −1 (triplet-coupled pairs). For a singlet state
 
-  Σ_{ijkl} conj(²A^{ij}_{kl}) a†_i a†_j a_l a_k = Σ_pqrs [M g]_pqrs e_{pq,rs},  ²A^{ij}_{kl} = ⟨[a†_i a†_j a_l a_k, H]⟩,
+  Σ\_{ijkl} conj(²A^{ij}\_{kl}) a†\_i a†\_j a\_l a\_k = Σ\_pqrs [M g]\_pqrs e\_{pq,rs},  ²A^{ij}\_{kl} = ⟨[a†\_i a†\_j a\_l a\_k, H]⟩,
 
 with i, j, k, l running independently over all 2N spin orbitals and no
 prefactor: the full-sum convention. So steepest descent with this metric is the
@@ -117,7 +117,7 @@ non-singlet state Σ (M g)·e is only the spin average of the spin-orbital
 generator, and that generator does not commute with S². The same holds for an
 estimated residual: if A_est is the spin contraction
 (`measure.targets.contract_spin`) of a spin-orbital estimate ²A_est, then
-Σ (M conj(A_est))·e is the spin average of Σ conj(²A_est^{ij}_{kl}) a†_i a†_j a_l a_k
+Σ (M conj(A\_est))·e is the spin average of Σ conj(²A\_est^{ij}\_{kl}) a†\_i a†\_j a\_l a\_k
 for any state and any estimation error, not that estimated generator itself. With
 `run_cqe(..., eps_candidates=...)` each step instead takes the lowest energy among
 a few fixed step sizes, as a hardware run would; such steps can raise the energy.
@@ -204,10 +204,10 @@ the essentials:
   bit-reversed index.
 - **Pauli strings.** P(x, z) = i^{|x∧z|} X^x Z^z for bitmasks x, z, so
   P(1,1) = Y on one qubit and every P is Hermitian.
-- **Jordan–Wigner.** a_k = Z_{<k}(X_k + iY_k)/2. Majoranas γ_{2k} = Z_{<k}X_k and
-  γ_{2k+1} = Z_{<k}Y_k.
+- **Jordan–Wigner.** a\_k = Z\_{<k}(X\_k + iY\_k)/2. Majoranas γ\_{2k} = Z\_{<k}X\_k and
+  γ\_{2k+1} = Z\_{<k}Y\_k.
 - **CI vectors.** `QubitState.from_ci` maps the PySCF determinant (α string,
-  β string) to (Π_{p∈α↑} a†_{pα})(Π_{q∈β↑} a†_{qβ})|vac⟩. In blocked order that is
+  β string) to (Π\_{p∈α↑} a†\_{pα})(Π\_{q∈β↑} a†\_{qβ})|vac⟩. In blocked order that is
   b = α_bits | (β_bits << N) with sign +1; other orders include the reordering
   sign. `pyscf_sign=True` adds PySCF's global sign (−1)^{nα(nα−1)/2 + nβ(nβ−1)/2}.
 - **Expectations** are the bare ⟨ψ|P|ψ⟩ by default; pass `normalize=True` for

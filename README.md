@@ -254,7 +254,7 @@ load of about 2.
 
 See [docs/conventions.md](docs/conventions.md). In short, two-body tensors use
 PySCF's pair order, so `X[p,q,r,s]` labels
-e_{pq,rs} = Σ a†_{pσ} a†_{rτ} a_{sτ} a_{qσ}. They carry no factor of ½, and the
+e\_{pq,rs} = Σ a†\_{pσ} a†\_{rτ} a\_{sτ} a\_{qσ}. They carry no factor of ½, and the
 descent generator is g = conj(A). Every convention is tested against an
 independent Jordan–Wigner implementation.
 

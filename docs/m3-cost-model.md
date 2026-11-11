@@ -193,7 +193,7 @@ D_j = Σ d_j e_{pq,rs}) and the step size ε_j:
 
 1. X = `spin_orbital_excitations(ε_j·mask(d_j), tol=1e-12)` (`diagnostics.cost`), the exact
    spin-orbital expansion of the masked generator into excitations t_x τ_x − h.c., with
-   τ_x = a†_{c0}a†_{c1}a_{d1}a_{d0} a normal-ordered two-body operator (a double, a
+   τ\_x = a†\_{c0}a†\_{c1}a\_{d1}a\_{d0} a normal-ordered two-body operator (a double, a
    number-conditioned single or a diagonal) and t_x its amplitude. The relative tolerance commutes
    with the scaling by ε, so d_j is expanded once for every step size.
 2. θ_x = |ε_j t_x|, the Givens angle of exp(ε_j(t_x τ_x − h.c.)).
